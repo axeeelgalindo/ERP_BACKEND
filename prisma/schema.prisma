@@ -1,0 +1,484 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // o "mysql"
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * =========================
+ * EMPRESA / ESTRUCTURA BASE
+ * =========================
+ */
+model Empresa {
+  id             String    @id @default(cuid())
+  nombre         String
+  rut            String?   @db.VarChar(40)
+  correo         String?
+  telefono       String?
+  activa         Boolean   @default(true)
+  creada_en      DateTime  @default(now())
+  actualizada_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  usuarios    Usuario[]
+  clientes    Cliente[]
+  proveedores Proveedor[]
+  productos   Producto[]
+  proyectos   Proyecto[]
+  Cotizacion  Cotizacion[]
+  Venta       Venta[]
+  Compra      Compra[]
+  auditLogs   AuditLog[] // <--- nuevo back-relation
+}
+
+/**
+ * =========================
+ * ROLES DE USUARIO
+ * =========================
+ */
+model RolUsuario {
+  id             String    @id @default(cuid())
+  nombre         String    @unique
+  codigo         String?   @unique
+  descripcion    String?
+  orden          Int?
+  activo         Boolean   @default(true)
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  usuarios Usuario[]
+}
+
+/**
+ * =========================
+ * USUARIOS / RRHH
+ * =========================
+ */
+model Usuario {
+  id         String     @id @default(cuid())
+  empresa_id String
+  empresa    Empresa    @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  rol_id     String
+  rol        RolUsuario @relation(fields: [rol_id], references: [id], onDelete: Cascade)
+
+  nombre         String
+  // (Opcional) permite reusar correo tras soft-delete
+  correo         String
+  contrasena     String
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  empleado              Empleado?
+  rendiciones_revisadas Rendicion[] // <--- revisa/aprueba rendiciones
+  auditLogs             AuditLog[] // <--- acciones en el sistema
+
+  @@unique([correo, eliminado]) // <- si NO quieres esto, vuelve a `@unique` simple
+}
+
+model Empleado {
+  id             String    @id @default(cuid())
+  usuario_id     String?   @unique
+  usuario        Usuario?  @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+  cargo          String?
+  telefono       String?
+  fecha_ingreso  DateTime?
+  sueldo_base    Int?
+  activo         Boolean   @default(true)
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  Rendicion Rendicion[]
+  proyectos ProyectoMiembro[] // M:N
+  tareas    Tarea[] // responsable
+}
+
+/**
+ * =========================
+ * CLIENTES / PROVEEDORES
+ * =========================
+ */
+model Cliente {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  nombre         String
+  rut            String?   @db.VarChar(40)
+  correo         String?
+  telefono       String?
+  notas          String?
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  cotizaciones Cotizacion[]
+  ventas       Venta[]
+
+  @@unique([correo, eliminado]) // opcional
+  @@index([empresa_id])
+}
+
+model Proveedor {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  nombre         String
+  rut            String?   @db.VarChar(40)
+  correo         String?
+  telefono       String?
+  notas          String?
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  compras Compra[]
+
+  @@unique([correo, eliminado]) // opcional
+  @@index([empresa_id])
+}
+
+/**
+ * =========================
+ * PRODUCTOS
+ * =========================
+ */
+model Producto {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  nombre         String
+  sku            String?
+  precio         Float
+  stock          Int       @default(0)
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  cotizaciones CotizacionItem[]
+  ventas       VentaItem[]
+  compras      CompraItem[]
+
+  @@unique([sku, eliminado]) // opcional
+  @@index([empresa_id])
+}
+
+/**
+ * =========================
+ * PROYECTOS
+ * =========================
+ */
+model Proyecto {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  nombre         String
+  descripcion    String?
+  presupuesto    Float?
+  estado         String    @default("activo")
+  creada_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  cotizaciones Cotizacion[]
+  ventas       Venta[]
+  compras      Compra[]
+  rendiciones  Rendicion[]
+
+  tareas   Tarea[]
+  miembros ProyectoMiembro[]
+
+  @@index([empresa_id])
+}
+
+model ProyectoMiembro {
+  id          String   @id @default(cuid())
+  proyecto_id String
+  empleado_id String
+  rol         String?
+  creado_en   DateTime @default(now())
+
+  proyecto Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  empleado Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+
+  @@unique([proyecto_id, empleado_id])
+  @@index([empleado_id])
+}
+
+/**
+ * =========================
+ * TAREAS (Planificación/Gantt)
+ * =========================
+ */
+model Tarea {
+  id          String   @id @default(cuid())
+  proyecto_id String
+  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  nombre         String
+  descripcion    String?
+  responsable_id String?
+  responsable    Empleado? @relation(fields: [responsable_id], references: [id], onDelete: SetNull)
+
+  prioridad Int?
+  estado    String  @default("pendiente")
+  avance    Int     @default(0)
+  es_hito   Boolean @default(false)
+  orden     Int?
+
+  fecha_inicio_plan DateTime
+  fecha_fin_plan    DateTime
+  dias_plan         Int?
+
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  dependencias TareaDependencia[] @relation("TareaDependencias")
+  sucesoras    TareaDependencia[] @relation("TareaPredecesoras")
+
+  @@index([proyecto_id])
+  @@index([responsable_id])
+  @@index([estado])
+}
+
+model TareaDependencia {
+  id             String  @id @default(cuid())
+  tarea_id       String
+  predecesora_id String
+  tipo           String? // "FS"
+
+  tarea       Tarea @relation("TareaDependencias", fields: [tarea_id], references: [id], onDelete: Cascade)
+  predecesora Tarea @relation("TareaPredecesoras", fields: [predecesora_id], references: [id], onDelete: Cascade)
+
+  @@unique([tarea_id, predecesora_id])
+  @@index([predecesora_id])
+}
+
+/**
+ * =========================
+ * VENTAS / COTIZACIONES
+ * =========================
+ */
+model Cotizacion {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id    String
+  proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  cliente_id     String
+  cliente        Cliente   @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
+  numero         Int       @default(autoincrement()) @unique
+  estado         String    @default("borrador")
+  total          Float     @default(0)
+  creada_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  items  CotizacionItem[]
+  ventas Venta[]
+
+  @@index([empresa_id])
+  @@index([proyecto_id])
+}
+
+model CotizacionItem {
+  id            String     @id @default(cuid())
+  cotizacion_id String
+  cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
+  producto_id   String?
+  producto      Producto?  @relation(fields: [producto_id], references: [id], onDelete: SetNull)
+  cantidad      Int
+  precio_unit   Float
+  total         Float
+
+  @@index([cotizacion_id])
+}
+
+model Venta {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id    String
+  proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  cliente_id     String
+  cliente        Cliente   @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
+  numero         String    @unique
+  estado         String    @default("pendiente")
+  total          Float     @default(0)
+  creada_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  cotizacion_id String?
+  cotizacion    Cotizacion? @relation(fields: [cotizacion_id], references: [id])
+
+  items VentaItem[]
+
+  @@index([empresa_id])
+  @@index([proyecto_id])
+}
+
+model VentaItem {
+  id          String    @id @default(cuid())
+  venta_id    String
+  venta       Venta     @relation(fields: [venta_id], references: [id], onDelete: Cascade)
+  producto_id String?
+  producto    Producto? @relation(fields: [producto_id], references: [id], onDelete: SetNull)
+  cantidad    Int
+  precio_unit Float
+  total       Float
+
+  @@index([venta_id])
+}
+
+model Compra {
+  id             String    @id @default(cuid())
+  empresa_id     String
+  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id    String
+  proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  proveedor_id   String
+  proveedor      Proveedor @relation(fields: [proveedor_id], references: [id], onDelete: Cascade)
+  numero         String    @unique
+  estado         String    @default("pendiente")
+  total          Float     @default(0)
+  creada_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  // soft delete
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  items CompraItem[]
+
+  @@index([empresa_id])
+  @@index([proyecto_id])
+}
+
+model CompraItem {
+  id          String    @id @default(cuid())
+  compra_id   String
+  compra      Compra    @relation(fields: [compra_id], references: [id], onDelete: Cascade)
+  producto_id String?
+  producto    Producto? @relation(fields: [producto_id], references: [id], onDelete: SetNull)
+  cantidad    Int
+  precio_unit Float
+  total       Float
+
+  @@index([compra_id])
+}
+
+/**
+ * =========================
+ * RENDICIONES
+ * =========================
+ */
+model Rendicion {
+  id          String   @id @default(cuid())
+  empleado_id String
+  empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+
+  proyecto_id String
+  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  descripcion    String
+  monto_total    Float    @default(0)
+  estado         String   @default("pendiente") // "pendiente" | "aprobada" | "rechazada"
+  creada_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  // revisión / aprobación
+  revisada_por_id     String?
+  revisada_por        Usuario?  @relation(fields: [revisada_por_id], references: [id], onDelete: SetNull)
+  fecha_revision      DateTime?
+  comentario_revision String?
+
+  // soft delete
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
+
+  items RendicionItem[]
+
+  @@index([proyecto_id])
+  @@index([estado])
+  @@index([revisada_por_id])
+}
+
+model RendicionItem {
+  id           String    @id @default(cuid())
+  rendicion_id String
+  rendicion    Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
+
+  linea           Int
+  fecha           DateTime
+  descripcion     String
+  monto           Float
+  categoria       String?
+  comprobante_url String?
+
+  creado_en DateTime @default(now())
+
+  @@unique([rendicion_id, linea])
+  @@index([rendicion_id])
+}
+
+/**
+ * =========================
+ * AUDITORÍA / HISTORIAL
+ * =========================
+ */
+model AuditLog {
+  id String @id @default(cuid())
+
+  empresa_id String?
+  empresa    Empresa? @relation(fields: [empresa_id], references: [id], onDelete: SetNull)
+
+  usuario_id String?
+  usuario    Usuario? @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+
+  entidad     String // "Proyecto", "Tarea", "Rendicion", etc.
+  registro_id String // id del registro afectado
+  accion      String // "CREATE", "UPDATE", "DELETE", "CAMBIO_ESTADO", etc.
+
+  detalles   Json?
+  ip         String?
+  user_agent String?
+
+  creado_en DateTime @default(now())
+
+  @@index([empresa_id])
+  @@index([usuario_id])
+  @@index([entidad, registro_id])
+  @@index([accion])
+  @@index([creado_en])
+}
