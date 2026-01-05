@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import sensible from "@fastify/sensible";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
+import fastifyMultipart from "@fastify/multipart";
 import { PrismaClient } from "@prisma/client";
 
 import authz from "./src/lib/authz.js";     // 👈 ruta correcta
@@ -20,6 +21,13 @@ await server.register(cors, {
   allowedHeaders: ["Content-Type", "Authorization", "x-empresa-id"],
   exposedHeaders: [],
   maxAge: 86400,
+});
+
+// 👇 IMPORTANTE: registrar multipart ANTES de las rutas que lo usan
+await server.register(fastifyMultipart, {
+  limits: {
+    fileSize: 20 * 1024 * 1024, // 20 MB
+  },
 });
 
 // 👇 Debe ir ANTES del Router (crea server.authenticate)

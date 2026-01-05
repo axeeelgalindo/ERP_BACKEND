@@ -1,389 +1,525 @@
-/* eslint-disable no-console */
-const { PrismaClient } = require("@prisma/client");
-const crypto = require("node:crypto");
+// prisma/seed.js
+import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
+
 const prisma = new PrismaClient();
 
-/* ===== utils ===== */
-const hash = (txt) => crypto.createHash("sha256").update(String(txt)).digest("hex");
-const round2 = (n) => Math.round(n * 100) / 100;
-const daysBetween = (a, b) => Math.max(1, Math.ceil((b - a) / (1000 * 60 * 60 * 24)));
-
 async function main() {
-  console.log("🌱 Seed ERP…");
+  console.log("🧨 Reiniciando base de datos ERP…");
 
-  const MASTER_EMAIL = process.env.MASTER_EMAIL || "master@blueinge.cl";
-  const MASTER_PASS  = process.env.MASTER_PASS  || "cambia_esta_clave";
+  // =========================
+  // BORRAR TODO (orden FK)
+  // =========================
+  await prisma.auditLog.deleteMany();
+  await prisma.rendicionItem.deleteMany();
+  await prisma.rendicion.deleteMany();
 
-  /* ========== Empresa MASTER (sistema) ========== */
-  const empresaMaster = await prisma.empresa.upsert({
-    where: { id: "empresa_master_global" },
-    update: {},
-    create: {
-      id: "empresa_master_global",
-      nombre: "Sistema (MASTER)",
-      correo: "no-reply@sistema.local",
+  await prisma.compraItem.deleteMany();
+  await prisma.compra.deleteMany();
+
+  await prisma.ventaItem.deleteMany();
+  await prisma.venta.deleteMany();
+
+  await prisma.cotizacionItem.deleteMany();
+  await prisma.cotizacion.deleteMany();
+
+  await prisma.tareaDependencia.deleteMany();
+  await prisma.tareaDetalle.deleteMany();
+  await prisma.tarea.deleteMany();
+  await prisma.proyectoMiembro.deleteMany();
+  await prisma.proyecto.deleteMany();
+
+  await prisma.producto.deleteMany();
+  await prisma.proveedor.deleteMany();
+  await prisma.cliente.deleteMany();
+
+  // Remuneraciones / HH
+  await prisma.empleadoRemuneracionConcepto.deleteMany();
+  await prisma.empleadoRemuneracion.deleteMany();
+  await prisma.remuneracionPeriodo.deleteMany();
+  await prisma.hHConfig.deleteMany();
+
+  await prisma.empleado.deleteMany();
+  await prisma.usuario.deleteMany();
+  await prisma.rolUsuario.deleteMany();
+  await prisma.empresa.deleteMany();
+
+  console.log("✅ Datos anteriores eliminados.");
+
+  // =========================
+  // EMPRESA
+  // =========================
+  const empresa = await prisma.empresa.create({
+    data: {
+      nombre: "Blueinge SpA",
+      rut: "77.777.777-7",
+      correo: "contacto@blueinge.com",
+      telefono: "+56 9 1234 5678",
       activa: true,
     },
   });
 
-  /* ========== Empresa demo ========== */
-  const empresa = await prisma.empresa.upsert({
-    where: { id: "empresa_unica_demo" },
-    update: {},
-    create: {
-      id: "empresa_unica_demo",
-      nombre: "Blueinge SpA",
-      rut: "77.123.456-7",
-      correo: "contacto@blueinge.cl",
-      telefono: "+56 9 1234 5678",
-    },
-  });
+  console.log("🏢 Empresa creada:", empresa.nombre);
 
-  /* ========== Roles (incluye MASTER) ========== */
-  const roles = await Promise.all([
-    prisma.rolUsuario.upsert({
-      where: { codigo: "MASTER" },
-      update: {},
-      create: { nombre: "Master", codigo: "MASTER", descripcion: "Superusuario global" },
-    }),
-    prisma.rolUsuario.upsert({
-      where: { codigo: "ADMIN" },
-      update: {},
-      create: { nombre: "Administrador", codigo: "ADMIN", descripcion: "Acceso total" },
-    }),
-    prisma.rolUsuario.upsert({
-      where: { codigo: "SUP" },
-      update: {},
-      create: { nombre: "Supervisor", codigo: "SUP", descripcion: "Gestión operativa" },
-    }),
-    prisma.rolUsuario.upsert({
-      where: { codigo: "EMP" },
-      update: {},
-      create: { nombre: "Empleado", codigo: "EMP", descripcion: "Usuario estándar" },
-    }),
+  // =========================
+  // ROLES
+  // =========================
+  const [rolMaster, rolAdmin, rolVentas, rolRRHH, rolBasico] =
+    await Promise.all([
+      prisma.rolUsuario.create({
+        data: {
+          nombre: "Master",
+          codigo: "MASTER",
+          descripcion: "Acceso completo al sistema",
+          orden: 1,
+        },
+      }),
+      prisma.rolUsuario.create({
+        data: {
+          nombre: "Administrador",
+          codigo: "ADMIN",
+          descripcion: "Gestión general de la empresa",
+          orden: 2,
+        },
+      }),
+      prisma.rolUsuario.create({
+        data: {
+          nombre: "Ventas",
+          codigo: "VENTAS",
+          descripcion: "Gestión de cotizaciones y ventas",
+          orden: 3,
+        },
+      }),
+      prisma.rolUsuario.create({
+        data: {
+          nombre: "RRHH",
+          codigo: "RRHH",
+          descripcion: "Gestión de empleados y remuneraciones",
+          orden: 4,
+        },
+      }),
+      prisma.rolUsuario.create({
+        data: {
+          nombre: "Usuario",
+          codigo: "USER",
+          descripcion: "Usuario estándar",
+          orden: 5,
+        },
+      }),
+    ]);
+
+  console.log("👤 Roles creados.");
+
+  // =========================
+  // USUARIOS (LOGIN)
+  // =========================
+  const passwordAdmin = "Admin123*";
+  const passwordVentas = "Ventas123*";
+  const passwordRRHH = "RRHH123*";
+
+  const saltRounds = 10;
+
+  const [
+    adminHash,
+    ventasHash,
+    rrhhHash,
+    usuarioHash,
+  ] = await Promise.all([
+    bcrypt.hash(passwordAdmin, saltRounds),
+    bcrypt.hash(passwordVentas, saltRounds),
+    bcrypt.hash(passwordRRHH, saltRounds),
+    bcrypt.hash("Usuario123*", saltRounds),
   ]);
-  const rolByCode = Object.fromEntries(roles.map((r) => [r.codigo, r]));
 
-  /* ========== Usuario MASTER ========== */
-  await prisma.usuario.upsert({
-    where: { correo: MASTER_EMAIL },
-    update: {},
-    create: {
-      nombre: "Usuario Master",
-      correo: MASTER_EMAIL,
-      contrasena: hash(MASTER_PASS),
-      empresa_id: empresaMaster.id,
-      rol_id: rolByCode.MASTER.id,
-    },
-  });
+  const [userMaster, userVenta1, userRRHH, userConsultor] =
+    await Promise.all([
+      prisma.usuario.create({
+        data: {
+          empresa_id: empresa.id,
+          rol_id: rolMaster.id,
+          nombre: "Axel Delgado",
+          correo: "admin@blueinge.com",
+          contrasena: adminHash,
+        },
+      }),
+      prisma.usuario.create({
+        data: {
+          empresa_id: empresa.id,
+          rol_id: rolVentas.id,
+          nombre: "Camila Fuentes",
+          correo: "camila.ventas@blueinge.com",
+          contrasena: ventasHash,
+        },
+      }),
+      prisma.usuario.create({
+        data: {
+          empresa_id: empresa.id,
+          rol_id: rolRRHH.id,
+          nombre: "Javier Muñoz",
+          correo: "javier.rrhh@blueinge.com",
+          contrasena: rrhhHash,
+        },
+      }),
+      prisma.usuario.create({
+        data: {
+          empresa_id: empresa.id,
+          rol_id: rolBasico.id,
+          nombre: "Daniela Rojas",
+          correo: "daniela@blueinge.com",
+          contrasena: usuarioHash,
+        },
+      }),
+    ]);
 
-  /* ========== Usuarios & Empleados demo ========== */
-  const admin = await prisma.usuario.upsert({
-    where: { correo: "admin@blueinge.cl" },
-    update: {},
-    create: {
-      nombre: "Admin Blueinge",
-      correo: "admin@blueinge.cl",
-      contrasena: hash("admin123"),
-      empresa_id: empresa.id,
-      rol_id: rolByCode.ADMIN.id,
-    },
-  });
+  console.log("🙋 Usuarios creados.");
 
-  const sup = await prisma.usuario.upsert({
-    where: { correo: "supervisor@blueinge.cl" },
-    update: {},
-    create: {
-      nombre: "Sofía Supervisor",
-      correo: "supervisor@blueinge.cl",
-      contrasena: hash("super123"),
-      empresa_id: empresa.id,
-      rol_id: rolByCode.SUP.id,
-    },
-  });
-
-  const emp = await prisma.usuario.upsert({
-    where: { correo: "empleado@blueinge.cl" },
-    update: {},
-    create: {
-      nombre: "Eduardo Empleado",
-      correo: "empleado@blueinge.cl",
-      contrasena: hash("empleado123"),
-      empresa_id: empresa.id,
-      rol_id: rolByCode.EMP.id,
-    },
-  });
-
-  const empAdmin = await prisma.empleado.upsert({
-    where: { usuario_id: admin.id },
-    update: {},
-    create: {
-      usuario_id: admin.id,
-      cargo: "Gerente TI",
-      telefono: "+56 9 1111 1111",
-      sueldo_base: 1800000,
-    },
-  });
-
-  const empSup = await prisma.empleado.upsert({
-    where: { usuario_id: sup.id },
-    update: {},
-    create: {
-      usuario_id: sup.id,
-      cargo: "Jefe de Operaciones",
-      telefono: "+56 9 2222 2222",
-      sueldo_base: 1200000,
-    },
-  });
-
-  const empStd = await prisma.empleado.upsert({
-    where: { usuario_id: emp.id },
-    update: {},
-    create: {
-      usuario_id: emp.id,
-      cargo: "Técnico",
-      telefono: "+56 9 3333 3333",
-      sueldo_base: 800000,
-    },
-  });
-
-  /* ========== Clientes & Proveedores ========== */
-  const clienteA = await prisma.cliente.upsert({
-    where: { correo: "compras@acme.cl" },
-    update: {},
-    create: {
-      empresa_id: empresa.id,
-      nombre: "ACME Ltda.",
-      rut: "76.111.222-3",
-      correo: "compras@acme.cl",
-      telefono: "+56 2 2345 6789",
-      notas: "Cliente corporativo",
-    },
-  });
-
-  const provA = await prisma.proveedor.upsert({
-    where: { correo: "ventas@dist-elec.cl" },
-    update: {},
-    create: {
-      empresa_id: empresa.id,
-      nombre: "Distribuidora Eléctrica",
-      rut: "77.456.789-1",
-      correo: "ventas@dist-elec.cl",
-      telefono: "+56 2 2456 7890",
-      notas: "Despachos en 48h",
-    },
-  });
-
-  /* ========== Productos ========== */
-  const productos = await Promise.all([
-    prisma.producto.upsert({
-      where: { sku: "SW-24P-GIGA" },
-      update: {},
-      create: {
-        empresa_id: empresa.id,
-        nombre: "Switch 24p Gigabit",
-        sku: "SW-24P-GIGA",
-        precio: 169990,
-        stock: 10,
+  // =========================
+  // EMPLEADOS
+  // =========================
+  const [empAxel, empCamila, empJavier, empDaniela] = await Promise.all([
+    prisma.empleado.create({
+      data: {
+        usuario_id: userMaster.id,
+        rut: "19.345.678-5",
+        cargo: "Director de Proyectos",
+        telefono: "+56 9 5555 1111",
+        fecha_ingreso: new Date("2022-01-10"),
+        sueldo_base: 1800000,
+        activo: true,
       },
     }),
-    prisma.producto.upsert({
-      where: { sku: "ROUT-AC1200" },
-      update: {},
-      create: {
-        empresa_id: empresa.id,
-        nombre: "Router AC1200 Dual Band",
-        sku: "ROUT-AC1200",
-        precio: 54990,
-        stock: 40,
+    prisma.empleado.create({
+      data: {
+        usuario_id: userVenta1.id,
+        rut: "18.234.567-4",
+        cargo: "Ejecutiva de Ventas",
+        telefono: "+56 9 5555 2222",
+        fecha_ingreso: new Date("2023-03-01"),
+        sueldo_base: 1200000,
+        activo: true,
+      },
+    }),
+    prisma.empleado.create({
+      data: {
+        usuario_id: userRRHH.id,
+        rut: "17.123.456-3",
+        cargo: "Encargado de RRHH",
+        telefono: "+56 9 5555 3333",
+        fecha_ingreso: new Date("2021-09-15"),
+        sueldo_base: 1300000,
+        activo: true,
+      },
+    }),
+    prisma.empleado.create({
+      data: {
+        usuario_id: userConsultor.id,
+        rut: "16.987.654-2",
+        cargo: "Consultora TI",
+        telefono: "+56 9 5555 4444",
+        fecha_ingreso: new Date("2024-02-01"),
+        sueldo_base: 1100000,
+        activo: true,
       },
     }),
   ]);
-  const pBySku = Object.fromEntries(productos.map((p) => [p.sku, p]));
 
-  /* ========== Proyecto demo ========== */
-  const proyecto = await prisma.proyecto.upsert({
-    where: { id: "proj_demo_1" },
-    update: {},
-    create: {
-      id: "proj_demo_1",
-      empresa_id: empresa.id,
-      nombre: "Implementación Red Planta Osorno",
-      descripcion: "Instalación backbone y distribución Cat6 + equipos core",
-      presupuesto: 5500000,
-      estado: "activo",
-    },
-  });
+  console.log("👷 Empleados creados.");
 
-  await prisma.proyectoMiembro.upsert({
-    where: { proyecto_id_empleado_id: { proyecto_id: proyecto.id, empleado_id: empAdmin.id } },
-    update: {},
-    create: { proyecto_id: proyecto.id, empleado_id: empAdmin.id, rol: "Jefe de Proyecto" },
-  });
-  await prisma.proyectoMiembro.upsert({
-    where: { proyecto_id_empleado_id: { proyecto_id: proyecto.id, empleado_id: empStd.id } },
-    update: {},
-    create: { proyecto_id: proyecto.id, empleado_id: empStd.id, rol: "Técnico" },
-  });
+  // =========================
+  // CLIENTES
+  // =========================
+  const [clienteAqua, clienteExelsior] = await Promise.all([
+    prisma.cliente.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "AquaChile S.A.",
+        rut: "80.123.456-7",
+        correo: "contacto@aquachile.cl",
+        telefono: "+56 65 222 0000",
+        notas: "Cliente estratégico del rubro acuícola.",
+      },
+    }),
+    prisma.cliente.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Exelsior Foods Ltda.",
+        rut: "76.987.654-1",
+        correo: "compras@exelsiorfoods.cl",
+        telefono: "+56 2 2345 6789",
+        notas: "Plantas de proceso en la zona sur.",
+      },
+    }),
+  ]);
 
-  /* ========== Tareas (planificación) ========== */
-  const base = new Date(); base.setHours(12, 0, 0, 0);
-  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  console.log("🤝 Clientes creados.");
 
-  const t1_ini = addDays(base, 0);
-  const t1_fin = addDays(base, 3);
-  const t2_ini = addDays(t1_fin, 0);
-  const t2_fin = addDays(t2_ini, 4);
-  const t3_ini = addDays(t2_fin, 0);
-  const t3_fin = addDays(t3_ini, 2);
+  // =========================
+  // PROVEEDORES
+  // =========================
+  const [provSonda, provAzure] = await Promise.all([
+    prisma.proveedor.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Sonda S.A.",
+        rut: "89.654.321-0",
+        correo: "ventas@sonda.com",
+        telefono: "+56 2 2700 0000",
+        notas: "Servicios de infraestructura y soporte.",
+      },
+    }),
+    prisma.proveedor.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Microsoft Azure Chile",
+        rut: "59.123.456-1",
+        correo: "chile@azure.com",
+        telefono: "+56 2 2400 0000",
+        notas: "Servicios cloud para proyectos Blueinge.",
+      },
+    }),
+  ]);
 
-  await prisma.tarea.upsert({
-    where: { id: "tarea_demo_1" },
-    update: {},
-    create: {
-      id: "tarea_demo_1",
-      proyecto_id: proyecto.id,
-      nombre: "Levantamiento en terreno",
-      descripcion: "Visita a planta, mapeo de puntos y rutas.",
-      responsable_id: empStd.id,
-      prioridad: 1,
-      estado: "completada",
-      avance: 100,
-      es_hito: false,
-      orden: 1,
-      fecha_inicio_plan: t1_ini,
-      fecha_fin_plan: t1_fin,
-      dias_plan: daysBetween(t1_ini, t1_fin),
-      fecha_inicio_real: addDays(t1_ini, 0),
-      fecha_fin_real: addDays(t1_fin, 1),
-      dias_reales: daysBetween(addDays(t1_ini, 0), addDays(t1_fin, 1)),
-    },
-  });
+  console.log("📦 Proveedores creados.");
 
-  await prisma.tarea.upsert({
-    where: { id: "tarea_demo_2" },
-    update: {},
-    create: {
-      id: "tarea_demo_2",
-      proyecto_id: proyecto.id,
-      nombre: "Diseño e ingeniería",
-      descripcion: "Topología, especificación de materiales y equipos.",
-      responsable_id: empAdmin.id,
-      prioridad: 1,
-      estado: "en_progreso",
-      avance: 60,
-      es_hito: false,
-      orden: 2,
-      fecha_inicio_plan: t2_ini,
-      fecha_fin_plan: t2_fin,
-      dias_plan: daysBetween(t2_ini, t2_fin),
-      fecha_inicio_real: addDays(t2_ini, 0),
-    },
-  });
+  // =========================
+  // PRODUCTOS
+  // =========================
+  const [prodHorasCons, prodMonitoreo, prodLicencias] = await Promise.all([
+    prisma.producto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Horas de consultoría TI",
+        sku: "SERV-HH-TI",
+        precio: 65000,
+        stock: 0,
+      },
+    }),
+    prisma.producto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Sistema de monitoreo Exelsior",
+        sku: "SW-MON-EXE",
+        precio: 12000000,
+        stock: 0,
+      },
+    }),
+    prisma.producto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Licencias Azure / Año",
+        sku: "LIC-AZURE",
+        precio: 4500000,
+        stock: 0,
+      },
+    }),
+  ]);
 
-  await prisma.tarea.upsert({
-    where: { id: "tarea_demo_3" },
-    update: {},
-    create: {
-      id: "tarea_demo_3",
-      proyecto_id: proyecto.id,
-      nombre: "Aprobación del cliente",
-      descripcion: "Validación del alcance y cronograma.",
-      responsable_id: empAdmin.id,
-      prioridad: 1,
-      estado: "pendiente",
-      avance: 0,
-      es_hito: true,
-      orden: 3,
-      fecha_inicio_plan: t3_ini,
-      fecha_fin_plan: t3_fin,
-      dias_plan: daysBetween(t3_ini, t3_fin),
-    },
-  });
+  console.log("🧱 Productos creados.");
 
-  await prisma.tareaDependencia.upsert({
-    where: { tarea_id_predecesora_id: { tarea_id: "tarea_demo_2", predecesora_id: "tarea_demo_1" } },
-    update: {},
-    create: { tarea_id: "tarea_demo_2", predecesora_id: "tarea_demo_1", tipo: "FS" },
-  });
-  await prisma.tareaDependencia.upsert({
-    where: { tarea_id_predecesora_id: { tarea_id: "tarea_demo_3", predecesora_id: "tarea_demo_2" } },
-    update: {},
-    create: { tarea_id: "tarea_demo_3", predecesora_id: "tarea_demo_2", tipo: "FS" },
-  });
+  // =========================
+  // PROYECTOS
+  // =========================
+  const [proyERP, proyExelsior, proyAqua] = await Promise.all([
+    prisma.proyecto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Implementación ERP Blueinge",
+        descripcion:
+          "Proyecto interno para consolidar módulos de ventas, compras, RRHH y proyectos.",
+        presupuesto: 25000000,
+        estado: "activo",
+      },
+    }),
+    prisma.proyecto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Plataforma de monitoreo en tiempo real Exelsior",
+        descripcion:
+          "Sistema para seguimiento de producción y trazabilidad en plantas Exelsior.",
+        presupuesto: 18000000,
+        estado: "activo",
+      },
+    }),
+    prisma.proyecto.create({
+      data: {
+        empresa_id: empresa.id,
+        nombre: "Sistema de reportabilidad operacional AquaChile",
+        descripcion:
+          "Desarrollo de dashboards y KPI para operación productiva.",
+        presupuesto: 22000000,
+        estado: "activo",
+      },
+    }),
+  ]);
 
-  /* ========== Cotización demo ========== */
-  const qItems = [
-    { prod: pBySku["SW-24P-GIGA"], cant: 2 },
-    { prod: pBySku["ROUT-AC1200"], cant: 3 },
-  ].map((x) => ({
-    producto_id: x.prod.id,
-    cantidad: x.cant,
-    precio_unit: x.prod.precio,
-    total: round2(x.cant * x.prod.precio),
-  }));
-  const qTotal = round2(qItems.reduce((s, i) => s + i.total, 0));
-  await prisma.cotizacion.upsert({
-    where: { numero: "Q-0001" },
-    update: {},
-    create: {
-      empresa_id: empresa.id,
-      proyecto_id: proyecto.id,
-      cliente_id: clienteA.id,
-      numero: "Q-0001",
-      estado: "enviada",
-      total: qTotal,
-      items: { create: qItems },
-    },
-  });
+  console.log("📂 Proyectos creados.");
 
-  /* ========== Compra demo ========== */
-  const cItems = [{ prod: pBySku["SW-24P-GIGA"], cant: 1 }].map((x) => ({
-    producto_id: x.prod.id,
-    cantidad: x.cant,
-    precio_unit: x.prod.precio * 0.8,
-    total: round2(x.cant * (x.prod.precio * 0.8)),
-  }));
-  const cTotal = round2(cItems.reduce((s, i) => s + i.total, 0));
-  await prisma.compra.upsert({
-    where: { numero: "C-0001" },
-    update: {},
-    create: {
-      empresa_id: empresa.id,
-      proyecto_id: proyecto.id,
-      proveedor_id: provA.id,
-      numero: "C-0001",
-      estado: "recibida",
-      total: cTotal,
-      items: { create: cItems },
-    },
-  });
+  // =========================
+  // MIEMBROS DE PROYECTO
+  // =========================
+  await Promise.all([
+    // ERP
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyERP.id,
+        empleado_id: empAxel.id,
+        rol: "Líder de proyecto",
+      },
+    }),
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyERP.id,
+        empleado_id: empCamila.id,
+        rol: "Líder de ventas",
+      },
+    }),
 
-  /* ========== Rendición demo ========== */
-  await prisma.rendicion.create({
+    // Exelsior
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyExelsior.id,
+        empleado_id: empAxel.id,
+        rol: "PM",
+      },
+    }),
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyExelsior.id,
+        empleado_id: empDaniela.id,
+        rol: "Consultora",
+      },
+    }),
+
+    // AquaChile
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyAqua.id,
+        empleado_id: empAxel.id,
+        rol: "Arquitecto de solución",
+      },
+    }),
+    prisma.proyectoMiembro.create({
+      data: {
+        proyecto_id: proyAqua.id,
+        empleado_id: empDaniela.id,
+        rol: "Desarrolladora",
+      },
+    }),
+  ]);
+
+  console.log("👥 Miembros de proyectos creados.");
+
+  // =========================
+  // CONFIGURACIÓN HH + PERIODO DE REMUNERACIONES
+  // =========================
+  const hhConfig = await prisma.hHConfig.create({
     data: {
-      empleado_id: empStd.id,
-      proyecto_id: proyecto.id,
-      descripcion: "Boletas viaje a terreno (combustible + peajes)",
-      monto_total: 58230,
-      estado: "aprobada",
-      items: {
-        create: [
-          { linea: 1, fecha: new Date(), descripcion: "Combustible", monto: 42000, categoria: "Transporte" },
-          { linea: 2, fecha: new Date(), descripcion: "Peajes", monto: 16230, categoria: "Transporte" },
-        ],
-      },
+      empresa_id: empresa.id,
+      nombre: "Configuración estándar Chile 2025",
+      horas_dia: 8,
+      dias_mes: 30,
+      afp_porcentaje: 0.11,
+      salud_porcentaje: 0.07,
+      mutual_porcentaje: 0.01,
+      otros_porcentaje: 0.02,
+      margen_base_venta: 0.35,
+      factor_normal: 1,
+      factor_extra_50: 1.5,
+      factor_extra_100: 2,
+      factor_feriado: 2,
+      activo: true,
     },
   });
 
-  console.log("✅ Seed completado");
+  console.log("⏱️ Configuración HH creada:", hhConfig.nombre);
+
+  const periodoSep = await prisma.remuneracionPeriodo.create({
+    data: {
+      empresa_id: empresa.id,
+      anio: 2025,
+      mes: 9,
+      dias_mes: 30,
+      horas_dia: 8,
+      nombre: "Remuneraciones septiembre 2025",
+    },
+  });
+
+  console.log("📆 Periodo de remuneraciones creado:", periodoSep.nombre);
+
+  // Helper para crear remuneración emplead@ + conceptos
+  const crearRemuEmpleado = async (empleado, dias_trabajados, sueldo_liquido) => {
+    const horas_dia = 8;
+    const horas_mes = dias_trabajados * horas_dia;
+
+    const imponible = sueldo_liquido;
+    const afp = imponible * (hhConfig.afp_porcentaje ?? 0);
+    const salud = imponible * (hhConfig.salud_porcentaje ?? 0);
+    const mutual = imponible * (hhConfig.mutual_porcentaje ?? 0);
+    const otros = imponible * (hhConfig.otros_porcentaje ?? 0);
+    const costo_empresa_mes = sueldo_liquido + afp + salud + mutual + otros;
+    const valor_hora_costo = horas_mes > 0 ? costo_empresa_mes / horas_mes : 0;
+    const margen = hhConfig.margen_base_venta ?? 0.35;
+    const valor_hora_venta = valor_hora_costo * (1 + margen);
+
+    const rem = await prisma.empleadoRemuneracion.create({
+      data: {
+        periodo_id: periodoSep.id,
+        empleado_id: empleado.id,
+        dias_trabajados,
+        sueldo_liquido,
+        horas_dia,
+        horas_mes,
+        imponible,
+        afp,
+        salud,
+        mutual,
+        otros_costos: otros,
+        costo_empresa_mes,
+        valor_hora_costo,
+        valor_hora_venta,
+      },
+    });
+
+    const conceptos = [
+      { tipo: "normal", factor: hhConfig.factor_normal ?? 1 },
+      { tipo: "extra_50", factor: hhConfig.factor_extra_50 ?? 1.5 },
+      { tipo: "extra_100", factor: hhConfig.factor_extra_100 ?? 2 },
+      { tipo: "feriado", factor: hhConfig.factor_feriado ?? 2 },
+    ];
+
+    for (const c of conceptos) {
+      const factor = c.factor;
+      await prisma.empleadoRemuneracionConcepto.create({
+        data: {
+          remuneracion_id: rem.id,
+          tipo: c.tipo,
+          factor_costo: factor,
+          factor_venta: factor,
+          valor_hora_costo: valor_hora_costo * factor,
+          valor_hora_venta: valor_hora_venta * factor,
+        },
+      });
+    }
+
+    return rem;
+  };
+
+  await Promise.all([
+    crearRemuEmpleado(empAxel, 30, 1800000),
+    crearRemuEmpleado(empCamila, 30, 1200000),
+    crearRemuEmpleado(empJavier, 30, 1300000),
+    crearRemuEmpleado(empDaniela, 30, 1100000),
+  ]);
+
+  console.log("💸 Remuneraciones base creadas.");
+
+  console.log("🌱 Seed ERP completado con éxito.");
 }
 
-/* ===== run ===== */
 main()
   .catch((e) => {
     console.error("❌ Seed error:", e);
-    process.exitCode = 1;
+    process.exit(1);
   })
   .finally(async () => {
     await prisma.$disconnect();

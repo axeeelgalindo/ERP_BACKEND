@@ -31,9 +31,15 @@ model Empresa {
   productos   Producto[]
   proyectos   Proyecto[]
   Cotizacion  Cotizacion[]
-  Venta       Venta[]
   Compra      Compra[]
-  auditLogs   AuditLog[] // <--- nuevo back-relation
+  auditLogs   AuditLog[]
+
+  // 👇 previsión
+  afpConfigs   AFPConfig[]
+  saludConfigs SaludConfig[]
+
+  // 👇 HH por empleado (resultado del Excel + cálculos)
+  hhEmpleados HHEmpleado[]
 }
 
 /**
@@ -69,10 +75,10 @@ model Usuario {
   rol_id     String
   rol        RolUsuario @relation(fields: [rol_id], references: [id], onDelete: Cascade)
 
-  nombre         String
-  // (Opcional) permite reusar correo tras soft-delete
-  correo         String
-  contrasena     String
+  nombre     String
+  correo     String
+  contrasena String
+
   creado_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
   // soft delete
@@ -80,16 +86,20 @@ model Usuario {
   eliminado_en   DateTime?
 
   empleado              Empleado?
-  rendiciones_revisadas Rendicion[] // <--- revisa/aprueba rendiciones
-  auditLogs             AuditLog[] // <--- acciones en el sistema
+  rendiciones_revisadas Rendicion[]
+  auditLogs             AuditLog[]
 
-  @@unique([correo, eliminado]) // <- si NO quieres esto, vuelve a `@unique` simple
+  @@unique([correo, eliminado])
 }
 
 model Empleado {
-  id             String    @id @default(cuid())
-  usuario_id     String?   @unique
-  usuario        Usuario?  @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+  id         String   @id @default(cuid())
+  usuario_id String?  @unique
+  usuario    Usuario? @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+
+  // 👇 para matchear con Excel
+  rut String? @db.VarChar(40)
+
   cargo          String?
   telefono       String?
   fecha_ingreso  DateTime?
@@ -101,9 +111,64 @@ model Empleado {
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
 
+  // previsión
+  afp_id String?
+  afp    AFPConfig? @relation(fields: [afp_id], references: [id], onDelete: SetNull)
+
+  salud_id String?
+  salud    SaludConfig? @relation(fields: [salud_id], references: [id], onDelete: SetNull)
+
   Rendicion Rendicion[]
-  proyectos ProyectoMiembro[] // M:N
-  tareas    Tarea[] // responsable
+  proyectos ProyectoMiembro[]
+
+  // Responsable principal de tareas
+  tareas Tarea[]
+
+  // Responsable de subtareas
+  detalles TareaDetalle[] @relation("EmpleadoTareaDetalle")
+
+  // 👇 HH ya calculadas por periodo (derivado del Excel)
+  hhRegistros   HHEmpleado[]
+  detalleVentas detalleVenta[]
+
+  @@index([afp_id])
+  @@index([salud_id])
+}
+
+model AFPConfig {
+  id         String  @id @default(cuid())
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  nombre String // Ej: "AFP Habitat"
+  codigo String? @unique // Ej: "HABITAT"
+  tasa   Float // Ej: 0.114 (11,4%)
+
+  activo         Boolean  @default(true)
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  empleados Empleado[]
+
+  @@index([empresa_id])
+}
+
+model SaludConfig {
+  id         String  @id @default(cuid())
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  tipo   String // "FONASA" | "ISAPRE"
+  nombre String // Ej: "Fonasa", "Colmena"
+  tasa   Float // Ej: 0.07 (7% base) o equivalente plan
+
+  activo         Boolean  @default(true)
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  empleados Empleado[]
+
+  @@index([empresa_id])
 }
 
 /**
@@ -127,9 +192,8 @@ model Cliente {
   eliminado_en   DateTime?
 
   cotizaciones Cotizacion[]
-  ventas       Venta[]
 
-  @@unique([correo, eliminado]) // opcional
+  @@unique([correo, eliminado])
   @@index([empresa_id])
 }
 
@@ -148,9 +212,10 @@ model Proveedor {
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
 
-  compras Compra[]
+  compras     Compra[]
+  compraItems CompraItem[]
 
-  @@unique([correo, eliminado]) // opcional
+  @@unique([correo, eliminado])
   @@index([empresa_id])
 }
 
@@ -174,10 +239,9 @@ model Producto {
   eliminado_en   DateTime?
 
   cotizaciones CotizacionItem[]
-  ventas       VentaItem[]
   compras      CompraItem[]
 
-  @@unique([sku, eliminado]) // opcional
+  @@unique([sku, eliminado])
   @@index([empresa_id])
 }
 
@@ -192,7 +256,7 @@ model Proyecto {
   empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
   nombre         String
   descripcion    String?
-  presupuesto    Float?
+  presupuesto    Float? //aqui se debería hacer segun la asignacion de tareas y sus costos
   estado         String    @default("activo")
   creada_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
@@ -201,7 +265,6 @@ model Proyecto {
   eliminado_en   DateTime?
 
   cotizaciones Cotizacion[]
-  ventas       Venta[]
   compras      Compra[]
   rendiciones  Rendicion[]
 
@@ -246,6 +309,7 @@ model Tarea {
   es_hito   Boolean @default(false)
   orden     Int?
 
+  // base del Gantt
   fecha_inicio_plan DateTime
   fecha_fin_plan    DateTime
   dias_plan         Int?
@@ -254,18 +318,73 @@ model Tarea {
   fecha_fin_real    DateTime?
   dias_reales       Int?
 
+  // Totales agregados desde los detalles
+  total_dias_plan    Int?
+  total_dias_reales  Int?
+  total_horas_plan   Float?
+  total_horas_reales Float?
+  total_costo_plan   Float?
+  total_costo_real   Float?
+  total_responsables Int? // cantidad de responsables distintos en subtareas
+
   creado_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
-  // soft delete
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
 
   dependencias TareaDependencia[] @relation("TareaDependencias")
   sucesoras    TareaDependencia[] @relation("TareaPredecesoras")
 
+  // Subtareas / Detalles
+  detalles TareaDetalle[]
+
+  dias_desviacion Int?
+
   @@index([proyecto_id])
   @@index([responsable_id])
   @@index([estado])
+}
+
+model TareaDetalle {
+  id       String @id @default(cuid())
+  tarea_id String
+  tarea    Tarea  @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
+
+  // info principal
+  titulo      String
+  descripcion String?
+
+  // responsable ÚNICO de la subtarea
+  responsable_id String?
+  responsable    Empleado? @relation("EmpleadoTareaDetalle", fields: [responsable_id], references: [id], onDelete: SetNull)
+
+  estado String @default("pendiente") // pendiente | en_progreso | completada
+  avance Int    @default(0) // opcional, de momento usamos estado
+
+  // PLANIFICADO
+  fecha_inicio_plan DateTime
+  fecha_fin_plan    DateTime
+  dias_plan         Int // se calcula en backend
+
+  // REAL
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+
+  // TIEMPO Y COSTOS (HH)
+  horas_plan Float?
+  horas_real Float?
+
+  valor_hora Float?
+  costo_plan Float?
+  costo_real Float?
+
+  dias_desviacion Int?
+
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
 }
 
 model TareaDependencia {
@@ -281,119 +400,208 @@ model TareaDependencia {
   @@index([predecesora_id])
 }
 
-/**
- * =========================
- * VENTAS / COTIZACIONES
- * =========================
- */
+enum EstadoCotizacion {
+  COTIZACION
+  ORDEN_VENTA
+  FACTURADA
+  PAGADA
+}
+
 model Cotizacion {
   id             String    @id @default(cuid())
+  numero         Int       @unique @default(autoincrement())
   empresa_id     String
   empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
   proyecto_id    String
   proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  cliente_id     String
-  cliente        Cliente   @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
-  numero         Int       @default(autoincrement()) @unique
-  estado         String    @default("borrador")
-  total          Float     @default(0)
+  cliente_id     String?
+  cliente        Cliente?  @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
+
+  descripcion    String?
+
+  // ✅ NUEVO (para cotización cliente)
+  cantidad             Int?     // “cantidad” del documento (si aplica)
+  subtotal             Float    @default(0)
+  iva                  Float    @default(0)
+  total                Float    @default(0)
+  terminos_condiciones String?
+  acuerdo_pago         String?
+
   creada_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
-  // soft delete
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
 
-  items  CotizacionItem[]
-  ventas Venta[]
+  estado  EstadoCotizacion @default(COTIZACION)
+  items   CotizacionItem[]
+  ventas  Venta[]
+  compras Compra[]
 
   @@index([empresa_id])
   @@index([proyecto_id])
 }
+
 
 model CotizacionItem {
   id            String     @id @default(cuid())
   cotizacion_id String
   cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
-  producto_id   String?
-  producto      Producto?  @relation(fields: [producto_id], references: [id], onDelete: SetNull)
-  cantidad      Int
-  precio_unit   Float
-  total         Float
+
+  tipo cotizacionItemTipo
+
+  //si es un producto se selecciona esto, sino es un texto libre para escribir el nomrbe de producto o servicio
+  producto_id    String?
+  producto       Producto? @relation(fields: [producto_id], references: [id], onDelete: Cascade)
+  Item           String?
+  descripcion    String?
+  cantidad       Int
+  precioUnitario Float
+  total          Float
 
   @@index([cotizacion_id])
 }
 
-model Venta {
-  id             String    @id @default(cuid())
-  empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  proyecto_id    String
-  proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  cliente_id     String
-  cliente        Cliente   @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
-  numero         String    @unique
-  estado         String    @default("pendiente")
-  total          Float     @default(0)
-  creada_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  cotizacion_id String?
-  cotizacion    Cotizacion? @relation(fields: [cotizacion_id], references: [id])
-
-  items VentaItem[]
-
-  @@index([empresa_id])
-  @@index([proyecto_id])
+enum cotizacionItemTipo {
+  PRODUCTO
+  SERVICIO
 }
 
-model VentaItem {
-  id          String    @id @default(cuid())
-  venta_id    String
-  venta       Venta     @relation(fields: [venta_id], references: [id], onDelete: Cascade)
-  producto_id String?
-  producto    Producto? @relation(fields: [producto_id], references: [id], onDelete: SetNull)
-  cantidad    Int
-  precio_unit Float
-  total       Float
+//listo
+//listo
+//listo
+model Venta {
+  id           String         @id @default(cuid())
+  numero       Int            @unique @default(autoincrement())
+  fecha        DateTime       @default(now())
+  ordenVentaId String?
+  descripcion  String?
+  ordenVenta   Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
+  detalles     detalleVenta[]
 
-  @@index([venta_id])
+  createdAt DateTime @default(now())
+}
+
+model detalleVenta {
+  id          String   @id @default(cuid())
+  //obligatorios
+  ventaId     String
+  descripcion String
+  cantidad    Int
+  costoTotal  Float?
+  fecha       DateTime @default(now())
+  tipoItemId  String?
+
+  //opcional si es empleado (HH) o si es producto (detalleVenta)
+  compraId           String?
+  costoHH            Float?
+  costoUnitario      Float?
+  ventaUnitario      Float?
+  ventaTotal         Float?
+  utilidad           Float?
+  porcentajeUtilidad Float?
+  alpha              Float?
+  empleadoId         String?
+  hhEmpleadoId       String?
+  total              Float
+
+  tipoDiaId String?
+
+  //validar que día es, si es fin de semana, feriado o urgencia
+  isFeriado   Boolean @default(false)
+  isUrgencia  Boolean @default(false)
+  isFinSemana Boolean @default(false)
+
+  tipoDia    tipoDia?    @relation(fields: [tipoDiaId], references: [id], onDelete: Cascade)
+  tipoItem   tipoItem?   @relation(fields: [tipoItemId], references: [id], onDelete: Cascade)
+  compras    CompraItem? @relation(fields: [compraId], references: [id], onDelete: Cascade)
+  venta      Venta       @relation(fields: [ventaId], references: [id], onDelete: Cascade)
+  hhEmpleado HHEmpleado? @relation(fields: [hhEmpleadoId], references: [id], onDelete: Cascade)
+  empleado   Empleado?   @relation(fields: [empleadoId], references: [id], onDelete: Cascade)
+
+  @@index([ventaId])
+}
+
+model tipoDia {
+  id     String @id @default(cuid())
+  nombre String //feriado , fds, urgencia, normal
+  valor  Float
+
+  detalleVentas detalleVenta[]
+}
+
+//listo
+//listo
+model tipoItem {
+  id                 String         @id @default(cuid())
+  nombre             String
+  porcentajeUtilidad Float
+  unidadItemId       String?
+  unidadItem         unidadItem?    @relation(fields: [unidadItemId], references: [id], onDelete: Cascade)
+  ventas             detalleVenta[]
+}
+
+model unidadItem {
+  id        String     @id @default(cuid())
+  nombre    String
+  tipoItems tipoItem[]
+}
+
+enum estadoCompra {
+  ORDEN_COMPRA
+  FACTURADA
+  PAGADA
 }
 
 model Compra {
-  id             String    @id @default(cuid())
-  empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  proyecto_id    String
-  proyecto       Proyecto  @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  proveedor_id   String
-  proveedor      Proveedor @relation(fields: [proveedor_id], references: [id], onDelete: Cascade)
-  numero         String    @unique
-  estado         String    @default("pendiente")
-  total          Float     @default(0)
-  creada_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
+  id          String    @id @default(cuid())
+  numero      Int       @unique @default(autoincrement())
+  empresa_id  String
+  empresa     Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id String?
+  proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  estado         estadoCompra @default(ORDEN_COMPRA)
+  total          Float
+  creada_en      DateTime     @default(now())
+  actualizado_en DateTime     @updatedAt
   // soft delete
-  eliminado      Boolean   @default(false)
+  eliminado      Boolean      @default(false)
   eliminado_en   DateTime?
 
-  items CompraItem[]
+  cotizacionId String?
+  cotizacion   Cotizacion?  @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  items        CompraItem[]
+
+  proveedor   Proveedor? @relation(fields: [proveedorId], references: [id])
+  proveedorId String?
+
+   // === Datos para importación RCV (opcionales) ===
+  tipo_doc        Int?
+  folio           String?    @db.VarChar(50)
+  rut_proveedor   String?    @db.VarChar(40)
+  razon_social    String?    @db.VarChar(255)
+  fecha_docto     DateTime?
+  fecha_recepcion DateTime?
 
   @@index([empresa_id])
   @@index([proyecto_id])
 }
 
 model CompraItem {
-  id          String    @id @default(cuid())
-  compra_id   String
-  compra      Compra    @relation(fields: [compra_id], references: [id], onDelete: Cascade)
-  producto_id String?
-  producto    Producto? @relation(fields: [producto_id], references: [id], onDelete: SetNull)
-  cantidad    Int
-  precio_unit Float
-  total       Float
+  id           String  @id @default(cuid())
+  compra_id    String?
+  producto_id  String?
+  proveedor_id String?
+  item         String?
+  cantidad     Int
+  precio_unit  Float?
+  total        Float
+
+  detalleVentas detalleVenta[]
+
+  compra    Compra?    @relation(fields: [compra_id], references: [id], onDelete: Cascade)
+  producto  Producto?  @relation(fields: [producto_id], references: [id], onDelete: Cascade)
+  proveedor Proveedor? @relation(fields: [proveedor_id], references: [id], onDelete: Cascade)
 
   @@index([compra_id])
 }
@@ -466,9 +674,9 @@ model AuditLog {
   usuario_id String?
   usuario    Usuario? @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
 
-  entidad     String // "Proyecto", "Tarea", "Rendicion", etc.
-  registro_id String // id del registro afectado
-  accion      String // "CREATE", "UPDATE", "DELETE", "CAMBIO_ESTADO", etc.
+  entidad     String
+  registro_id String
+  accion      String
 
   detalles   Json?
   ip         String?
@@ -481,4 +689,80 @@ model AuditLog {
   @@index([entidad, registro_id])
   @@index([accion])
   @@index([creado_en])
+}
+
+model HHEmpleado {
+  id String @id @default(cuid())
+
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  empleado_id String?
+  empleado    Empleado? @relation(fields: [empleado_id], references: [id], onDelete: SetNull)
+
+  // Período
+  anio           Int
+  mes            Int
+  nombre_periodo String? // ej: "Noviembre 2025"
+
+  // Identificación según Excel
+  nombre String? // "Nombre"
+  rut    String? @db.VarChar(40) // "RUT"
+
+  // ============================
+  // COLUMNAS BASE DEL EXCEL
+  // ============================
+  // Trab. = días trabajados
+  dias_trabajados Int? // "Trab."
+
+  sueldo_base   Float? // "Sueldo Base"
+  extras        Float? // "Extras"
+  gratificacion Float? // "Gratific."
+
+  // En tu Excel hay varias columnas llamadas "Imponible"
+  imponible1   Float? // primer "Imponible"
+  imponible2   Float? // segundo "Imponible"
+  movilizacion Float? // "Moviliz."
+  colacion     Float? // "Colac."
+  imponible3   Float? // tercer "Imponible"
+  imponible4   Float? // cuarto "Imponible"
+
+  haberes Float? // "Haberes"
+
+  afp         Float? // "AFP"
+  unico       Float? // "Único"
+  previsional Float? // "Previsional"
+  salud       Float? // "Salud"
+  antiguo     Float? // "Antiguo"
+  anticipos   Float? // "Anticipos"
+  prestamos   Float? // "Prestamos"
+  apv         Float? // "APV"
+
+  desctos1 Float? // "Desctos." (1)
+  desctos2 Float? // "Desctos." (2)
+
+  liquido   Float? // "Líquido"
+  empleador Float?
+
+  //--------------
+  //calcular
+  pagado         Float?
+  feriado        Float?
+  indemnizacion  Float?
+  total          Float?
+  costoHH        Float?
+  cif            Float?
+  horasMensuales Float?
+  horasEfectivas Float?
+
+  // fila original por si quieres guardar todo crudo del Excel
+  raw Json?
+
+  creado_en      DateTime       @default(now())
+  actualizado_en DateTime       @updatedAt
+  ventas         detalleVenta[]
+
+  @@index([empresa_id, anio, mes])
+  @@index([empleado_id])
+  @@index([rut])
 }

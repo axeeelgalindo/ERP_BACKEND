@@ -1,3 +1,4 @@
+// src/tareas/validators.js
 import { Type } from "@sinclair/typebox";
 
 const Id = Type.String({ minLength: 10 });
@@ -17,22 +18,58 @@ export const TareaQuery = Type.Object({
 });
 
 export const TareaCreateBody = Type.Object({
-  proyecto_id: Id,
-  nombre: Type.String({ minLength: 2 }),
-  descripcion: Type.Optional(Type.String()),
-  responsable_id: Type.Optional(Id),
+  proyecto_id: Type.String(),
+  nombre: Type.String(),
+  descripcion: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  responsable_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   prioridad: Type.Optional(Type.Integer()),
-  estado: Type.Optional(Type.String()),
-  avance: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
-  es_hito: Type.Optional(Type.Boolean()),
-  orden: Type.Optional(Type.Integer()),
+
+  // 👉 INPUT REAL del frontend: fecha_inicio_plan + dias_plan
   fecha_inicio_plan: Type.String({ format: "date-time" }),
-  fecha_fin_plan: Type.String({ format: "date-time" }),
+  dias_plan: Type.Integer({ minimum: 1 }),
+  // se calcula en backend, por eso OPCIONAL
+  fecha_fin_plan: Type.Optional(Type.String({ format: "date-time" })),
+
+  // REAL (opcional)
   fecha_inicio_real: Type.Optional(Type.String({ format: "date-time" })),
+  dias_reales: Type.Optional(Type.Integer({ minimum: 1 })),
   fecha_fin_real: Type.Optional(Type.String({ format: "date-time" })),
+
+  // Subtareas opcionales
+  detalles: Type.Optional(
+    Type.Array(
+      Type.Object({
+        titulo: Type.String(),
+        descripcion: Type.Optional(
+          Type.Union([Type.String(), Type.Null()])
+        ),
+        responsable_id: Type.Optional(
+          Type.Union([Type.String(), Type.Null()])
+        ),
+
+        // PLAN subtarea
+        fecha_inicio_plan: Type.String({ format: "date-time" }),
+        dias_plan: Type.Integer({ minimum: 1 }),
+        fecha_fin_plan: Type.Optional(
+          Type.String({ format: "date-time" })
+        ),
+
+        // REAL subtarea (opcional)
+        fecha_inicio_real: Type.Optional(
+          Type.String({ format: "date-time" })
+        ),
+        dias_reales: Type.Optional(Type.Integer({ minimum: 1 })),
+        fecha_fin_real: Type.Optional(
+          Type.String({ format: "date-time" })
+        ),
+      })
+    )
+  ),
 });
 
+// PATCH: todo opcional
 export const TareaUpdateBody = Type.Partial(TareaCreateBody);
+
 export const TareaIdParam = Type.Object({ id: Id });
 
 export const TareaDepCreate = Type.Object({
@@ -40,4 +77,5 @@ export const TareaDepCreate = Type.Object({
   predecesora_id: Id,
   tipo: Type.Optional(Type.String()), // FS/SS/FF/SF
 });
+
 export const TareaDepIdParam = Type.Object({ id: Id });

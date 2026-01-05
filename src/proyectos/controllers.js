@@ -6,6 +6,7 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 const PAGE = 1,
   SIZE = 20;
+
 /* helpers generales */
 const randCode = () =>
   String(Math.floor(100000 + Math.random() * 900000)); // 👉 código de 6 dígitos
@@ -16,6 +17,7 @@ const toFloatOrNull = (v) => {
   const n = Number(v);
   return Number.isNaN(n) ? null : n;
 };
+
 /* ========== LISTAR ========== */
 export async function listProyectos(request, reply) {
   const scope = resolveScope(request);
@@ -68,8 +70,14 @@ export async function listProyectos(request, reply) {
       where,
       orderBy: { [sortField]: sortDir },
       include: {
-        ventas: {
-          include: { cliente: true },
+        // ✅ en tu schema existe "cotizaciones"
+        cotizaciones: {
+          where: { eliminado: false },
+          include: {
+            cliente: true,
+            // ✅ Venta cuelga de Cotizacion (ordenVenta)
+            ventas: true,
+          },
         },
       },
       skip,
@@ -79,6 +87,7 @@ export async function listProyectos(request, reply) {
 
   return reply.send({ total, page: Number(page), pageSize: take, items });
 }
+
 
 /* ========== DETALLE ========== */
 export async function getProyecto(request, reply) {
@@ -101,6 +110,18 @@ export async function getProyecto(request, reply) {
         include: {
           responsable: {
             include: { usuario: true },
+          },
+          // Subtareas ligadas a cada tarea
+          detalles: {
+            where: { eliminado: false },
+            orderBy: [{ fecha_inicio_plan: "asc" }],
+            include: {
+              responsable: {
+                include: {
+                  usuario: { select: { nombre: true, correo: true } },
+                },
+              },
+            },
           },
         },
       },
@@ -128,6 +149,32 @@ export async function getProyecto(request, reply) {
     return httpError(reply, 403, "Proyecto fuera de tu empresa");
   }
 
+  // ====== TAREAS Y SUBTAREAS (para HH y métricas) ======
+  const tareas = row.tareas || [];
+  const subtareas = tareas.flatMap((t) => t.detalles || []);
+
+  // HH PLAN (desde costo_plan o horas_plan * valor_hora)
+  const valorHHPlan = subtareas.reduce((sum, d) => {
+    const costoPlanDirecto = d.costo_plan ?? null;
+    const costoPlanCalc =
+      d.horas_plan != null && d.valor_hora != null
+        ? d.horas_plan * d.valor_hora
+        : 0;
+    const costoPlan = costoPlanDirecto != null ? costoPlanDirecto : costoPlanCalc;
+    return sum + (costoPlan || 0);
+  }, 0);
+
+  // HH REAL (desde costo_real o horas_real * valor_hora)
+  const valorHHReal = subtareas.reduce((sum, d) => {
+    const costoRealDirecto = d.costo_real ?? null;
+    const costoRealCalc =
+      d.horas_real != null && d.valor_hora != null
+        ? d.horas_real * d.valor_hora
+        : 0;
+    const costoReal = costoRealDirecto != null ? costoRealDirecto : costoRealCalc;
+    return sum + (costoReal || 0);
+  }, 0);
+
   // ====== CÁLCULOS FINANCIEROS ======
   const ventas = row.ventas || [];
   const compras = row.compras || [];
@@ -141,9 +188,16 @@ export async function getProyecto(request, reply) {
   );
 
   const presupuesto = row.presupuesto ?? 0;
-  const costoTotal = totalCompras + totalRendiciones;
-  const margenBruto = totalVentas - totalCompras;
+
+  // 👇 COSTO TOTAL = compras + rendiciones + HH REAL
+  const costoTotal = totalCompras + totalRendiciones + valorHHReal;
+
+  // Margen bruto: ventas - (compras + HH REAL)
+  const margenBruto = totalVentas - (totalCompras + valorHHReal);
+
+  // Utilidad neta: ventas - (compras + rendiciones + HH REAL)
   const utilidadNeta = totalVentas - costoTotal;
+
   const presupuestoUsado = costoTotal;
   const presupuestoRestante = presupuesto - presupuestoUsado;
 
@@ -155,15 +209,13 @@ export async function getProyecto(request, reply) {
     presupuesto > 0 ? (presupuestoUsado / presupuesto) * 100 : 0;
 
   // ====== CÁLCULOS DE TAREAS ======
-  const tareas = row.tareas || [];
   const totalTareas = tareas.length;
   const tareasCompletas = tareas.filter(
     (t) => t.estado === "completa" || t.avance >= 100
   ).length;
   const tareasEnCurso = tareas.filter(
     (t) =>
-      t.estado === "en_progreso" ||
-      (t.avance > 0 && t.avance < 100)
+      t.estado === "en_progreso" || (t.avance > 0 && t.avance < 100)
   ).length;
   const tareasPendientes = totalTareas - tareasCompletas - tareasEnCurso;
 
@@ -200,6 +252,9 @@ export async function getProyecto(request, reply) {
       margenBrutoPct,
       utilidadNetaPct,
       usoPresupuestoPct,
+      // 👇 NUEVO: HH plan/real del proyecto (sumadas desde las subtareas)
+      valorHHPlan,
+      valorHHReal,
     },
     tareas: {
       totalTareas,
@@ -223,6 +278,8 @@ export async function getProyecto(request, reply) {
 
   return reply.send({ ok: true, row, metrics });
 }
+
+
 
 // controllers/proyectos.controller.js (extracto)
 export const createProyecto = async (request, reply) => {

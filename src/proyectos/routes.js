@@ -20,7 +20,7 @@ export default async function proyectosRoutes(server) {
   const guard = server.authenticate ? { preHandler: [server.authenticate] } : {};
 
   // Listado / detalle (pueden funcionar solo con x-empresa-id si no usas auth)
-  server.get("/proyectos", { schema: { querystring: ProyectoQuery } }, listProyectos);
+  server.get("/proyectos", listProyectos);
   server.get("/proyectos/:id", { schema: { params: ProyectoIdParam } }, getProyecto);
 
   // Crear / actualizar / borrar (si prefieres exigir auth, añade ...guard)
