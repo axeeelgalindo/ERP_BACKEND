@@ -15,19 +15,108 @@ function getEmpresaId(request) {
   return String(empresaId);
 }
 
-function calcTotalesFromVentas(ventas, ivaRate = 0.19) {
-  const subtotal = ventas.reduce((acc, v) => {
-    const totalVenta = (v.detalles || []).reduce(
-      (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
-      0
+const round0 = (n) => Math.round(Number(n || 0));
+
+function calcFromTotal(total, ivaRate = 0.19) {
+  const t = round0(total);
+  const rate = Number(ivaRate);
+  const divisor = 1 + (Number.isFinite(rate) ? rate : 0.19);
+  const subtotal = round0(t / divisor);
+  const iva = t - subtotal;
+  return { subtotal, iva, total: t };
+}
+
+/**
+ * Distribuye montos de glosas:
+ * - manual=true: respeta monto
+ * - manual=false o monto vacío: se reparte el remanente
+ * Regla simple:
+ *   - si hay >=1 auto: reparte igual entre autos (y el último se queda con el ajuste por redondeo)
+ *   - si no hay autos: valida que suma manual == total (si no, error)
+ */
+function normalizeAndDistributeGlosas(inputGlosas, total) {
+  const glosas = Array.isArray(inputGlosas) ? inputGlosas : [];
+
+  if (glosas.length === 0) {
+    throw new Error("Debes enviar al menos 1 glosa.");
+  }
+
+  // Normaliza orden + flags
+  const norm = glosas.map((g, i) => {
+    const desc = String(g?.descripcion || "").trim();
+    if (!desc) throw new Error(`Glosa #${i + 1}: Falta descripción.`);
+    const manual = !!g?.manual;
+    const montoRaw =
+      g?.monto == null || String(g.monto).trim() === "" ? null : Number(g.monto);
+
+    const monto =
+      montoRaw == null
+        ? null
+        : Number.isFinite(montoRaw)
+        ? Math.max(0, round0(montoRaw))
+        : NaN;
+
+    if (monto === NaN) throw new Error(`Glosa #${i + 1}: monto inválido.`);
+
+    return {
+      descripcion: desc,
+      manual,
+      monto, // puede ser null si es auto
+      orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : i,
+    };
+  });
+
+  const manualSum = norm.reduce((acc, g) => acc + (g.manual ? (g.monto ?? 0) : 0), 0);
+  if (manualSum > total) {
+    throw new Error(
+      `La suma de montos manuales (${manualSum}) no puede superar el total (${total}).`
     );
-    return acc + totalVenta;
-  }, 0);
+  }
 
-  const iva = Math.round(subtotal * ivaRate);
-  const total = subtotal + iva;
+  const autos = norm.filter((g) => !g.manual);
+  const remanente = total - manualSum;
 
-  return { subtotal, iva, total };
+  if (autos.length === 0) {
+    // todo manual => debe calzar exacto con el total
+    if (manualSum !== total) {
+      throw new Error(
+        `Las glosas manuales suman ${manualSum}, pero el total es ${total}. Ajusta los montos.`
+      );
+    }
+    return norm.map((g) => ({ ...g, monto: round0(g.monto || 0) }));
+  }
+
+  // repartir remanente entre autos
+  const base = autos.length > 0 ? Math.floor(remanente / autos.length) : 0;
+  let restante = remanente;
+
+  const out = norm.map((g) => {
+    if (g.manual) return { ...g, monto: round0(g.monto || 0) };
+    // asignación base (el último auto corrige)
+    return { ...g, monto: base };
+  });
+
+  // corregir el último auto con el ajuste por redondeo
+  // (remanente - base*autos.length)
+  const ajuste = remanente - base * autos.length;
+  if (ajuste !== 0) {
+    // encuentra el último auto en el array original
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (!out[i].manual) {
+        out[i].monto = round0(out[i].monto + ajuste);
+        break;
+      }
+    }
+  }
+
+  // sanity
+  const sum = out.reduce((acc, g) => acc + (Number(g.monto) || 0), 0);
+  if (sum !== total) {
+    // por seguridad
+    throw new Error(`Error de distribución: suma glosas ${sum} != total ${total}.`);
+  }
+
+  return out;
 }
 
 /* =========================
@@ -50,8 +139,7 @@ export const listCotizaciones = async (request, reply) => {
       include: {
         cliente: true,
         proyecto: true,
-        items: { include: { producto: true } }, // ✅ IMPORTANTE
-        ventas: { include: { detalles: true } }, // opcional
+        glosas: { orderBy: { orden: "asc" } },
       },
     });
 
@@ -77,19 +165,13 @@ export const getCotizacion = async (request, reply) => {
       include: {
         proyecto: true,
         cliente: true,
-        items: { include: { producto: true } }, // ✅ IMPORTANTÍSIMO
-        ventas: { include: { detalles: true } },
+        glosas: { orderBy: { orden: "asc" } },
       },
     });
 
     if (!cot) return reply.code(404).send({ error: "Cotización no encontrada" });
 
-    // si ya guardas subtotal/iva/total, no recalcules (pero lo dejo por si acaso)
-    const subtotal = Number(cot.subtotal ?? 0) || 0;
-    const iva = Number(cot.iva ?? 0) || 0;
-    const total = Number(cot.total ?? 0) || 0;
-
-    return reply.send({ ...cot, subtotal, iva, total });
+    return reply.send(cot);
   } catch (e) {
     return reply.code(e.statusCode || 500).send({
       error: "Error al obtener cotización",
@@ -99,263 +181,217 @@ export const getCotizacion = async (request, reply) => {
 };
 
 /* =========================
-   POST /cotizaciones/desde-ventas
-   - Crea cotización desde ventas seleccionadas
-   - Vincula ventas => cotizacion (ordenVentaId)
-   - ✅ Genera CotizacionItem automáticamente desde VentaDetalle
-   - ✅ Guarda cantidad (si viene)
-   - ✅ Calcula subtotal/iva/total desde ventas
+   POST /cotizaciones
+   Crea cotización con glosas
+   - cliente obligatorio
+   - proyecto NO obligatorio
+   - total obligatorio
+   - glosas: [{descripcion, monto?, manual?}]
 ========================= */
-export const createCotizacionFromVentas = async (request, reply) => {
+export const createCotizacion = async (request, reply) => {
   try {
     const empresaId = getEmpresaId(request);
 
     const {
-      proyecto_id,
       cliente_id,
-      descripcion,
-      cantidad, // ✅ NUEVO (opcional)
+      asunto,
       terminos_condiciones,
       acuerdo_pago,
-      ventaIds = [],
       ivaRate = 0.19,
+
+      // total principal
+      total,
+
+      // glosas
+      glosas = [],
     } = request.body || {};
 
-    // =========================
-    // Validaciones base
-    // =========================
-    if (!proyecto_id) {
-      return reply.code(400).send({ error: "proyecto_id es obligatorio" });
+    if (!cliente_id) return reply.code(400).send({ error: "cliente_id es obligatorio" });
+
+    const totalNum = Number(total);
+    if (!Number.isFinite(totalNum) || totalNum <= 0) {
+      return reply.code(400).send({ error: "total inválido (entero > 0)" });
     }
 
-    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
-      return reply.code(400).send({ error: "Debes enviar ventaIds" });
-    }
+    const { subtotal, iva, total: totalInt } = calcFromTotal(totalNum, ivaRate);
 
-    // ✅ validar cantidad si viene
-    const cantidadNum =
-      cantidad == null || cantidad === ""
-        ? null
-        : Number.isFinite(Number(cantidad))
-        ? Number(cantidad)
-        : NaN;
-
-    if (cantidadNum !== null) {
-      if (!Number.isInteger(cantidadNum) || cantidadNum <= 0) {
-        return reply.code(400).send({
-          error: "cantidad debe ser un entero positivo",
-        });
-      }
-    }
-
-    const ivaRateNum = Number(ivaRate);
-    if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
-      return reply.code(400).send({
-        error: "ivaRate inválido (ej: 0.19)",
-      });
-    }
-
-    // =========================
-    // Transacción
-    // =========================
     const created = await prisma.$transaction(async (tx) => {
-      // 1) Validar proyecto (empresa)
-      const proyecto = await tx.proyecto.findFirst({
-        where: { id: proyecto_id, empresa_id: empresaId, eliminado: false },
+      // validar cliente scope empresa
+      const cliente = await tx.cliente.findFirst({
+        where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
         select: { id: true },
       });
-      if (!proyecto) throw new Error("Proyecto inválido");
+      if (!cliente) throw new Error("Cliente inválido");
 
-      // 2) Validar cliente (si viene)
-      if (cliente_id) {
-        const cliente = await tx.cliente.findFirst({
-          where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
-          select: { id: true },
-        });
-        if (!cliente) throw new Error("Cliente inválido");
-      }
+      // distribuir glosas
+      const glosasDistribuidas = normalizeAndDistributeGlosas(glosas, totalInt);
 
-      // 3) Cargar ventas con detalles + relaciones (para generar items)
-      //    Venta NO tiene empresa_id => validamos scope por:
-      //    - ordenVenta.empresa_id
-      //    - detalles.hhEmpleado.empresa_id
-      //    - detalles.compras.compra.empresa_id
-      const ventas = await tx.venta.findMany({
-        where: {
-          id: { in: ventaIds },
-          OR: [
-            { ordenVenta: { empresa_id: empresaId, eliminado: false } },
-            { detalles: { some: { hhEmpleado: { empresa_id: empresaId } } } },
-            {
-              detalles: {
-                some: {
-                  compras: {
-                    compra: { empresa_id: empresaId, eliminado: false },
-                  },
-                },
-              },
-            },
-          ],
-        },
-        include: {
-          detalles: {
-            include: {
-              tipoItem: { include: { unidadItem: true } },
-              empleado: { include: { usuario: true } },
-              hhEmpleado: true,
-              tipoDia: true,
-              compras: {
-                include: { producto: true, proveedor: true, compra: true },
-              },
-            },
-          },
-          ordenVenta: { include: { proyecto: true, cliente: true } },
-        },
-      });
-
-      if (ventas.length !== ventaIds.length) {
-        throw new Error("Una o más ventas no existen o no pertenecen a la empresa");
-      }
-
-      // 4) Evitar reutilizar ventas
-      const usadas = ventas.filter((v) => v.ordenVentaId);
-      if (usadas.length > 0) {
-        throw new Error(
-          `Ventas ya asociadas a cotización: ${usadas
-            .map((v) => v.numero ?? v.id)
-            .join(", ")}`
-        );
-      }
-
-      // 5) Crear cotización base
+      // crear cot
       const cot = await tx.cotizacion.create({
         data: {
           empresa_id: empresaId,
-          proyecto_id,
-          cliente_id: cliente_id || null,
-          descripcion: descripcion || null,
-          cantidad: cantidadNum, // ✅ guardamos cantidad
+          // proyecto_id: null al crear (por tu requerimiento)
+          proyecto_id: null,
+          cliente_id,
+          asunto: asunto || null,
           terminos_condiciones: terminos_condiciones || null,
           acuerdo_pago: acuerdo_pago || null,
+          subtotal,
+          iva,
+          total: totalInt,
           estado: "COTIZACION",
-          subtotal: 0,
-          iva: 0,
-          total: 0,
-        },
-        select: { id: true },
-      });
-
-      // 6) Vincular ventas a la cotización (ordenVentaId = cot.id)
-      //    (mismo scope de empresa para no tocar ventas ajenas)
-      const upd = await tx.venta.updateMany({
-        where: {
-          id: { in: ventaIds },
-          OR: [
-            { ordenVenta: { empresa_id: empresaId, eliminado: false } },
-            { detalles: { some: { hhEmpleado: { empresa_id: empresaId } } } },
-            {
-              detalles: {
-                some: {
-                  compras: {
-                    compra: { empresa_id: empresaId, eliminado: false },
-                  },
-                },
-              },
-            },
-          ],
-        },
-        data: { ordenVentaId: cot.id },
-      });
-
-      if (upd.count !== ventaIds.length) {
-        throw new Error("No se pudieron vincular todas las ventas (scope empresa)");
-      }
-
-      // 7) Calcular totales desde ventas
-      const { subtotal, iva, total } = calcTotalesFromVentas(ventas, ivaRateNum);
-
-      // 8) ✅ Generar CotizacionItem desde VentaDetalle
-      //    - Si detalle viene de compras => PRODUCTO (producto_id si existe)
-      //    - Si detalle viene de HH => SERVICIO (Item texto libre)
-      //    - precioUnitario = totalDet/cantidad
-      const itemsToCreate = [];
-
-      for (const v of ventas) {
-        for (const d of v.detalles || []) {
-          const cantidadDetRaw = Number(d.cantidad ?? 1);
-          const cantidadDet =
-            Number.isFinite(cantidadDetRaw) && cantidadDetRaw > 0
-              ? Math.trunc(cantidadDetRaw)
-              : 1;
-
-          const totalDet = Number(d.total ?? d.ventaTotal ?? 0);
-          const precioUnitario = cantidadDet > 0 ? totalDet / cantidadDet : totalDet;
-
-          const isCompra = !!d?.compras;
-          const empleadoNombre =
-            d?.empleado?.usuario?.nombre ||
-            d?.empleado?.usuario?.correo ||
-            d?.empleado?.id ||
-            "";
-
-          const productoNombre =
-            d?.compras?.producto?.nombre || d?.compras?.item || null;
-
-          const itemLabel = isCompra
-            ? productoNombre || "Producto"
-            : empleadoNombre
-            ? `HH ${empleadoNombre}`.trim()
-            : d?.tipoItem?.nombre || "Servicio";
-
-          // Producto_id: intenta sacar desde compras si existe
-          const productoId =
-            d?.compras?.productoId || d?.compras?.producto?.id || null;
-
-          itemsToCreate.push({
-            cotizacion_id: cot.id,
-            tipo: isCompra ? "PRODUCTO" : "SERVICIO",
-            producto_id: isCompra ? productoId : null,
-            Item: isCompra ? null : itemLabel,
-            descripcion: d.descripcion || null,
-            cantidad: cantidadDet,
-            precioUnitario: Number.isFinite(precioUnitario) ? precioUnitario : 0,
-            total: Number.isFinite(totalDet) ? totalDet : 0,
-          });
-        }
-      }
-
-      if (itemsToCreate.length > 0) {
-        await tx.cotizacionItem.createMany({
-          data: itemsToCreate,
-        });
-      }
-
-      // 9) Actualizar totales y retornar con items incluidos
-      return tx.cotizacion.update({
-        where: { id: cot.id },
-        data: { subtotal, iva, total },
-        include: {
-          proyecto: true,
-          cliente: true,
-          items: { include: { producto: true } }, // ✅ ahora sí aparecen items
-          ventas: {
-            include: {
-              detalles: true,
-            },
+          glosas: {
+            create: glosasDistribuidas.map((g, idx) => ({
+              descripcion: g.descripcion,
+              monto: g.monto,
+              manual: !!g.manual,
+              orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
+            })),
           },
         },
+        include: {
+          cliente: true,
+          proyecto: true,
+          glosas: { orderBy: { orden: "asc" } },
+        },
       });
+
+      return cot;
     });
 
     return reply.code(201).send(created);
   } catch (e) {
     return reply.code(e.statusCode || 400).send({
-      error: "Error al crear cotización desde ventas",
+      error: "Error al crear cotización",
       detalle: e.message,
     });
   }
 };
 
+/* =========================
+   PUT /cotizaciones/:id
+   Actualiza cabecera: asunto, términos, acuerdo, cliente, total (recalcula glosas autos)
+========================= */
+export const updateCotizacion = async (request, reply) => {
+  try {
+    const empresaId = getEmpresaId(request);
+    const { id } = request.params;
+
+    const {
+      cliente_id,
+      asunto,
+      terminos_condiciones,
+      acuerdo_pago,
+      ivaRate = 0.19,
+      total,
+      glosas, // opcional: si lo mandas, reemplaza glosas completas
+      proyecto_id, // opcional: para asignar después
+    } = request.body || {};
+
+    const existing = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false },
+      include: { glosas: { orderBy: { orden: "asc" } } },
+    });
+    if (!existing) return reply.code(404).send({ error: "Cotización no encontrada" });
+
+    const nextTotal =
+      total == null || String(total).trim() === ""
+        ? Number(existing.total || 0)
+        : Number(total);
+
+    if (!Number.isFinite(nextTotal) || nextTotal <= 0) {
+      return reply.code(400).send({ error: "total inválido (entero > 0)" });
+    }
+
+    const { subtotal, iva, total: totalInt } = calcFromTotal(nextTotal, ivaRate);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      // validar cliente si cambia
+      if (cliente_id) {
+        const c = await tx.cliente.findFirst({
+          where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
+          select: { id: true },
+        });
+        if (!c) throw new Error("Cliente inválido");
+      }
+
+      // validar proyecto si viene (asignación posterior)
+      if (proyecto_id) {
+        const p = await tx.proyecto.findFirst({
+          where: { id: proyecto_id, empresa_id: empresaId, eliminado: false },
+          select: { id: true },
+        });
+        if (!p) throw new Error("Proyecto inválido");
+      }
+
+      // si vienen glosas, las reemplazamos
+      if (Array.isArray(glosas)) {
+        const distrib = normalizeAndDistributeGlosas(glosas, totalInt);
+
+        // borrar glosas antiguas
+        await tx.cotizacionGlosa.deleteMany({ where: { cotizacion_id: id } });
+
+        // crear nuevas
+        await tx.cotizacionGlosa.createMany({
+          data: distrib.map((g, idx) => ({
+            cotizacion_id: id,
+            descripcion: g.descripcion,
+            monto: g.monto,
+            manual: !!g.manual,
+            orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
+          })),
+        });
+      } else {
+        // no vinieron glosas: si el total cambió, recalcular SOLO autos en base a manuales existentes
+        const current = existing.glosas || [];
+        if (Number(existing.total || 0) !== totalInt && current.length) {
+          const payload = current.map((g, i) => ({
+            descripcion: g.descripcion,
+            monto: g.monto,
+            manual: g.manual,
+            orden: g.orden ?? i,
+          }));
+          const distrib = normalizeAndDistributeGlosas(payload, totalInt);
+
+          // update cada glosa
+          for (let i = 0; i < current.length; i++) {
+            await tx.cotizacionGlosa.update({
+              where: { id: current[i].id },
+              data: { monto: distrib[i].monto, manual: distrib[i].manual, orden: distrib[i].orden },
+            });
+          }
+        }
+      }
+
+      return tx.cotizacion.update({
+        where: { id },
+        data: {
+          ...(cliente_id ? { cliente_id } : {}),
+          ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
+          asunto: asunto !== undefined ? (asunto || null) : undefined,
+          terminos_condiciones:
+            terminos_condiciones !== undefined ? (terminos_condiciones || null) : undefined,
+          acuerdo_pago: acuerdo_pago !== undefined ? (acuerdo_pago || null) : undefined,
+          subtotal,
+          iva,
+          total: totalInt,
+        },
+        include: {
+          cliente: true,
+          proyecto: true,
+          glosas: { orderBy: { orden: "asc" } },
+        },
+      });
+    });
+
+    return reply.send(updated);
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al actualizar cotización",
+      detalle: e.message,
+    });
+  }
+};
 
 /* =========================
    POST /cotizaciones/:id/estado
@@ -383,9 +419,7 @@ export const updateCotizacionEstado = async (request, reply) => {
       select: { estado: true },
     });
 
-    if (!actual) {
-      return reply.code(404).send({ error: "Cotización no encontrada" });
-    }
+    if (!actual) return reply.code(404).send({ error: "Cotización no encontrada" });
 
     if (!allowed[actual.estado].includes(estado)) {
       return reply.code(400).send({
@@ -399,17 +433,13 @@ export const updateCotizacionEstado = async (request, reply) => {
       include: {
         proyecto: true,
         cliente: true,
-        ventas: {
-          include: { detalles: true },
-        },
+        glosas: { orderBy: { orden: "asc" } },
       },
     });
 
-    const { subtotal, iva, total } = calcTotalesFromVentas(updated.ventas);
-
-    return reply.send({ ...updated, subtotal, iva, total });
+    return reply.send(updated);
   } catch (e) {
-    return reply.code(500).send({
+    return reply.code(e.statusCode || 500).send({
       error: "Error al actualizar estado",
       detalle: e.message,
     });

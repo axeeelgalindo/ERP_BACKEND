@@ -20,7 +20,7 @@ export default async function ventasRoutes(server) {
 
   server.post("/ventas/add", createVenta);
   server.get("/ventas", listVentas);
-
+  server.get("/ventas/:id", getVenta);
   server.post("/tipoDia/add", createTipoDia);
   server.post("/unidadItem/add", createUnidadItem);
   server.post("/tipoItem/add", createTipoItem);

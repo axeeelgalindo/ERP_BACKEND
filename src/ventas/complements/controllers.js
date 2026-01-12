@@ -88,20 +88,21 @@ export const getUnidadItems = async (request, reply) => {
    ========================= */
 export const createTipoItem = async (request, reply) => {
   try {
-    const { nombre, porcentajeUtilidad, unidadItemId } = request.body || {};
+    const { nombre, codigo, porcentajeUtilidad, unidadItemId } = request.body || {};
 
     if (!nombre) {
-      return reply
-        .status(400)
-        .send({ error: "El campo 'nombre' es obligatorio" });
+      return reply.status(400).send({ error: "El campo 'nombre' es obligatorio" });
     }
 
-    const porcentajeNum =
-      porcentajeUtilidad != null ? Number(porcentajeUtilidad) : 0;
+    const porcentajeNum = porcentajeUtilidad != null ? Number(porcentajeUtilidad) : 0;
+    const codigoClean = codigo != null && String(codigo).trim()
+      ? String(codigo).trim().toUpperCase()
+      : null;
 
     const tipoItem = await prisma.tipoItem.create({
       data: {
         nombre,
+        codigo: codigoClean, // ✅ NUEVO
         porcentajeUtilidad: porcentajeNum,
         unidadItemId: unidadItemId || null,
       },
@@ -116,6 +117,7 @@ export const createTipoItem = async (request, reply) => {
     });
   }
 };
+
 
 export const getTipoItems = async (request, reply) => {
   try {

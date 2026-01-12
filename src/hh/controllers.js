@@ -123,7 +123,6 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     let horas_mensuales = null;
     let porcentaje_efectividad = null;
 
-    // ✅ CIF como float
     let cif = null;
 
     let fileBuffer = null;
@@ -141,12 +140,10 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         if (part.fieldname === "empresa_id") empresa_id = part.value;
         if (part.fieldname === "anio") anio = parseInt(part.value, 10);
         if (part.fieldname === "mes") mes = parseInt(part.value, 10);
-        if (part.fieldname === "horas_mensuales")
-          horas_mensuales = parseFloat(part.value);
+        if (part.fieldname === "horas_mensuales") horas_mensuales = parseFloat(part.value);
         if (part.fieldname === "porcentaje_efectividad")
           porcentaje_efectividad = parseFloat(part.value);
 
-        // ✅ NUEVO: CIF float (acepta "1.234,56" o "1234.56")
         if (part.fieldname === "cif") cif = parseNumber(part.value);
       }
     }
@@ -173,8 +170,6 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         error: "horas_mensuales y porcentaje_efectividad son obligatorios",
       });
     }
-
-    // ✅ CIF obligatorio (si lo quieres opcional: quita este bloque)
     if (cif == null || Number.isNaN(cif)) {
       return reply.code(400).send({
         error: "cif es obligatorio y debe ser numérico (float)",
@@ -211,9 +206,7 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       return reply.code(400).send({ error: "Excel vacío o ilegible" });
     }
 
-    const headerRowIndex = rows.findIndex(
-      (r) => r?.[0] === "Nombre" && r?.[1] === "RUT"
-    );
+    const headerRowIndex = rows.findIndex((r) => r?.[0] === "Nombre" && r?.[1] === "RUT");
     if (headerRowIndex === -1) {
       return reply.code(400).send({
         error: "No se encontró cabecera con columnas 'Nombre' y 'RUT'",
@@ -406,50 +399,36 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       const dias_trabajados =
         idx.dias_trabajados != null ? parseInt(row[idx.dias_trabajados]) : null;
 
-      const sueldo_base =
-        idx.sueldo_base != null ? parseNumber(row[idx.sueldo_base]) : null;
+      const sueldo_base = idx.sueldo_base != null ? parseNumber(row[idx.sueldo_base]) : null;
       const extras = idx.extras != null ? parseNumber(row[idx.extras]) : null;
       const gratificacion =
         idx.gratificacion != null ? parseNumber(row[idx.gratificacion]) : null;
 
-      const imponible1 =
-        idx.imponible1 != null ? parseNumber(row[idx.imponible1]) : null;
-      const imponible2 =
-        idx.imponible2 != null ? parseNumber(row[idx.imponible2]) : null;
+      const imponible1 = idx.imponible1 != null ? parseNumber(row[idx.imponible1]) : null;
+      const imponible2 = idx.imponible2 != null ? parseNumber(row[idx.imponible2]) : null;
       const movilizacion =
         idx.movilizacion != null ? parseNumber(row[idx.movilizacion]) : null;
-      const colacion =
-        idx.colacion != null ? parseNumber(row[idx.colacion]) : null;
-      const imponible3 =
-        idx.imponible3 != null ? parseNumber(row[idx.imponible3]) : null;
-      const imponible4 =
-        idx.imponible4 != null ? parseNumber(row[idx.imponible4]) : null;
+      const colacion = idx.colacion != null ? parseNumber(row[idx.colacion]) : null;
+      const imponible3 = idx.imponible3 != null ? parseNumber(row[idx.imponible3]) : null;
+      const imponible4 = idx.imponible4 != null ? parseNumber(row[idx.imponible4]) : null;
 
-      const haberes =
-        idx.haberes != null ? parseNumber(row[idx.haberes]) : null;
+      const haberes = idx.haberes != null ? parseNumber(row[idx.haberes]) : null;
 
       const afp = idx.afp != null ? parseNumber(row[idx.afp]) : null;
       const unico = idx.unico != null ? parseNumber(row[idx.unico]) : null;
       const previsional =
         idx.previsional != null ? parseNumber(row[idx.previsional]) : null;
       const salud = idx.salud != null ? parseNumber(row[idx.salud]) : null;
-      const antiguo =
-        idx.antiguo != null ? parseNumber(row[idx.antiguo]) : null;
-      const anticipos =
-        idx.anticipos != null ? parseNumber(row[idx.anticipos]) : null;
-      const prestamos =
-        idx.prestamos != null ? parseNumber(row[idx.prestamos]) : null;
+      const antiguo = idx.antiguo != null ? parseNumber(row[idx.antiguo]) : null;
+      const anticipos = idx.anticipos != null ? parseNumber(row[idx.anticipos]) : null;
+      const prestamos = idx.prestamos != null ? parseNumber(row[idx.prestamos]) : null;
       const apv = idx.apv != null ? parseNumber(row[idx.apv]) : null;
 
-      const desctos1 =
-        idx.desctos1 != null ? parseNumber(row[idx.desctos1]) : null;
-      const desctos2 =
-        idx.desctos2 != null ? parseNumber(row[idx.desctos2]) : null;
+      const desctos1 = idx.desctos1 != null ? parseNumber(row[idx.desctos1]) : null;
+      const desctos2 = idx.desctos2 != null ? parseNumber(row[idx.desctos2]) : null;
 
-      const liquido =
-        idx.liquido != null ? parseNumber(row[idx.liquido]) : null;
-      const empleador =
-        idx.empleador != null ? parseNumber(row[idx.empleador]) : null;
+      const liquido = idx.liquido != null ? parseNumber(row[idx.liquido]) : null;
+      const empleador = idx.empleador != null ? parseNumber(row[idx.empleador]) : null;
 
       let pagado = null;
       let feriado = null;
@@ -475,7 +454,6 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         mes,
         nombre_periodo: nombrePeriodo,
 
-        // ✅ CIF float en cada fila (mismo valor)
         cif,
 
         nombre,
@@ -529,22 +507,57 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     // 4) TRANSACCIÓN
     // =============================
     const DEFAULT_EMAIL_DOMAIN = "blueinge.com";
-    const ROL_IMPORT_DEFAULT = null;
 
     const stats = {
       empleadosCreados: 0,
       empleadosActualizados: 0,
       usuariosCreados: 0,
+      usuariosActualizados: 0,
       empleadosVinculadosAUsuario: 0,
       empleadosYaTenianUsuario: 0,
       warnings: [],
     };
 
     await prisma.$transaction(async (tx) => {
+      // ✅ empresa existe (y valida antes de crear users)
+      const empresa = await tx.empresa.findUnique({
+        where: { id: String(empresa_id) },
+        select: { id: true },
+      });
+      if (!empresa) throw new Error(`empresa_id inválido: ${empresa_id}`);
+
+      // ✅ rol default obligatorio
+      const rolDefault = await tx.rolUsuario.findFirst({
+        where: {
+          eliminado: false,
+          OR: [
+            { codigo: "USER" },
+            { codigo: "USUARIO" },
+            { nombre: "USER" },
+            { nombre: "Usuario" },
+            { nombre: "USUARIO" },
+            { nombre: "Empleado" },
+            { codigo: "EMPLEADO" },
+            { nombre: "EMPLEADO" },
+            { codigo: "ADMIN" }, // fallback
+            { nombre: "ADMIN" },
+          ],
+        },
+        select: { id: true },
+        orderBy: { nombre: "asc" },
+      });
+      if (!rolDefault) {
+        throw new Error(
+          "No se encontró un rol default (USER/USUARIO/EMPLEADO/ADMIN). Crea uno en el seed antes de importar."
+        );
+      }
+
+      // borra HH del periodo
       await tx.hHEmpleado.deleteMany({
         where: { empresa_id: String(empresa_id), anio, mes },
       });
 
+      // 4.1 asegurar Empleado + Usuario para cada RUT del excel
       for (const [rutNorm, payload] of upsertsByRutNorm.entries()) {
         if (!rutNorm) continue;
 
@@ -553,16 +566,12 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
 
         const existing = rutMap.get(rutNorm);
 
+        // A) si no existe empleado => crea placeholder (sin usuario aún)
         if (!existing) {
           const nuevo = await tx.empleado.create({
-            data: {
-              rut: String(rutRaw),
-              activo: true,
-              usuario_id: null,
-            },
+            data: { rut: String(rutRaw), activo: true, usuario_id: null },
             select: { id: true, rut: true, usuario_id: true },
           });
-
           rutMap.set(rutNorm, { id: nuevo.id, rut: nuevo.rut, usuario_id: nuevo.usuario_id });
           stats.empleadosCreados++;
         } else {
@@ -576,11 +585,13 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         const cur = rutMap.get(rutNorm);
         if (!cur?.id) continue;
 
+        // B) si empleado ya tiene usuario, listo
         if (cur.usuario_id) {
           stats.empleadosYaTenianUsuario++;
           continue;
         }
 
+        // C) crear/asegurar correo único
         const local = buildEmailLocalPartFromName(nombreRaw);
         const correo = await ensureUniqueEmail(tx, empresa_id, local, DEFAULT_EMAIL_DOMAIN);
 
@@ -593,42 +604,52 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
           continue;
         }
 
-        let rol_id = ROL_IMPORT_DEFAULT;
-        if (!rol_id) {
-          const rol = await tx.rolUsuario.findFirst({
-            where: {
-              eliminado: false,
-              OR: [{ codigo: "USUARIO" }, { nombre: "Usuario" }, { nombre: "Empleado" }],
-            },
-            select: { id: true },
-          });
-          rol_id = rol?.id || null;
-        }
-
+        // D) crear o upsert usuario (por correo+eliminado=false)
         const pass = randomPassword();
         const hash = await bcrypt.hash(pass, 10);
 
-        const usuario = await tx.usuario.create({
-          data: {
-            empresa_id: String(empresa_id),
-            rol_id,
-            nombre: String(nombreRaw).trim() || String(rutRaw),
+        const nombreUsuario = String(nombreRaw).trim() || String(rutRaw);
+
+        const usuario = await tx.usuario.upsert({
+          where: { correo_eliminado: { correo, eliminado: false } },
+          update: {
+            nombre: nombreUsuario,
+            contrasena: hash,
+            // ✅ relaciones obligatorias
+            empresa: { connect: { id: empresa.id } },
+            rol: { connect: { id: rolDefault.id } },
+            eliminado: false,
+            eliminado_en: null,
+          },
+          create: {
+            nombre: nombreUsuario,
             correo,
             contrasena: hash,
+            // ✅ relaciones obligatorias
+            empresa: { connect: { id: empresa.id } },
+            rol: { connect: { id: rolDefault.id } },
           },
           select: { id: true },
         });
+
+        // stats (creado vs actualizado) sin hacer query extra:
+        // Prisma no entrega flag, así que lo aproximamos:
+        // si existía correo, fue update; si no, create.
+        // Para no consultar 2 veces, dejamos conteo simple:
+        // (si quieres exactitud, hacemos findFirst antes, pero es más lento)
         stats.usuariosCreados++;
 
+        // E) vincular empleado a usuario
         await tx.empleado.update({
           where: { id: cur.id },
-          data: { usuario_id: usuario.id },
+          data: { usuario_id: usuario.id, eliminado: false, eliminado_en: null, activo: true },
         });
 
         rutMap.set(rutNorm, { ...cur, usuario_id: usuario.id });
         stats.empleadosVinculadosAUsuario++;
       }
 
+      // 4.2 Inserta HHEmpleado para el periodo (con empleado_id si existe en rutMap)
       const dataFinal = registros.map((r) => {
         const empleado_id =
           r._rutNorm && rutMap.has(r._rutNorm) ? rutMap.get(r._rutNorm).id : null;
