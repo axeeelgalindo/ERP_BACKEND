@@ -1,60 +1,35 @@
-import {
-  listVentas,
-  getVenta,
-  createVenta,
-  updateVenta,
-  deleteVenta,
-  disableVenta,
-  restoreVenta,
-  setEstadoVenta,
-  addItem,
-  updateItem,
-  deleteItem,
-} from "./controllers.js";
+import { listVentas, createVenta,listOrdenesVenta, getVenta } from "./controllers.js";
 
 import {
-  VentaQuery,
-  VentaCreateBody,
-  VentaUpdateBody,
-  VentaIdParam,
-  EstadoBody,
-  ItemCreateBody,
-  ItemUpdateBody,
-  ItemIdParam,
-} from "./validators.js";
+  createTipoDia,
+  createTipoItem,
+  createUnidadItem,
+  getTipoDias,
+  getTipoItems,
+  getUnidadItems,
+  listCompraItemsForVentas,
+  listEmpleadosForVentas,
+  listHHEmpleadosForVentas,
+  
+
+} from "./complements/controllers.js";
+
 
 export default async function ventasRoutes(server) {
-  server.get("/ventas", { schema: { querystring: VentaQuery } }, listVentas);
-  server.get("/ventas/:id", { schema: { params: VentaIdParam } }, getVenta);
+  server.get("/ventas/ordenes-venta", listOrdenesVenta);
 
-  server.post("/ventas/add", { schema: { body: VentaCreateBody } }, createVenta);
+  server.post("/ventas/add", createVenta);
+  server.get("/ventas", listVentas);
+  server.get("/ventas/:id", getVenta);
+  server.post("/tipoDia/add", createTipoDia);
+  server.post("/unidadItem/add", createUnidadItem);
+  server.post("/tipoItem/add", createTipoItem);
 
-  server.patch("/ventas/update/:id", {
-    schema: { params: VentaIdParam, body: VentaUpdateBody },
-  }, updateVenta);
+  server.get("/ventas/tipodias", getTipoDias);
+  server.get("/ventas/tipoitems", getTipoItems);
+  server.get("/ventas/unidaditems", getUnidadItems);
 
-  server.delete("/ventas/delete/:id", {
-    schema: { params: VentaIdParam, querystring: VentaQuery },
-  }, deleteVenta);
-
-  server.patch("/ventas/disable/:id", { schema: { params: VentaIdParam } }, disableVenta);
-  server.patch("/ventas/restore/:id", { schema: { params: VentaIdParam } }, restoreVenta);
-
-  // estado
-  server.patch("/ventas/estado/:id", {
-    schema: { params: VentaIdParam, body: EstadoBody },
-  }, setEstadoVenta);
-
-  // Ítems
-  server.post("/ventas/:id/items", {
-    schema: { params: VentaIdParam, body: ItemCreateBody },
-  }, addItem);
-
-  server.patch("/ventas/items/:itemId", {
-    schema: { params: ItemIdParam, body: ItemUpdateBody },
-  }, updateItem);
-
-  server.delete("/ventas/items/:itemId", {
-    schema: { params: ItemIdParam },
-  }, deleteItem);
+  server.get("/ventas/empleados", listEmpleadosForVentas);
+  server.get("/ventas/hh-empleados", listHHEmpleadosForVentas);
+  server.get("/ventas/compra-items", listCompraItemsForVentas);
 }

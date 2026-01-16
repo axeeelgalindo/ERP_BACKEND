@@ -1,31 +1,42 @@
 // src/usuarios/controllers.js
 import { PrismaClient } from "@prisma/client";
-import crypto from "node:crypto";
-const prisma = new PrismaClient();
+import bcrypt from "bcryptjs";
 
-// Hash simple (igual al seed). Si quieres, cambia a bcrypt.
-const hash = (txt) => crypto.createHash("sha256").update(String(txt)).digest("hex");
+const prisma = new PrismaClient();
 
 /* ============= AUTH ============= */
 export const makeLogin = (server) => async (request, reply) => {
   const { correo, contrasena } = request.body || {};
-  const email = String(correo || "").trim().toLowerCase();
+  const rawEmail = String(correo || "").trim().toLowerCase();
 
-  const user = await prisma.usuario.findUnique({
+  if (!rawEmail || !contrasena) {
+    return reply.badRequest("Correo y contraseña son obligatorios");
+  }
+
+  // buscamos por correo + eliminado = false
+  const user = await prisma.usuario.findFirst({
     where: {
-      // usa la unique compuesta definida en el schema
-      correo_eliminado: { correo: email, eliminado: false },
+      correo: rawEmail,
+      eliminado: false,
     },
     include: {
       empresa: { select: { id: true, nombre: true } },
-      rol:     { select: { id: true, nombre: true, codigo: true } },
+      rol: { select: { id: true, nombre: true, codigo: true } },
     },
   });
 
-  if (!user) return reply.unauthorized("Credenciales inválidas");
+  if (!user) {
+    console.log("[LOGIN] usuario no encontrado para correo:", rawEmail);
+    return reply.unauthorized("Credenciales inválidas");
+  }
 
-  const ok = user.contrasena === hash(contrasena); // tu función hash
-  if (!ok) return reply.unauthorized("Credenciales inválidas");
+  // 🔐 compara contra el hash bcrypt del seed
+  const ok = await bcrypt.compare(String(contrasena), user.contrasena);
+
+  if (!ok) {
+    console.log("[LOGIN] contraseña incorrecta para:", rawEmail);
+    return reply.unauthorized("Credenciales inválidas");
+  }
 
   const payload = {
     sub: user.id,
@@ -35,10 +46,12 @@ export const makeLogin = (server) => async (request, reply) => {
     rol: user.rol,
     empresa: user.empresa,
   };
+
   const token = server.jwt.sign(payload, { expiresIn: "8h" });
 
   return reply.send({ token, user: payload });
 };
+
 
 export const me = async (request, reply) => {
   // requiere server.authenticate en la ruta

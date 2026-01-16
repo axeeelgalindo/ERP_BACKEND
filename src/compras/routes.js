@@ -1,35 +1,39 @@
 import {
   listCompras,
-  getCompra,
   createCompra,
-  updateCompra,
   deleteCompra,
   disableCompra,
+  getCompra,
   restoreCompra,
+  updateCompra,
+  listComprasDisponiblesVenta,
+  importComprasCSV,
 } from "./controllers.js";
 
-import {
-  CompraQuery,
-  CompraCreateBody,
-  CompraUpdateBody,
-  CompraIdParam,
-} from "./validators.js";
+export default async function compraRoutes(server) {
+  // upload csv
+  server.post("/compras/import-csv", importComprasCSV);
 
-export default async function comprasRoutes(server) {
-  // Autenticación ya está global, seguimos el patrón del resto
-  server.get("/compras", { schema: { querystring: CompraQuery } }, listCompras);
-  server.get("/compras/:id", { schema: { params: CompraIdParam } }, getCompra);
+  // LIST
+  server.get("/compras", listCompras);
 
-  server.post("/compras/add", { schema: { body: CompraCreateBody } }, createCompra);
+  // GET
+  server.get("/compras/:id", getCompra);
 
-  server.patch("/compras/update/:id", {
-    schema: { params: CompraIdParam, body: CompraUpdateBody },
-  }, updateCompra);
+  // CREATE
+  server.post("/compras", createCompra);
 
-  server.delete("/compras/delete/:id", {
-    schema: { params: CompraIdParam, querystring: CompraQuery },
-  }, deleteCompra);
+  // UPDATE
+  server.put("/compras/:id", updateCompra);
 
-  server.patch("/compras/disable/:id", { schema: { params: CompraIdParam } }, disableCompra);
-  server.patch("/compras/restore/:id", { schema: { params: CompraIdParam } }, restoreCompra);
+  // SOFT DELETE
+  server.patch("/compras/:id/disable", disableCompra);
+
+  // RESTORE
+  server.patch("/compras/:id/restore", restoreCompra);
+
+  // DELETE físico
+  server.delete("/compras/:id", deleteCompra);
+
+  server.get("/compras/disponibles-venta", listComprasDisponiblesVenta);
 }

@@ -1,536 +1,467 @@
 // src/modules/cotizaciones/controllers.js
 import { PrismaClient } from "@prisma/client";
-import { resolveScope } from "../lib/scope.js";
-import { httpError } from "../lib/errors.js";
-
 const prisma = new PrismaClient();
-const PAGE = 1;
-const SIZE = 20;
 
-/* ===== Helpers ===== */
-const toBool = (v) => {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "number") return v !== 0;
-  if (typeof v === "string")
-    return ["1", "true", "on", "yes"].includes(v.toLowerCase());
-  return false;
-};
+/* =========================
+   Helpers (scope JWT)
+========================= */
+function getScope(request) {
+  const empresaId =
+    request?.scope?.empresaId ??
+    request?.headers?.["x-empresa-id"] ??
+    null;
 
-const ESTADOS = ["borrador", "enviada", "aceptada", "rechazada", "anulada"];
+  const userId =
+    request?.scope?.userId ??
+    request?.user?.userId ??
+    request?.user?.sub ??
+    null;
 
-export async function getNextNumeroCotizacion(request, reply) {
-  // Si quisieras filtrar por empresa, puedes usar resolveScope,
-  // pero como el campo numero es autoincrement global,
-  // mejor usar el máximo global para que coincida.
-  // const scope = resolveScope(request);
+  if (!userId) {
+    const err = new Error("Falta usuario en el contexto (token)");
+    err.statusCode = 401;
+    throw err;
+  }
 
-  const last = await prisma.cotizacion.findFirst({
-    where: { eliminado: false },
-    orderBy: { numero: "desc" },
-    select: { numero: true },
-  });
+  // Solo obliga empresa para no-MASTER (igual que tu authz.js)
+  const rolCodigo = request?.scope?.rolCodigo ?? request?.user?.rol?.codigo ?? null;
+  if (!empresaId && rolCodigo !== "MASTER") {
+    const err = new Error("Falta empresa en el contexto");
+    err.statusCode = 401;
+    throw err;
+  }
 
-  const nextNumero = (last?.numero ?? 0) + 1;
-
-  return reply.send({ nextNumero });
+  return { empresaId: empresaId ? String(empresaId) : null, userId: String(userId), rolCodigo };
 }
 
-async function assertEntidadEmpresa(tx, tabla, id, empresaId) {
-  if (!id) return;
-  const by = {
-    proyecto: () =>
-      tx.proyecto.findFirst({
-        where: { id, empresa_id: empresaId },
-        select: { id: true },
-      }),
-    cliente: () =>
-      tx.cliente.findFirst({
-        where: { id, empresa_id: empresaId },
-        select: { id: true },
-      }),
-    producto: () =>
-      tx.producto.findFirst({
-        where: { id, empresa_id: empresaId },
-        select: { id: true },
-      }),
-  }[tabla];
-  const ok = await by();
-  if (!ok)
-    throw Object.assign(new Error(`${tabla} no pertenece a tu empresa`), {
-      statusCode: 403,
-    });
-}
+const round0 = (n) => Math.round(Number(n || 0));
 
-function calcTotal(items = []) {
-  return items.reduce(
-    (a, it) => a + Number(it.cantidad || 0) * Number(it.precio_unit || 0),
+function calcTotalVenta(v) {
+  return (v?.detalles || []).reduce(
+    (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
     0
   );
 }
 
-async function recalcTotalTX(tx, cotizacionId) {
-  const items = await tx.cotizacionItem.findMany({
-    where: { cotizacion_id: cotizacionId },
-    select: { cantidad: true, precio_unit: true },
-  });
-  const total = calcTotal(items);
-  await tx.cotizacion.update({ where: { id: cotizacionId }, data: { total } });
-  return total;
+function calcFromSubtotal(subtotalNeto, ivaRate = 0.19) {
+  const subtotal = round0(subtotalNeto);
+  const rate = Number(ivaRate);
+  const r = Number.isFinite(rate) ? rate : 0.19;
+  const iva = round0(subtotal * r);
+  const total = round0(subtotal + iva);
+  return { subtotal, iva, total, ivaRate: r };
 }
 
-/* ===== LIST ===== */
-export async function listCotizaciones(request, reply) {
-  const scope = resolveScope(request);
-  const {
-    q,
-    estado,
-    clienteId,
-    proyectoId,
-    desde,
-    hasta,
-    page = PAGE,
-    pageSize = SIZE,
-    includeDeleted,
-    empresaId,
-  } = request.query || {};
+function sumGlosas(glosas) {
+  return (glosas || []).reduce((acc, g) => acc + round0(g?.monto || 0), 0);
+}
 
-  const empresa_id = scope.isMaster
-    ? empresaId || scope.empresaId
-    : scope.empresaId;
 
-  // normalizar page/pageSize (vienen como string)
-  const _page = Number(page) > 0 ? Number(page) : PAGE;
-  const _pageSize = Number(pageSize) > 0 ? Number(pageSize) : SIZE;
+function normalizeVigenciaDias(v) {
+  if (v === undefined || v === null || v === "") return 15; // default “lógico”
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error("vigencia_dias inválido");
+  const i = Math.trunc(n);
+  if (i < 1 || i > 365) throw new Error("vigencia_dias debe estar entre 1 y 365");
+  return i;
+}
 
-  // rango de fechas en creada_en
-  let fechaFilter = {};
-  if (desde || hasta) {
-    const rango = {};
-    if (desde) {
-      // YYYY-MM-DD
-      rango.gte = new Date(desde);
-    }
-    if (hasta) {
-      const end = new Date(hasta);
-      // incluir todo el día "hasta"
-      end.setHours(23, 59, 59, 999);
-      rango.lte = end;
-    }
-    fechaFilter = { creada_en: rango };
-  }
 
-  // filtro de búsqueda (q)
-  let searchFilter = {};
-  if (q) {
-    const or = [
-      {
-        cliente: { nombre: { contains: q, mode: "insensitive" } },
-      },
-      {
-        proyecto: { nombre: { contains: q, mode: "insensitive" } },
-      },
-    ];
+/**
+ * Normaliza glosas:
+ * - descripcion obligatoria
+ * - monto entero >= 0
+ * - manual boolean
+ * - orden (default index)
+ * NO distribuye aquí (tu UI ya distribuye). Solo validamos y ordenamos.
+ */
+function normalizeGlosas(inputGlosas) {
+  const glosas = Array.isArray(inputGlosas) ? inputGlosas : [];
+  if (glosas.length === 0) return [];
 
-    const asNumber = Number(q);
-    if (!Number.isNaN(asNumber)) {
-      // si q es numérico, también buscamos por numero exacto
-      or.unshift({ numero: asNumber });
+  return glosas.map((g, i) => {
+    const desc = String(g?.descripcion || "").trim();
+    if (!desc) throw new Error(`Glosa #${i + 1}: Falta descripción.`);
+
+    const montoRaw = Number(g?.monto ?? 0);
+    if (!Number.isFinite(montoRaw) || montoRaw < 0) {
+      throw new Error(`Glosa #${i + 1}: monto inválido.`);
     }
 
-    searchFilter = { OR: or };
-  }
+    return {
+      descripcion: desc,
+      monto: round0(montoRaw),
+      manual: !!g?.manual,
+      orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : i,
+    };
+  });
+}
 
-  const where = {
-    empresa_id,
-    ...(estado ? { estado } : {}),
-    ...(clienteId ? { cliente_id: clienteId } : {}),
-    ...(proyectoId ? { proyecto_id: proyectoId } : {}),
-    ...(includeDeleted ? {} : { eliminado: false }),
-    ...fechaFilter,
-    ...searchFilter,
-  };
+/* =========================
+   GET /cotizaciones
+========================= */
+export const listCotizaciones = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { estado } = request.query || {};
 
-  const [total, data] = await Promise.all([
-    prisma.cotizacion.count({ where }),
-    prisma.cotizacion.findMany({
+    const where = {
+      ...(empresaId ? { empresa_id: empresaId } : {}),
+      eliminado: false,
+      ...(estado ? { estado } : {}),
+    };
+
+    const cotizaciones = await prisma.cotizacion.findMany({
       where,
-      orderBy: [{ creada_en: "desc" }],
-      skip: (_page - 1) * _pageSize,
-      take: _pageSize,
+      orderBy: { creada_en: "desc" },
       include: {
-        cliente: { select: { id: true, nombre: true } },
-        proyecto: { select: { id: true, nombre: true } },
-        items: true,
-      },
-    }),
-  ]);
-
-  return reply.send({ total, page: _page, pageSize: _pageSize, data });
-}
-
-/* ===== GET ===== */
-export async function getCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-
-  const row = await prisma.cotizacion.findFirst({
-    where: { id, empresa_id: scope.isMaster ? undefined : scope.empresaId },
-    include: {
-      cliente: true,
-      proyecto: true,
-      items: { include: { producto: true } },
-    },
-  });
-  if (!row) return httpError(reply, 404, "Cotización no encontrada");
-  return reply.send(row);
-}
-
-/* ===== CREATE (TX + total backend) ===== */
-export async function createCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const body = request.body || {};
-  const empresa_id = scope.isMaster
-    ? body.empresa_id || scope.empresaId
-    : scope.empresaId;
-
-  const items = Array.isArray(body.items) ? body.items : [];
-  const estado =
-    body.estado && ESTADOS.includes(body.estado)
-      ? body.estado
-      : "borrador";
-
-  const row = await prisma.$transaction(async (tx) => {
-    await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
-    await assertEntidadEmpresa(tx, "cliente", body.cliente_id, empresa_id);
-    for (const it of items) {
-      if (it.producto_id) {
-        await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
-      }
-    }
-
-    // numero lo genera la BD (Int autoincrement)
-    const created = await tx.cotizacion.create({
-      data: {
-        empresa_id,
-        proyecto_id: body.proyecto_id,
-        cliente_id: body.cliente_id,
-        estado,
-        total: 0,
-        items: {
-          create: items.map((it) => ({
-            producto_id: it.producto_id ?? null,
-            cantidad: Number(it.cantidad || 0),
-            precio_unit: Number(it.precio_unit || 0),
-            total: Number(
-              (it.cantidad || 0) * (it.precio_unit || 0)
-            ),
-          })),
-        },
+        cliente: { select: { id: true, nombre: true, rut: true } },
+        proyecto: true,
+        vendedor: { select: { id: true, nombre: true, correo: true } },
+        glosas: { orderBy: { orden: "asc" } },
       },
     });
 
-    const total = await recalcTotalTX(tx, created.id);
-    return { ...created, total };
-  });
+    return reply.send(cotizaciones);
+  } catch (e) {
+    return reply.code(e.statusCode || 500).send({
+      error: "Error al listar cotizaciones",
+      detalle: e.message,
+    });
+  }
+};
 
-  const withItems = await prisma.cotizacion.findUnique({
-    where: { id: row.id },
-    include: { items: true, cliente: true, proyecto: true },
-  });
+export const getCotizacion = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id } = request.params;
 
-  return reply.code(201).send(withItems);
-}
+    const cot = await prisma.cotizacion.findFirst({
+      where: {
+        id,
+        ...(empresaId ? { empresa_id: empresaId } : {}),
+        eliminado: false,
+      },
+      include: {
+        proyecto: true,
+        cliente: { select: { id: true, nombre: true, rut: true, direccion: true } },
+        vendedor: { select: { id: true, nombre: true, correo: true } },
+        glosas: { orderBy: { orden: "asc" } },
+      },
+    });
 
-/* ===== UPDATE (TX + total backend) ===== */
-export async function updateCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-  const data = { ...request.body };
-  if (data.total != null) delete data.total; // siempre backend
-  // tampoco aceptamos "numero" por si acaso
-  if (data.numero != null) delete data.numero;
+    if (!cot) return reply.code(404).send({ error: "Cotización no encontrada" });
 
-  const exists = await prisma.cotizacion.findUnique({
-    where: { id },
-    include: { items: true },
-  });
-  if (!exists) return httpError(reply, 404, "Cotización no encontrada");
-  if (!scope.isMaster && exists.empresa_id !== scope.empresaId)
-    return httpError(reply, 403, "Cotización fuera de tu empresa");
+    return reply.send(cot);
+  } catch (e) {
+    return reply.code(e.statusCode || 500).send({
+      error: "Error al obtener cotización",
+      detalle: e.message,
+    });
+  }
+};
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const empresa_id = exists.empresa_id;
 
-    // validar cambios de FK
-    if (data.proyecto_id && data.proyecto_id !== exists.proyecto_id)
-      await assertEntidadEmpresa(
-        tx,
-        "proyecto",
-        data.proyecto_id,
-        empresa_id
-      );
-    if (data.cliente_id && data.cliente_id !== exists.cliente_id)
-      await assertEntidadEmpresa(
-        tx,
-        "cliente",
-        data.cliente_id,
-        empresa_id
-      );
+/* =========================
+   POST /cotizaciones/add
+   ✅ Crea cotización DESDE ventas seleccionadas (costeo):
+   - cliente obligatorio
+   - proyecto NO obligatorio (null al crear)
+   - vendedor_id desde JWT/session
+   - ventaIds obligatorio
+   - subtotal neto = suma de ventas (detalles.total / ventaTotal)
+   - iva/total calculados
+   - glosas deben sumar SUBTOTAL neto
+========================= */
+export const createCotizacion = async (request, reply) => {
+  try {
+    const { empresaId, userId } = getScope(request);
 
-    // normalizar estado si viene
-    if (data.estado && !ESTADOS.includes(data.estado)) {
-      throw Object.assign(new Error("Estado inválido"), {
-        statusCode: 400,
-      });
+    const {
+      cliente_id,
+      asunto,
+      terminos_condiciones,
+      acuerdo_pago,
+      ivaRate = 0.19,
+      vigencia_dias,
+
+      // ✅ requerido
+      ventaIds = [],
+
+      // ✅ glosas (suman subtotal neto)
+      glosas = [],
+    } = request.body || {};
+
+    if (!cliente_id) return reply.code(400).send({ error: "cliente_id es obligatorio" });
+
+    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
+      return reply.code(400).send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
     }
 
-    // si vienen items, los reemplazamos y recalculamos total
-    const incomingItems = Array.isArray(data.items) ? data.items : null;
-    if (incomingItems) {
-      for (const it of incomingItems) {
-        if (it.producto_id)
-          await assertEntidadEmpresa(
-            tx,
-            "producto",
-            it.producto_id,
-            empresa_id
-          );
+    const ivaRateNum = Number(ivaRate);
+    if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
+      return reply.code(400).send({ error: "ivaRate inválido (ej: 0.19)" });
+    }
+
+    const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
+
+
+    const created = await prisma.$transaction(async (tx) => {
+      // validar cliente scope empresa
+      const cliente = await tx.cliente.findFirst({
+        where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
+        select: { id: true },
+      });
+      if (!cliente) throw new Error("Cliente inválido");
+
+      // cargar ventas con detalles
+      const ventas = await tx.venta.findMany({
+        where: { id: { in: ventaIds } },
+        include: { detalles: true },
+      });
+
+      if (ventas.length !== ventaIds.length) {
+        throw new Error("Una o más ventas no existen");
       }
 
-      await tx.cotizacionItem.deleteMany({ where: { cotizacion_id: id } });
-      if (incomingItems.length) {
-        await tx.cotizacionItem.createMany({
-          data: incomingItems.map((it) => ({
+      // calcular subtotal neto desde ventas
+      const subtotalBase = ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0);
+      if (!subtotalBase || subtotalBase <= 0) {
+        throw new Error("El subtotal neto calculado desde ventas es 0");
+      }
+
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalBase, ivaRateNum);
+
+      // normalizar glosas
+      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+
+      // si no vienen glosas, crear 1 automática con el subtotal neto
+      if (glosasFinal.length === 0) {
+        glosasFinal = [
+          {
+            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
+            monto: subtotal,
+            manual: true,
+            orden: 0,
+          },
+        ];
+      }
+
+      // validar que glosas sumen SUBTOTAL neto
+      const suma = sumGlosas(glosasFinal);
+      if (suma !== subtotal) {
+        throw new Error(
+          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`
+        );
+      }
+
+      // crear cotización
+      const cot = await tx.cotizacion.create({
+        data: {
+          empresa_id: empresaId,
+          proyecto_id: null,
+          cliente_id,
+          vendedor_id: userId, // ✅ vendedor desde token
+          asunto: asunto || null,
+          terminos_condiciones: terminos_condiciones || null,
+          acuerdo_pago: acuerdo_pago || null,
+
+          vigencia_dias: vigenciaDias,
+
+          subtotal,
+          iva,
+          total,
+
+          estado: "COTIZACION",
+
+          glosas: {
+            create: glosasFinal.map((g, idx) => ({
+              descripcion: g.descripcion,
+              monto: g.monto,
+              manual: !!g.manual,
+              orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
+            })),
+          },
+
+          // ✅ relacionar ventas a esta cotización (si tu modelo usa ordenVentaId)
+          // OJO: tu modelo actual usa ventas: Venta[] (relación). Si en tu schema
+          // la relación se hace por ordenVentaId en Venta, esto lo deja vinculado:
+          ventas: {
+            connect: ventaIds.map((id) => ({ id })),
+          },
+        },
+        include: {
+          cliente: true,
+          proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+          ventas: { include: { detalles: true } },
+        },
+      });
+
+      return cot;
+    });
+
+    return reply.code(201).send(created);
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al crear cotización",
+      detalle: e.message,
+    });
+  }
+};
+
+/* =========================
+   PUT /cotizaciones/:id
+   (se mantiene, pero ahora:
+   - NO recalcula por total manual (eso ya no se usa en este flujo)
+   - Permite editar: asunto, términos, acuerdo, cliente, proyecto
+   - Permite reemplazar glosas (deben sumar subtotal actual)
+========================= */
+export const updateCotizacion = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id } = request.params;
+
+    const {
+      cliente_id,
+      asunto,
+      terminos_condiciones,
+      acuerdo_pago,
+      vigencia_dias,
+      glosas, // opcional: si lo mandas, reemplaza glosas completas
+      proyecto_id, // opcional
+    } = request.body || {};
+
+    const existing = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false },
+      include: { glosas: { orderBy: { orden: "asc" } } },
+    });
+
+    if (!existing) return reply.code(404).send({ error: "Cotización no encontrada" });
+
+    const updated = await prisma.$transaction(async (tx) => {
+      // validar cliente si cambia
+      if (cliente_id) {
+        const c = await tx.cliente.findFirst({
+          where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
+          select: { id: true },
+        });
+        if (!c) throw new Error("Cliente inválido");
+      }
+
+      // validar proyecto si viene
+      if (proyecto_id) {
+        const p = await tx.proyecto.findFirst({
+          where: { id: proyecto_id, empresa_id: empresaId, eliminado: false },
+          select: { id: true },
+        });
+        if (!p) throw new Error("Proyecto inválido");
+      }
+
+      // si vienen glosas, las reemplazamos (deben sumar subtotal neto actual)
+      if (Array.isArray(glosas)) {
+        const distrib = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+
+        const suma = sumGlosas(distrib);
+        if (suma !== round0(existing.subtotal)) {
+          throw new Error(
+            `Las glosas deben sumar el subtotal neto (${round0(existing.subtotal)}). Suma glosas=${suma}.`
+          );
+        }
+
+        await tx.cotizacionGlosa.deleteMany({ where: { cotizacion_id: id } });
+
+        await tx.cotizacionGlosa.createMany({
+          data: distrib.map((g, idx) => ({
             cotizacion_id: id,
-            producto_id: it.producto_id ?? null,
-            cantidad: Number(it.cantidad || 0),
-            precio_unit: Number(it.precio_unit || 0),
-            total: Number(
-              (it.cantidad || 0) * (it.precio_unit || 0)
-            ),
+            descripcion: g.descripcion,
+            monto: g.monto,
+            manual: !!g.manual,
+            orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
           })),
         });
       }
-      delete data.items;
-    }
 
-    await tx.cotizacion.update({ where: { id }, data });
-    await recalcTotalTX(tx, id);
-
-    return tx.cotizacion.findUnique({
-      where: { id },
-      include: { items: true, cliente: true, proyecto: true },
+      return tx.cotizacion.update({
+        where: { id },
+        data: {
+          ...(cliente_id ? { cliente_id } : {}),
+          ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
+          ...(vigencia_dias !== undefined ? { vigencia_dias: normalizeVigenciaDias(vigencia_dias) } : {}),
+          asunto: asunto !== undefined ? (asunto || null) : undefined,
+          terminos_condiciones:
+            terminos_condiciones !== undefined ? (terminos_condiciones || null) : undefined,
+          acuerdo_pago: acuerdo_pago !== undefined ? (acuerdo_pago || null) : undefined,
+        },
+        include: {
+          cliente: true,
+          proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+        },
+      });
     });
-  });
 
-  return reply.send(updated);
-}
-
-/* ===== DELETE (físico, con force) ===== */
-export async function deleteCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-  const { force } = request.query || {};
-
-  const row = await prisma.cotizacion.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-    select: { id: true, estado: true },
-  });
-  if (!row) return httpError(reply, 404, "Cotización no encontrada");
-
-  if (!toBool(force) && row.estado !== "borrador") {
-    return httpError(
-      reply,
-      409,
-      "Solo cotizaciones en borrador. Usa ?force=true para borrar."
-    );
+    return reply.send(updated);
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al actualizar cotización",
+      detalle: e.message,
+    });
   }
+};
 
-  await prisma.$transaction(async (tx) => {
-    await tx.cotizacionItem.deleteMany({ where: { cotizacion_id: id } });
-    await tx.cotizacion.delete({ where: { id } });
-  });
+/* =========================
+   POST /cotizaciones/:id/estado
+========================= */
+export const updateCotizacionEstado = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id } = request.params;
+    const { estado } = request.body || {};
 
-  return reply.send({ success: true });
-}
-
-/* ===== SOFT-DELETE / RESTORE ===== */
-export async function disableCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-
-  const row = await prisma.cotizacion.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-  });
-  if (!row) return httpError(reply, 404, "Cotización no encontrada");
-  if (row.eliminado)
-    return httpError(reply, 409, "Cotización ya está eliminada");
-
-  const upd = await prisma.cotizacion.update({
-    where: { id },
-    data: { eliminado: true, eliminado_en: new Date() },
-  });
-  return reply.send({ success: true, cotizacion: upd });
-}
-
-export async function restoreCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-
-  const row = await prisma.cotizacion.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-  });
-  if (!row) return httpError(reply, 404, "Cotización no encontrada");
-  if (!row.eliminado)
-    return httpError(reply, 409, "Cotización no está eliminada");
-
-  const upd = await prisma.cotizacion.update({
-    where: { id },
-    data: { eliminado: false, eliminado_en: null },
-  });
-  return reply.send({ success: true, cotizacion: upd });
-}
-
-/* ===== PATCH ESTADO ===== */
-export async function setEstadoCotizacion(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-  const { estado } = request.body || {};
-  if (!ESTADOS.includes(estado))
-    return httpError(reply, 400, "Estado inválido");
-
-  const exists = await prisma.cotizacion.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-    select: { id: true },
-  });
-  if (!exists) return httpError(reply, 404, "Cotización no encontrada");
-
-  const row = await prisma.cotizacion.update({
-    where: { id },
-    data: { estado },
-  });
-  return reply.send({ ok: true, row });
-}
-
-/* ===== ÍTEMS: add / update / delete (siempre recalcular) ===== */
-export async function addItem(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params; // cotizacionId
-  const body = request.body || {};
-
-  const cot = await prisma.cotizacion.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-    select: { id: true, empresa_id: true },
-  });
-  if (!cot) return httpError(reply, 404, "Cotización no encontrada");
-
-  const result = await prisma.$transaction(async (tx) => {
-    if (body.producto_id) {
-      await assertEntidadEmpresa(
-        tx,
-        "producto",
-        body.producto_id,
-        cot.empresa_id
-      );
+    const valid = ["COTIZACION", "ORDEN_VENTA", "FACTURADA", "PAGADA"];
+    if (!valid.includes(estado)) {
+      return reply.code(400).send({ error: "Estado inválido" });
     }
-    await tx.cotizacionItem.create({
-      data: {
-        cotizacion_id: id,
-        producto_id: body.producto_id ?? null,
-        cantidad: Number(body.cantidad || 0),
-        precio_unit: Number(body.precio_unit || 0),
-        total: Number(
-          (body.cantidad || 0) * (body.precio_unit || 0)
-        ),
-      },
-    });
-    await recalcTotalTX(tx, id);
 
-    return tx.cotizacion.findUnique({
+    const allowed = {
+      COTIZACION: ["ORDEN_VENTA"],
+      ORDEN_VENTA: ["FACTURADA"],
+      FACTURADA: ["PAGADA"],
+      PAGADA: [],
+    };
+
+    const actual = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false },
+      select: { estado: true },
+    });
+
+    if (!actual) return reply.code(404).send({ error: "Cotización no encontrada" });
+
+    if (!allowed[actual.estado].includes(estado)) {
+      return reply.code(400).send({
+        error: `Transición no permitida: ${actual.estado} → ${estado}`,
+      });
+    }
+
+    const updated = await prisma.cotizacion.update({
       where: { id },
-      include: { items: true },
-    });
-  });
-
-  return reply.code(201).send(result);
-}
-
-export async function updateItem(request, reply) {
-  const scope = resolveScope(request);
-  const { itemId } = request.params;
-  const body = request.body || {};
-
-  const item = await prisma.cotizacionItem.findFirst({
-    where: { id: itemId },
-    include: { cotizacion: true },
-  });
-  if (!item) return httpError(reply, 404, "Ítem no encontrado");
-  if (!scope.isMaster && item.cotizacion.empresa_id !== scope.empresaId)
-    return httpError(reply, 403, "Fuera de tu empresa");
-
-  const updated = await prisma.$transaction(async (tx) => {
-    if (body.producto_id) {
-      await assertEntidadEmpresa(
-        tx,
-        "producto",
-        body.producto_id,
-        item.cotizacion.empresa_id
-      );
-    }
-    await tx.cotizacionItem.update({
-      where: { id: itemId },
-      data: {
-        ...(body.producto_id !== undefined
-          ? { producto_id: body.producto_id }
-          : {}),
-        ...(body.cantidad !== undefined
-          ? { cantidad: Number(body.cantidad) }
-          : {}),
-        ...(body.precio_unit !== undefined
-          ? { precio_unit: Number(body.precio_unit) }
-          : {}),
-        ...(body.cantidad !== undefined || body.precio_unit !== undefined
-          ? {
-              total: Number(
-                (body.cantidad ?? item.cantidad) *
-                  (body.precio_unit ?? item.precio_unit)
-              ),
-            }
-          : {}),
+      data: { estado },
+      include: {
+        proyecto: true,
+        cliente: true,
+        vendedor: { select: { id: true, nombre: true, correo: true } },
+        glosas: { orderBy: { orden: "asc" } },
       },
     });
-    await recalcTotalTX(tx, item.cotizacion_id);
 
-    return tx.cotizacion.findUnique({
-      where: { id: item.cotizacion_id },
-      include: { items: true },
+    return reply.send(updated);
+  } catch (e) {
+    return reply.code(e.statusCode || 500).send({
+      error: "Error al actualizar estado",
+      detalle: e.message,
     });
-  });
-
-  return reply.send(updated);
-}
-
-export async function deleteItem(request, reply) {
-  const scope = resolveScope(request);
-  const { itemId } = request.params;
-
-  const item = await prisma.cotizacionItem.findFirst({
-    where: { id: itemId },
-    include: { cotizacion: true },
-  });
-  if (!item) return httpError(reply, 404, "Ítem no encontrado");
-  if (!scope.isMaster && item.cotizacion.empresa_id !== scope.empresaId)
-    return httpError(reply, 403, "Fuera de tu empresa");
-
-  const updated = await prisma.$transaction(async (tx) => {
-    await tx.cotizacionItem.delete({ where: { id: itemId } });
-    await recalcTotalTX(tx, item.cotizacion_id);
-
-    return tx.cotizacion.findUnique({
-      where: { id: item.cotizacion_id },
-      include: { items: true },
-    });
-  });
-
-  return reply.send(updated);
-}
+  }
+};

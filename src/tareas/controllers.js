@@ -7,9 +7,44 @@ const prisma = new PrismaClient();
 const PAGE = 1,
   SIZE = 100;
 
-const daysBetween = (a, b) =>
-  Math.max(1, Math.ceil((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24)));
 const parseDate = (d) => (d ? new Date(d) : null);
+const isNumber = (v) => typeof v === "number" && !Number.isNaN(v);
+const toIntOrNull = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : Math.trunc(n);
+};
+const addDaysInclusive = (date, dias) => {
+  // dias = 1 => mismo día, dias = 5 => +4 días
+  return new Date(date.getTime() + (dias - 1) * 24 * 60 * 60 * 1000);
+};
+
+async function assertEmpleadoInEmpresa(tx, empleadoId, empresaId) {
+  if (!empleadoId) return null;
+
+  const emp = await tx.empleado.findFirst({
+    where: {
+      id: empleadoId,
+      eliminado: false,
+      usuario: {
+        empresa_id: empresaId,
+        eliminado: false,
+        empresa: { eliminado: false },
+      },
+    },
+    select: { id: true },
+  });
+
+  if (!emp) {
+    const err = new Error(
+      "Responsable de subtarea no es empleado de tu empresa o está deshabilitado"
+    );
+    err.statusCode = 403;
+    throw err;
+  }
+
+  return emp;
+}
 
 async function assertProyectoInEmpresa(tx, proyectoId, empresaId) {
   const p = await tx.proyecto.findFirst({
@@ -129,6 +164,7 @@ export async function getTarea(request, reply) {
 }
 
 /* ========== CREAR (responsable debe ser miembro del proyecto) ========== */
+/* ========== CREAR (responsable debe ser miembro del proyecto) ========== */
 export async function createTarea(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
@@ -138,41 +174,76 @@ export async function createTarea(request, reply) {
     descripcion,
     responsable_id,
     prioridad,
-    // aunque vengan en el body, los normalizamos igual
-    estado,
-    avance,
-    es_hito = false,
-    orden,
+    // INPUTS DE FECHA / DÍAS
     fecha_inicio_plan,
-    fecha_fin_plan,
+    dias_plan,
     fecha_inicio_real,
-    fecha_fin_real,
+    dias_reales,
+    detalles, // array opcional de subtareas
   } = body;
 
-  const fip = parseDate(fecha_inicio_plan);
-  const ffp = parseDate(fecha_fin_plan);
-  if (!fip || !ffp || fip > ffp)
-    return httpError(reply, 400, "Rango plan inválido");
+  let fip = parseDate(fecha_inicio_plan);
+  let diasPlan = toIntOrNull(dias_plan);
+
+  // Si NO vienen fechas plan válidas en la tarea,
+  // pero SÍ vienen subtareas, calculamos rango plan desde ellas
+  if ((!fip || !diasPlan || diasPlan <= 0) && Array.isArray(detalles) && detalles.length > 0) {
+    let minInicioPlan = null;
+    let maxFinPlan = null;
+
+    for (const d of detalles) {
+      const dfip = parseDate(d.fecha_inicio_plan);
+      const ddiasPlan = toIntOrNull(d.dias_plan);
+
+      if (!dfip || !ddiasPlan || ddiasPlan <= 0) {
+        return httpError(
+          reply,
+          400,
+          `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`
+        );
+      }
+
+      const dffp = addDaysInclusive(dfip, ddiasPlan);
+
+      if (!minInicioPlan || dfip < minInicioPlan) minInicioPlan = dfip;
+      if (!maxFinPlan || dffp > maxFinPlan) maxFinPlan = dffp;
+    }
+
+    if (minInicioPlan && maxFinPlan) {
+      fip = minInicioPlan;
+      const MS_PER_DAY = 24 * 60 * 60 * 1000;
+      const diffDays = Math.round(
+        (maxFinPlan.getTime() - minInicioPlan.getTime()) / MS_PER_DAY
+      );
+      diasPlan = Math.max(1, diffDays + 1);
+    }
+  }
+
+  if (!fip || !diasPlan || diasPlan <= 0) {
+    return httpError(
+      reply,
+      400,
+      "Debes indicar fecha de inicio plan y días plan mayor a 0 (o definir subtareas con fechas válidas)"
+    );
+  }
+
+  const ffp = addDaysInclusive(fip, diasPlan);
 
   const fir = parseDate(fecha_inicio_real);
-  const ffr = parseDate(fecha_fin_real);
-  if (fir && ffr && fir > ffr)
-    return httpError(reply, 400, "Rango real inválido");
+  const diasReales = toIntOrNull(dias_reales);
+  const ffr =
+    fir && diasReales && diasReales > 0
+      ? addDaysInclusive(fir, diasReales)
+      : null;
 
-  // === normalizar avance y estado ===
-  let finalAvance =
-    typeof avance === "number" && !Number.isNaN(avance) ? avance : 0;
-  if (finalAvance < 0) finalAvance = 0;
-  if (finalAvance > 100) finalAvance = 100;
-
-  let finalEstado;
-  if (finalAvance >= 100) finalEstado = "completada";
-  else if (finalAvance > 0) finalEstado = "en_progreso";
-  else finalEstado = "pendiente";
+  const diasDesviacion =
+    diasPlan != null && diasReales != null ? diasReales - diasPlan : null;
 
   const row = await prisma.$transaction(async (tx) => {
+    // 1) seguridad: proyecto pertenece a la empresa
     await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
 
+    // 2) validar responsable principal (si viene) como miembro del proyecto
     if (responsable_id) {
       const miembro = await tx.proyectoMiembro.findFirst({
         where: {
@@ -199,28 +270,86 @@ export async function createTarea(request, reply) {
       }
     }
 
-    const dias_plan = daysBetween(fip, ffp);
-    const dias_reales = fir && ffr ? daysBetween(fir, ffr) : null;
-
-    return tx.tarea.create({
+    // 3) crear TAREA base
+    const tarea = await tx.tarea.create({
       data: {
         proyecto_id,
         nombre,
         descripcion,
-        responsable_id,
+        responsable_id: responsable_id || null,
         prioridad,
-        estado: finalEstado,
-        avance: finalAvance,
-        es_hito,
-        orden,
+        estado: "pendiente",
+        avance: 0,
         fecha_inicio_plan: fip,
         fecha_fin_plan: ffp,
-        dias_plan,
+        dias_plan: diasPlan,
         fecha_inicio_real: fir,
         fecha_fin_real: ffr,
-        dias_reales,
+        dias_reales: diasReales || null,
+        dias_desviacion: diasDesviacion,
       },
     });
+
+    // 4) si vienen subtareas en el body, crearlas acá
+    if (Array.isArray(detalles) && detalles.length > 0) {
+      for (const d of detalles) {
+        const dfip = parseDate(d.fecha_inicio_plan);
+        const ddiasPlan = toIntOrNull(d.dias_plan);
+
+        if (!dfip || !ddiasPlan || ddiasPlan <= 0) {
+          const err = new Error(
+            `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`
+          );
+          err.statusCode = 400;
+          throw err;
+        }
+
+        const dffp = addDaysInclusive(dfip, ddiasPlan);
+
+        const dfir = d.fecha_inicio_real
+          ? parseDate(d.fecha_inicio_real)
+          : null;
+        const ddiasReales = toIntOrNull(d.dias_reales);
+        const dffr =
+          dfir && ddiasReales && ddiasReales > 0
+            ? addDaysInclusive(dfir, ddiasReales)
+            : null;
+
+        // validar responsable de la subtarea (si viene)
+        if (d.responsable_id) {
+          await assertEmpleadoInEmpresa(
+            tx,
+            d.responsable_id,
+            scope.empresaId
+          );
+        }
+
+        const diasDesviacionDet =
+          ddiasPlan != null && ddiasReales != null
+            ? ddiasReales - ddiasPlan
+            : null;
+
+        await tx.tareaDetalle.create({
+          data: {
+            tarea_id: tarea.id,
+            titulo: d.titulo,
+            descripcion: d.descripcion ?? null,
+            responsable_id: d.responsable_id || null,
+            estado: "pendiente",
+            avance: 0,
+            fecha_inicio_plan: dfip,
+            fecha_fin_plan: dffp,
+            dias_plan: ddiasPlan,
+            fecha_inicio_real: dfir,
+            fecha_fin_real: dffr,
+            dias_reales: ddiasReales || null,
+            dias_desviacion: diasDesviacionDet,
+          },
+        });
+      }
+    }
+
+    return tarea;
   });
 
   return reply.code(201).send({ ok: true, row });
@@ -280,47 +409,71 @@ export async function updateTarea(request, reply) {
       }
     }
 
+    // PLAN: fecha inicio + días => fecha fin
     const fip = data.fecha_inicio_plan
-      ? new Date(data.fecha_inicio_plan)
+      ? parseDate(data.fecha_inicio_plan)
       : tarea.fecha_inicio_plan;
-    const ffp = data.fecha_fin_plan
-      ? new Date(data.fecha_fin_plan)
-      : tarea.fecha_fin_plan;
-    if (fip > ffp)
-      throw Object.assign(new Error("Rango plan inválido"), {
-        statusCode: 400,
-      });
 
-    const fir = data.fecha_inicio_real
-      ? new Date(data.fecha_inicio_real)
+    const diasPlan =
+      Object.prototype.hasOwnProperty.call(data, "dias_plan") &&
+      data.dias_plan !== undefined
+        ? toIntOrNull(data.dias_plan)
+        : tarea.dias_plan;
+
+    if (!fip || !diasPlan || diasPlan <= 0) {
+      throw Object.assign(
+        new Error(
+          "Debes indicar fecha de inicio plan y días plan mayor a 0 para la tarea"
+        ),
+        { statusCode: 400 }
+      );
+    }
+
+    const ffp = addDaysInclusive(fip, diasPlan);
+
+    // REAL: fecha inicio + días => fecha fin (opcional)
+    const fir = Object.prototype.hasOwnProperty.call(
+      data,
+      "fecha_inicio_real"
+    )
+      ? parseDate(data.fecha_inicio_real)
       : tarea.fecha_inicio_real;
-    const ffr = data.fecha_fin_real
-      ? new Date(data.fecha_fin_real)
-      : tarea.fecha_fin_real;
-    if (fir && ffr && fir > ffr)
-      throw Object.assign(new Error("Rango real inválido"), {
-        statusCode: 400,
-      });
 
-    const dias_plan = daysBetween(fip, ffp);
-    const dias_reales = fir && ffr ? daysBetween(fir, ffr) : null;
+    const diasReales = Object.prototype.hasOwnProperty.call(
+      data,
+      "dias_reales"
+    )
+      ? toIntOrNull(data.dias_reales)
+      : tarea.dias_reales;
+
+    let ffr = tarea.fecha_fin_real;
+    if (fir && diasReales && diasReales > 0) {
+      ffr = addDaysInclusive(fir, diasReales);
+    } else if (!fir || !diasReales || diasReales <= 0) {
+      ffr = null;
+    }
+
+    const diasDesviacion =
+      diasPlan != null && diasReales != null ? diasReales - diasPlan : null;
 
     // === normalizar avance/estado si se está actualizando avance ===
     const updateData = {
       ...data,
       fecha_inicio_plan: fip,
       fecha_fin_plan: ffp,
-      dias_plan,
+      dias_plan: diasPlan,
       fecha_inicio_real: fir,
       fecha_fin_real: ffr,
-      dias_reales,
+      dias_reales: diasReales || null,
+      dias_desviacion: diasDesviacion,
     };
 
     if (Object.prototype.hasOwnProperty.call(data, "avance")) {
       let a =
-        typeof data.avance === "number" && !Number.isNaN(data.avance)
+        isNumber(data.avance) && data.avance >= 0 && data.avance <= 100
           ? data.avance
           : 0;
+
       if (a < 0) a = 0;
       if (a > 100) a = 100;
       updateData.avance = a;
@@ -338,7 +491,6 @@ export async function updateTarea(request, reply) {
 
   return reply.send({ ok: true, row });
 }
-
 
 
 /* ========== HARD DELETE ========== */
