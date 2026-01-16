@@ -1,8 +1,7 @@
-//ventas/complements/controllers.js
+// ventas/complements/controllers.js
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
-
 
 /* =========================
    TIPO DIA
@@ -88,16 +87,22 @@ export const getUnidadItems = async (request, reply) => {
    ========================= */
 export const createTipoItem = async (request, reply) => {
   try {
-    const { nombre, codigo, porcentajeUtilidad, unidadItemId } = request.body || {};
+    const { nombre, codigo, porcentajeUtilidad, unidadItemId } =
+      request.body || {};
 
     if (!nombre) {
-      return reply.status(400).send({ error: "El campo 'nombre' es obligatorio" });
+      return reply
+        .status(400)
+        .send({ error: "El campo 'nombre' es obligatorio" });
     }
 
-    const porcentajeNum = porcentajeUtilidad != null ? Number(porcentajeUtilidad) : 0;
-    const codigoClean = codigo != null && String(codigo).trim()
-      ? String(codigo).trim().toUpperCase()
-      : null;
+    const porcentajeNum =
+      porcentajeUtilidad != null ? Number(porcentajeUtilidad) : 0;
+
+    const codigoClean =
+      codigo != null && String(codigo).trim()
+        ? String(codigo).trim().toUpperCase()
+        : null;
 
     const tipoItem = await prisma.tipoItem.create({
       data: {
@@ -117,7 +122,6 @@ export const createTipoItem = async (request, reply) => {
     });
   }
 };
-
 
 export const getTipoItems = async (request, reply) => {
   try {
@@ -140,15 +144,6 @@ export const getTipoItems = async (request, reply) => {
 
 /**
  * GET /ventas/empleados
- * - Usa x-empresa-id (o ?empresa_id)
- *
- * IMPORTANTE:
- * - Si tu modelo Empleado tiene empresa_id propio, usa where: { empresa_id: ... }
- * - Si NO lo tiene y depende del usuario, usa where: { usuario: { empresa_id: ... } }
- *
- * Para no adivinar, lo dejo “dual”:
- *   - primero intenta filtrar por empleado.empresa_id si existe (vía OR)
- *   - si no existe en tu schema, Prisma te va a avisar => ahí dejas SOLO el filtro usuario.
  */
 export const listEmpleadosForVentas = async (request, reply) => {
   try {
@@ -160,7 +155,6 @@ export const listEmpleadosForVentas = async (request, reply) => {
     const empleados = await prisma.empleado.findMany({
       where: {
         eliminado: false,
-        // ✅ tu schema NO tiene empleado.empresa_id, así que filtramos por usuario.empresa_id
         usuario: { empresa_id: String(empresaId) },
       },
       include: { usuario: true },
@@ -178,8 +172,7 @@ export const listEmpleadosForVentas = async (request, reply) => {
 
 /**
  * GET /ventas/hh-empleados?anio=YYYY&mes=MM
- * Devuelve HHEmpleado del período, con empleadoId plano para que el frontend
- * pueda filtrar por empleado y mostrar costoHH.
+ * ✅ Ahora incluye CIF del periodo (relación cif)
  */
 export const listHHEmpleadosForVentas = async (request, reply) => {
   try {
@@ -188,8 +181,10 @@ export const listHHEmpleadosForVentas = async (request, reply) => {
     const anioRaw = request.query.anio;
     const mesRaw = request.query.mes;
 
-    if (!empresaId) return reply.code(400).send({ error: "Falta x-empresa-id" });
-    if (!anioRaw || !mesRaw) return reply.code(400).send({ error: "Falta anio/mes" });
+    if (!empresaId)
+      return reply.code(400).send({ error: "Falta x-empresa-id" });
+    if (!anioRaw || !mesRaw)
+      return reply.code(400).send({ error: "Falta anio/mes" });
 
     const anio = Number(anioRaw);
     const mes = Number(mesRaw);
@@ -199,8 +194,19 @@ export const listHHEmpleadosForVentas = async (request, reply) => {
     }
 
     const mesesES = [
-      "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-      "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+      "",
+      "Enero",
+      "Febrero",
+      "Marzo",
+      "Abril",
+      "Mayo",
+      "Junio",
+      "Julio",
+      "Agosto",
+      "Septiembre",
+      "Octubre",
+      "Noviembre",
+      "Diciembre",
     ];
     const nombrePeriodo = `${mesesES[mes]} ${anio}`;
 
@@ -214,37 +220,37 @@ export const listHHEmpleadosForVentas = async (request, reply) => {
       },
       include: {
         empleado: { include: { usuario: true } },
+        // ✅ TRAER RELACIÓN CIF
+        cif: { select: { id: true, valor: true, anio: true, mes: true } },
       },
+      orderBy: [{ nombre: "asc" }, { creado_en: "desc" }],
     });
 
+    // ✅ Normaliza para que FE tenga:
+    // - empleadoId
+    // - rut
+    // - cif como número (para tu preview)
     const normalized = rows.map((r) => ({
       ...r,
-      empleadoId: r.empleado_id ?? r.empleado?.id ?? null, // ✅ 1 solo nombre para FE
-      rut: r.rut ?? r.empleado?.rut ?? null,               // ✅ todo minúscula
+      empleadoId: r.empleado_id ?? r.empleado?.id ?? null,
+      rut: r.rut ?? r.empleado?.rut ?? null,
+
+      // 👇 compatibilidad: tu FE a veces mira hh.cif como número o hh.cif.valor
+      cif: r.cif?.valor != null ? Number(r.cif.valor) : 0,
+      cifObj: r.cif ? { id: r.cif.id, valor: Number(r.cif.valor) } : null,
     }));
 
     return reply.send(normalized);
   } catch (e) {
     console.error("HHEmpleado error:", e);
-    return reply.code(500).send({ error: "Error HHEmpleado", detalle: e.message });
+    return reply
+      .code(500)
+      .send({ error: "Error HHEmpleado", detalle: e.message });
   }
 };
 
-
-
-
 /**
  * GET /ventas/compra-items
- *
- * Tu frontend usa:
- * - ci.producto
- * - ci.proveedor
- * - ci.compra   ✅ (en tu UI y en createVenta/listVentas lo incluyes)
- *
- * Además:
- * - quitamos take: 500 (tú dijiste que traiga TODO)
- * - dejamos paginación opcional por si después quieres:
- *     ?cursor=<id>&limit=500
  */
 export const listCompraItemsForVentas = async (request, reply) => {
   try {
@@ -258,13 +264,12 @@ export const listCompraItemsForVentas = async (request, reply) => {
 
     const items = await prisma.compraItem.findMany({
       where: {
-        // CompraItem no tiene empresa_id, filtramos por proveedor.empresa_id
         proveedor: { empresa_id: String(empresaId) },
       },
       include: {
         producto: true,
         proveedor: true,
-        compra: true, // ✅ faltaba para tu frontend y para consistencia
+        compra: true,
       },
       orderBy: { id: "desc" },
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -279,4 +284,3 @@ export const listCompraItemsForVentas = async (request, reply) => {
       .send({ error: "Error CompraItems", detalle: e.message });
   }
 };
-

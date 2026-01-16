@@ -109,9 +109,35 @@ function randomPassword(len = 10) {
   return out;
 }
 
+/**
+ * ✅ Helper para obtener empresa_id desde token/header/query
+ * Si falta, levanta error con statusCode 401 para que tu frontend redirija a login.
+ */
+function getEmpresaId(request) {
+  const empresaFromToken =
+    request.user?.empresaId ||
+    request.user?.empresa_id ||
+    request.user?.empresa?.id ||
+    null;
+
+  const empresaFromHeader = request.headers?.["x-empresa-id"] || null;
+  const empresaFromQuery = request.query?.empresa_id || null;
+
+  const empresa_id = empresaFromToken || empresaFromHeader || empresaFromQuery;
+
+  if (!empresa_id) {
+    const err = new Error("Falta empresa en el contexto");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  return String(empresa_id);
+}
+
 // =============================
 // CONTROLLERS
 // =============================
+
 export const uploadLibroRemuneraciones = async (request, reply) => {
   try {
     const parts = request.parts();
@@ -123,6 +149,7 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     let horas_mensuales = null;
     let porcentaje_efectividad = null;
 
+    // ⚠️ Este cif llega como número, pero ahora lo transformamos a FK (cif_id)
     let cif = null;
 
     let fileBuffer = null;
@@ -170,11 +197,6 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         error: "horas_mensuales y porcentaje_efectividad son obligatorios",
       });
     }
-    if (cif == null || Number.isNaN(cif)) {
-      return reply.code(400).send({
-        error: "cif es obligatorio y debe ser numérico (float)",
-      });
-    }
 
     const nombreMeses = [
       "",
@@ -193,6 +215,54 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     ];
     const nombrePeriodo = `${nombreMeses[mes] || `Mes ${mes}`} ${anio}`;
     const horasEfectivas = horas_mensuales * (porcentaje_efectividad / 100);
+
+    // =============================
+    // ✅ CIF: crear/usar último y guardar como FK (cif_id)
+    // =============================
+    let cifCreado = null;
+    let cif_id_final = null;
+
+    if (cif != null && !Number.isNaN(cif)) {
+      // crea CIF para este periodo
+      cifCreado = await prisma.cIF.create({
+        data: {
+          empresa_id: String(empresa_id),
+          anio: Number(anio),
+          mes: Number(mes),
+          valor: Number(cif),
+          nota: `Import libro ${nombrePeriodo}`,
+        },
+      });
+      cif_id_final = cifCreado.id;
+    } else {
+      // usa último del periodo
+      const lastPeriodo = await prisma.cIF.findFirst({
+        where: {
+          empresa_id: String(empresa_id),
+          anio: Number(anio),
+          mes: Number(mes),
+        },
+        orderBy: { creado_en: "desc" },
+      });
+
+      // fallback: último global
+      const lastGlobal = !lastPeriodo
+        ? await prisma.cIF.findFirst({
+            where: { empresa_id: String(empresa_id), anio: null, mes: null },
+            orderBy: { creado_en: "desc" },
+          })
+        : null;
+
+      cif_id_final = (lastPeriodo || lastGlobal)?.id || null;
+    }
+
+    // Si para ti el CIF es obligatorio en import:
+    if (!cif_id_final) {
+      return reply.code(400).send({
+        error:
+          "No hay CIF disponible. Envía 'cif' en el upload o crea uno antes en POST /hh/cif.",
+      });
+    }
 
     // =============================
     // LEER EXCEL
@@ -454,7 +524,8 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         mes,
         nombre_periodo: nombrePeriodo,
 
-        cif,
+        // ✅ ahora CIF es FK
+        cif_id: cif_id_final,
 
         nombre,
         rut: rutRaw,
@@ -632,11 +703,6 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
           select: { id: true },
         });
 
-        // stats (creado vs actualizado) sin hacer query extra:
-        // Prisma no entrega flag, así que lo aproximamos:
-        // si existía correo, fue update; si no, create.
-        // Para no consultar 2 veces, dejamos conteo simple:
-        // (si quieres exactitud, hacemos findFirst antes, pero es más lento)
         stats.usuariosCreados++;
 
         // E) vincular empleado a usuario
@@ -663,14 +729,21 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     return reply.code(200).send({
       msg: "Libro de remuneraciones importado correctamente",
       inserted: registros.length,
-      periodo: { empresa_id, anio, mes, nombre_periodo: nombrePeriodo, cif },
+      periodo: {
+        empresa_id,
+        anio,
+        mes,
+        nombre_periodo: nombrePeriodo,
+        cif_id: cif_id_final,
+        cif_valor: cifCreado?.valor || null,
+      },
       archivo: { filename, mimetype },
       ...stats,
       warningsPreview: stats.warnings.slice(0, 50),
     });
   } catch (err) {
     request.log.error(err);
-    return reply.code(500).send({
+    return reply.code(err.statusCode || 500).send({
       error: "Error al procesar libro de remuneraciones",
       detalle: err.message,
     });
@@ -679,21 +752,8 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
 
 export const listHH = async (request, reply) => {
   try {
-    const empresaFromToken =
-      request.user?.empresaId ||
-      request.user?.empresa_id ||
-      request.user?.empresa?.id ||
-      null;
-
-    const { empresa_id: empresaQuery, anio, mes } = request.query || {};
-    const empresa_id = empresaFromToken || empresaQuery;
-
-    if (!empresa_id) {
-      return reply.code(400).send({
-        error:
-          "No se pudo determinar la empresa. Asegúrate de que el token incluya empresaId o envía empresa_id en query.",
-      });
-    }
+    const empresa_id = getEmpresaId(request);
+    const { anio, mes } = request.query || {};
 
     const where = { empresa_id: String(empresa_id) };
     if (anio) where.anio = Number(anio);
@@ -702,14 +762,114 @@ export const listHH = async (request, reply) => {
     const registros = await prisma.hHEmpleado.findMany({
       where,
       orderBy: [{ anio: "desc" }, { mes: "desc" }, { nombre: "asc" }],
+      include: {
+        cif: true, // ✅ requiere relación HHEmpleado -> CIF
+      },
     });
 
     return reply.code(200).send(registros);
   } catch (err) {
     request.log.error(err);
-    return reply.code(500).send({
+    return reply.code(err.statusCode || 500).send({
       error: "Error al obtener HH",
       detalle: err.message,
     });
+  }
+};
+
+// =============================
+// CIF CONTROLLERS (dentro de HH)
+// =============================
+
+export const createCIF = async (request, reply) => {
+  try {
+    const empresa_id = getEmpresaId(request);
+    const { anio = null, mes = null, valor, nota = null } = request.body || {};
+
+    const v = parseNumber(valor);
+    if (v == null || Number.isNaN(v) || v < 0) {
+      return reply.code(400).send({ error: "valor CIF inválido" });
+    }
+
+    const created = await prisma.cIF.create({
+      data: {
+        empresa_id,
+        anio: anio != null ? Number(anio) : null,
+        mes: mes != null ? Number(mes) : null,
+        valor: v,
+        nota,
+      },
+    });
+
+    return reply.code(201).send(created);
+  } catch (err) {
+    request.log.error(err);
+    return reply
+      .code(err.statusCode || 500)
+      .send({ error: "Error al crear CIF", detalle: err.message });
+  }
+};
+
+export const listCIF = async (request, reply) => {
+  try {
+    const empresa_id = getEmpresaId(request);
+    const { anio, mes, take } = request.query || {};
+
+    const where = {
+      empresa_id,
+      ...(anio && mes
+        ? {
+            OR: [
+              { anio: Number(anio), mes: Number(mes) },
+              { anio: null, mes: null },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await prisma.cIF.findMany({
+      where,
+      orderBy: { creado_en: "desc" },
+      take: take ? Math.min(Number(take) || 100, 300) : 100,
+    });
+
+    return reply.code(200).send(rows);
+  } catch (err) {
+    request.log.error(err);
+    return reply
+      .code(err.statusCode || 500)
+      .send({ error: "Error al listar CIF", detalle: err.message });
+  }
+};
+
+export const getUltimoCIF = async (request, reply) => {
+  try {
+    const empresa_id = getEmpresaId(request);
+    const { anio, mes } = request.query || {};
+
+    let cif = null;
+
+    // 1) último CIF del periodo
+    if (anio && mes) {
+      cif = await prisma.cIF.findFirst({
+        where: { empresa_id, anio: Number(anio), mes: Number(mes) },
+        orderBy: { creado_en: "desc" },
+      });
+    }
+
+    // 2) fallback: último CIF global
+    if (!cif) {
+      cif = await prisma.cIF.findFirst({
+        where: { empresa_id, anio: null, mes: null },
+        orderBy: { creado_en: "desc" },
+      });
+    }
+
+    return reply.code(200).send(cif); // puede ser null
+  } catch (err) {
+    request.log.error(err);
+    return reply
+      .code(err.statusCode || 500)
+      .send({ error: "Error al obtener último CIF", detalle: err.message });
   }
 };

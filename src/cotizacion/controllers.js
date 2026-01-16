@@ -3,120 +3,98 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 /* =========================
-   Helpers
+   Helpers (scope JWT)
 ========================= */
-function getEmpresaId(request) {
-  const empresaId = request.headers["x-empresa-id"];
-  if (!empresaId) {
+function getScope(request) {
+  const empresaId =
+    request?.scope?.empresaId ??
+    request?.headers?.["x-empresa-id"] ??
+    null;
+
+  const userId =
+    request?.scope?.userId ??
+    request?.user?.userId ??
+    request?.user?.sub ??
+    null;
+
+  if (!userId) {
+    const err = new Error("Falta usuario en el contexto (token)");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  // Solo obliga empresa para no-MASTER (igual que tu authz.js)
+  const rolCodigo = request?.scope?.rolCodigo ?? request?.user?.rol?.codigo ?? null;
+  if (!empresaId && rolCodigo !== "MASTER") {
     const err = new Error("Falta empresa en el contexto");
     err.statusCode = 401;
     throw err;
   }
-  return String(empresaId);
+
+  return { empresaId: empresaId ? String(empresaId) : null, userId: String(userId), rolCodigo };
 }
 
 const round0 = (n) => Math.round(Number(n || 0));
 
-function calcFromTotal(total, ivaRate = 0.19) {
-  const t = round0(total);
-  const rate = Number(ivaRate);
-  const divisor = 1 + (Number.isFinite(rate) ? rate : 0.19);
-  const subtotal = round0(t / divisor);
-  const iva = t - subtotal;
-  return { subtotal, iva, total: t };
+function calcTotalVenta(v) {
+  return (v?.detalles || []).reduce(
+    (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
+    0
+  );
 }
 
+function calcFromSubtotal(subtotalNeto, ivaRate = 0.19) {
+  const subtotal = round0(subtotalNeto);
+  const rate = Number(ivaRate);
+  const r = Number.isFinite(rate) ? rate : 0.19;
+  const iva = round0(subtotal * r);
+  const total = round0(subtotal + iva);
+  return { subtotal, iva, total, ivaRate: r };
+}
+
+function sumGlosas(glosas) {
+  return (glosas || []).reduce((acc, g) => acc + round0(g?.monto || 0), 0);
+}
+
+
+function normalizeVigenciaDias(v) {
+  if (v === undefined || v === null || v === "") return 15; // default “lógico”
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error("vigencia_dias inválido");
+  const i = Math.trunc(n);
+  if (i < 1 || i > 365) throw new Error("vigencia_dias debe estar entre 1 y 365");
+  return i;
+}
+
+
 /**
- * Distribuye montos de glosas:
- * - manual=true: respeta monto
- * - manual=false o monto vacío: se reparte el remanente
- * Regla simple:
- *   - si hay >=1 auto: reparte igual entre autos (y el último se queda con el ajuste por redondeo)
- *   - si no hay autos: valida que suma manual == total (si no, error)
+ * Normaliza glosas:
+ * - descripcion obligatoria
+ * - monto entero >= 0
+ * - manual boolean
+ * - orden (default index)
+ * NO distribuye aquí (tu UI ya distribuye). Solo validamos y ordenamos.
  */
-function normalizeAndDistributeGlosas(inputGlosas, total) {
+function normalizeGlosas(inputGlosas) {
   const glosas = Array.isArray(inputGlosas) ? inputGlosas : [];
+  if (glosas.length === 0) return [];
 
-  if (glosas.length === 0) {
-    throw new Error("Debes enviar al menos 1 glosa.");
-  }
-
-  // Normaliza orden + flags
-  const norm = glosas.map((g, i) => {
+  return glosas.map((g, i) => {
     const desc = String(g?.descripcion || "").trim();
     if (!desc) throw new Error(`Glosa #${i + 1}: Falta descripción.`);
-    const manual = !!g?.manual;
-    const montoRaw =
-      g?.monto == null || String(g.monto).trim() === "" ? null : Number(g.monto);
 
-    const monto =
-      montoRaw == null
-        ? null
-        : Number.isFinite(montoRaw)
-        ? Math.max(0, round0(montoRaw))
-        : NaN;
-
-    if (monto === NaN) throw new Error(`Glosa #${i + 1}: monto inválido.`);
+    const montoRaw = Number(g?.monto ?? 0);
+    if (!Number.isFinite(montoRaw) || montoRaw < 0) {
+      throw new Error(`Glosa #${i + 1}: monto inválido.`);
+    }
 
     return {
       descripcion: desc,
-      manual,
-      monto, // puede ser null si es auto
+      monto: round0(montoRaw),
+      manual: !!g?.manual,
       orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : i,
     };
   });
-
-  const manualSum = norm.reduce((acc, g) => acc + (g.manual ? (g.monto ?? 0) : 0), 0);
-  if (manualSum > total) {
-    throw new Error(
-      `La suma de montos manuales (${manualSum}) no puede superar el total (${total}).`
-    );
-  }
-
-  const autos = norm.filter((g) => !g.manual);
-  const remanente = total - manualSum;
-
-  if (autos.length === 0) {
-    // todo manual => debe calzar exacto con el total
-    if (manualSum !== total) {
-      throw new Error(
-        `Las glosas manuales suman ${manualSum}, pero el total es ${total}. Ajusta los montos.`
-      );
-    }
-    return norm.map((g) => ({ ...g, monto: round0(g.monto || 0) }));
-  }
-
-  // repartir remanente entre autos
-  const base = autos.length > 0 ? Math.floor(remanente / autos.length) : 0;
-  let restante = remanente;
-
-  const out = norm.map((g) => {
-    if (g.manual) return { ...g, monto: round0(g.monto || 0) };
-    // asignación base (el último auto corrige)
-    return { ...g, monto: base };
-  });
-
-  // corregir el último auto con el ajuste por redondeo
-  // (remanente - base*autos.length)
-  const ajuste = remanente - base * autos.length;
-  if (ajuste !== 0) {
-    // encuentra el último auto en el array original
-    for (let i = out.length - 1; i >= 0; i--) {
-      if (!out[i].manual) {
-        out[i].monto = round0(out[i].monto + ajuste);
-        break;
-      }
-    }
-  }
-
-  // sanity
-  const sum = out.reduce((acc, g) => acc + (Number(g.monto) || 0), 0);
-  if (sum !== total) {
-    // por seguridad
-    throw new Error(`Error de distribución: suma glosas ${sum} != total ${total}.`);
-  }
-
-  return out;
 }
 
 /* =========================
@@ -124,11 +102,11 @@ function normalizeAndDistributeGlosas(inputGlosas, total) {
 ========================= */
 export const listCotizaciones = async (request, reply) => {
   try {
-    const empresaId = getEmpresaId(request);
+    const { empresaId } = getScope(request);
     const { estado } = request.query || {};
 
     const where = {
-      empresa_id: empresaId,
+      ...(empresaId ? { empresa_id: empresaId } : {}),
       eliminado: false,
       ...(estado ? { estado } : {}),
     };
@@ -137,8 +115,9 @@ export const listCotizaciones = async (request, reply) => {
       where,
       orderBy: { creada_en: "desc" },
       include: {
-        cliente: true,
+        cliente: { select: { id: true, nombre: true, rut: true } },
         proyecto: true,
+        vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
       },
     });
@@ -152,19 +131,21 @@ export const listCotizaciones = async (request, reply) => {
   }
 };
 
-/* =========================
-   GET /cotizaciones/:id
-========================= */
 export const getCotizacion = async (request, reply) => {
   try {
-    const empresaId = getEmpresaId(request);
+    const { empresaId } = getScope(request);
     const { id } = request.params;
 
     const cot = await prisma.cotizacion.findFirst({
-      where: { id, empresa_id: empresaId, eliminado: false },
+      where: {
+        id,
+        ...(empresaId ? { empresa_id: empresaId } : {}),
+        eliminado: false,
+      },
       include: {
         proyecto: true,
-        cliente: true,
+        cliente: { select: { id: true, nombre: true, rut: true, direccion: true } },
+        vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
       },
     });
@@ -180,17 +161,21 @@ export const getCotizacion = async (request, reply) => {
   }
 };
 
+
 /* =========================
-   POST /cotizaciones
-   Crea cotización con glosas
+   POST /cotizaciones/add
+   ✅ Crea cotización DESDE ventas seleccionadas (costeo):
    - cliente obligatorio
-   - proyecto NO obligatorio
-   - total obligatorio
-   - glosas: [{descripcion, monto?, manual?}]
+   - proyecto NO obligatorio (null al crear)
+   - vendedor_id desde JWT/session
+   - ventaIds obligatorio
+   - subtotal neto = suma de ventas (detalles.total / ventaTotal)
+   - iva/total calculados
+   - glosas deben sumar SUBTOTAL neto
 ========================= */
 export const createCotizacion = async (request, reply) => {
   try {
-    const empresaId = getEmpresaId(request);
+    const { empresaId, userId } = getScope(request);
 
     const {
       cliente_id,
@@ -198,22 +183,28 @@ export const createCotizacion = async (request, reply) => {
       terminos_condiciones,
       acuerdo_pago,
       ivaRate = 0.19,
+      vigencia_dias,
 
-      // total principal
-      total,
+      // ✅ requerido
+      ventaIds = [],
 
-      // glosas
+      // ✅ glosas (suman subtotal neto)
       glosas = [],
     } = request.body || {};
 
     if (!cliente_id) return reply.code(400).send({ error: "cliente_id es obligatorio" });
 
-    const totalNum = Number(total);
-    if (!Number.isFinite(totalNum) || totalNum <= 0) {
-      return reply.code(400).send({ error: "total inválido (entero > 0)" });
+    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
+      return reply.code(400).send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
     }
 
-    const { subtotal, iva, total: totalInt } = calcFromTotal(totalNum, ivaRate);
+    const ivaRateNum = Number(ivaRate);
+    if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
+      return reply.code(400).send({ error: "ivaRate inválido (ej: 0.19)" });
+    }
+
+    const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
+
 
     const created = await prisma.$transaction(async (tx) => {
       // validar cliente scope empresa
@@ -223,36 +214,88 @@ export const createCotizacion = async (request, reply) => {
       });
       if (!cliente) throw new Error("Cliente inválido");
 
-      // distribuir glosas
-      const glosasDistribuidas = normalizeAndDistributeGlosas(glosas, totalInt);
+      // cargar ventas con detalles
+      const ventas = await tx.venta.findMany({
+        where: { id: { in: ventaIds } },
+        include: { detalles: true },
+      });
 
-      // crear cot
+      if (ventas.length !== ventaIds.length) {
+        throw new Error("Una o más ventas no existen");
+      }
+
+      // calcular subtotal neto desde ventas
+      const subtotalBase = ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0);
+      if (!subtotalBase || subtotalBase <= 0) {
+        throw new Error("El subtotal neto calculado desde ventas es 0");
+      }
+
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalBase, ivaRateNum);
+
+      // normalizar glosas
+      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+
+      // si no vienen glosas, crear 1 automática con el subtotal neto
+      if (glosasFinal.length === 0) {
+        glosasFinal = [
+          {
+            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
+            monto: subtotal,
+            manual: true,
+            orden: 0,
+          },
+        ];
+      }
+
+      // validar que glosas sumen SUBTOTAL neto
+      const suma = sumGlosas(glosasFinal);
+      if (suma !== subtotal) {
+        throw new Error(
+          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`
+        );
+      }
+
+      // crear cotización
       const cot = await tx.cotizacion.create({
         data: {
           empresa_id: empresaId,
-          // proyecto_id: null al crear (por tu requerimiento)
           proyecto_id: null,
           cliente_id,
+          vendedor_id: userId, // ✅ vendedor desde token
           asunto: asunto || null,
           terminos_condiciones: terminos_condiciones || null,
           acuerdo_pago: acuerdo_pago || null,
+
+          vigencia_dias: vigenciaDias,
+
           subtotal,
           iva,
-          total: totalInt,
+          total,
+
           estado: "COTIZACION",
+
           glosas: {
-            create: glosasDistribuidas.map((g, idx) => ({
+            create: glosasFinal.map((g, idx) => ({
               descripcion: g.descripcion,
               monto: g.monto,
               manual: !!g.manual,
               orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
             })),
           },
+
+          // ✅ relacionar ventas a esta cotización (si tu modelo usa ordenVentaId)
+          // OJO: tu modelo actual usa ventas: Venta[] (relación). Si en tu schema
+          // la relación se hace por ordenVentaId en Venta, esto lo deja vinculado:
+          ventas: {
+            connect: ventaIds.map((id) => ({ id })),
+          },
         },
         include: {
           cliente: true,
           proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
           glosas: { orderBy: { orden: "asc" } },
+          ventas: { include: { detalles: true } },
         },
       });
 
@@ -270,11 +313,14 @@ export const createCotizacion = async (request, reply) => {
 
 /* =========================
    PUT /cotizaciones/:id
-   Actualiza cabecera: asunto, términos, acuerdo, cliente, total (recalcula glosas autos)
+   (se mantiene, pero ahora:
+   - NO recalcula por total manual (eso ya no se usa en este flujo)
+   - Permite editar: asunto, términos, acuerdo, cliente, proyecto
+   - Permite reemplazar glosas (deben sumar subtotal actual)
 ========================= */
 export const updateCotizacion = async (request, reply) => {
   try {
-    const empresaId = getEmpresaId(request);
+    const { empresaId } = getScope(request);
     const { id } = request.params;
 
     const {
@@ -282,28 +328,17 @@ export const updateCotizacion = async (request, reply) => {
       asunto,
       terminos_condiciones,
       acuerdo_pago,
-      ivaRate = 0.19,
-      total,
+      vigencia_dias,
       glosas, // opcional: si lo mandas, reemplaza glosas completas
-      proyecto_id, // opcional: para asignar después
+      proyecto_id, // opcional
     } = request.body || {};
 
     const existing = await prisma.cotizacion.findFirst({
       where: { id, empresa_id: empresaId, eliminado: false },
       include: { glosas: { orderBy: { orden: "asc" } } },
     });
+
     if (!existing) return reply.code(404).send({ error: "Cotización no encontrada" });
-
-    const nextTotal =
-      total == null || String(total).trim() === ""
-        ? Number(existing.total || 0)
-        : Number(total);
-
-    if (!Number.isFinite(nextTotal) || nextTotal <= 0) {
-      return reply.code(400).send({ error: "total inválido (entero > 0)" });
-    }
-
-    const { subtotal, iva, total: totalInt } = calcFromTotal(nextTotal, ivaRate);
 
     const updated = await prisma.$transaction(async (tx) => {
       // validar cliente si cambia
@@ -315,7 +350,7 @@ export const updateCotizacion = async (request, reply) => {
         if (!c) throw new Error("Cliente inválido");
       }
 
-      // validar proyecto si viene (asignación posterior)
+      // validar proyecto si viene
       if (proyecto_id) {
         const p = await tx.proyecto.findFirst({
           where: { id: proyecto_id, empresa_id: empresaId, eliminado: false },
@@ -324,14 +359,19 @@ export const updateCotizacion = async (request, reply) => {
         if (!p) throw new Error("Proyecto inválido");
       }
 
-      // si vienen glosas, las reemplazamos
+      // si vienen glosas, las reemplazamos (deben sumar subtotal neto actual)
       if (Array.isArray(glosas)) {
-        const distrib = normalizeAndDistributeGlosas(glosas, totalInt);
+        const distrib = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
 
-        // borrar glosas antiguas
+        const suma = sumGlosas(distrib);
+        if (suma !== round0(existing.subtotal)) {
+          throw new Error(
+            `Las glosas deben sumar el subtotal neto (${round0(existing.subtotal)}). Suma glosas=${suma}.`
+          );
+        }
+
         await tx.cotizacionGlosa.deleteMany({ where: { cotizacion_id: id } });
 
-        // crear nuevas
         await tx.cotizacionGlosa.createMany({
           data: distrib.map((g, idx) => ({
             cotizacion_id: id,
@@ -341,26 +381,6 @@ export const updateCotizacion = async (request, reply) => {
             orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
           })),
         });
-      } else {
-        // no vinieron glosas: si el total cambió, recalcular SOLO autos en base a manuales existentes
-        const current = existing.glosas || [];
-        if (Number(existing.total || 0) !== totalInt && current.length) {
-          const payload = current.map((g, i) => ({
-            descripcion: g.descripcion,
-            monto: g.monto,
-            manual: g.manual,
-            orden: g.orden ?? i,
-          }));
-          const distrib = normalizeAndDistributeGlosas(payload, totalInt);
-
-          // update cada glosa
-          for (let i = 0; i < current.length; i++) {
-            await tx.cotizacionGlosa.update({
-              where: { id: current[i].id },
-              data: { monto: distrib[i].monto, manual: distrib[i].manual, orden: distrib[i].orden },
-            });
-          }
-        }
       }
 
       return tx.cotizacion.update({
@@ -368,17 +388,16 @@ export const updateCotizacion = async (request, reply) => {
         data: {
           ...(cliente_id ? { cliente_id } : {}),
           ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
+          ...(vigencia_dias !== undefined ? { vigencia_dias: normalizeVigenciaDias(vigencia_dias) } : {}),
           asunto: asunto !== undefined ? (asunto || null) : undefined,
           terminos_condiciones:
             terminos_condiciones !== undefined ? (terminos_condiciones || null) : undefined,
           acuerdo_pago: acuerdo_pago !== undefined ? (acuerdo_pago || null) : undefined,
-          subtotal,
-          iva,
-          total: totalInt,
         },
         include: {
           cliente: true,
           proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
           glosas: { orderBy: { orden: "asc" } },
         },
       });
@@ -398,7 +417,7 @@ export const updateCotizacion = async (request, reply) => {
 ========================= */
 export const updateCotizacionEstado = async (request, reply) => {
   try {
-    const empresaId = getEmpresaId(request);
+    const { empresaId } = getScope(request);
     const { id } = request.params;
     const { estado } = request.body || {};
 
@@ -433,6 +452,7 @@ export const updateCotizacionEstado = async (request, reply) => {
       include: {
         proyecto: true,
         cliente: true,
+        vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
       },
     });

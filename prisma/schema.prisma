@@ -41,6 +41,9 @@ model Empresa {
   // 👇 HH por empleado (resultado del Excel + cálculos)
   hhEmpleados HHEmpleado[]
 
+    cifs CIF[]   // ✅ lado inverso
+
+
   // 👇 catálogos admin (por empresa)
   tipoItems   TipoItem[]
   tipoDias    TipoDia[]
@@ -86,13 +89,20 @@ model Usuario {
 
   creado_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
-  // soft delete
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
 
-  empleado              Empleado?
+  // ✅ inversa de Empleado.usuario
+  empleado Empleado?
+
+  // ✅ inversa de Rendicion.revisada_por
   rendiciones_revisadas Rendicion[]
-  auditLogs             AuditLog[]
+
+  // ✅ inversa de AuditLog.usuario
+  auditLogs AuditLog[]
+
+  // ✅ inversa de Cotizacion.vendedor
+  cotizaciones_creadas Cotizacion[] @relation("CotizacionVendedor")
 
   @@unique([correo, eliminado])
 }
@@ -443,16 +453,20 @@ model Cotizacion {
   empresa_id String
   empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
-  // ✅ proyecto opcional (se asigna después)
   proyecto_id String?
   proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: SetNull)
 
-  // ✅ cliente obligatorio
   cliente_id String
   cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Restrict)
 
-  // opcional: asunto/título general (NO es la glosa)
+  // ✅ temporalmente opcional
+  vendedor_id String?
+  vendedor    Usuario? @relation("CotizacionVendedor", fields: [vendedor_id], references: [id], onDelete: Restrict)
+
   asunto String?
+
+    vigencia_dias Int @default(15)
+
 
   subtotal             Float   @default(0)
   iva                  Float   @default(0)
@@ -467,16 +481,15 @@ model Cotizacion {
 
   estado EstadoCotizacion @default(COTIZACION)
 
-  // ✅ NUEVO: glosas descriptivas (lo que tú pediste)
   glosas CotizacionGlosa[]
 
-  // relaciones existentes
   ventas  Venta[]
   compras Compra[]
 
   @@index([empresa_id])
   @@index([proyecto_id])
   @@index([cliente_id])
+  @@index([vendedor_id])
 }
 
 /**
@@ -821,6 +834,29 @@ model AuditLog {
  * HH EMPLEADO
  * =========================
  */
+
+model CIF {
+  id String @id @default(cuid())
+
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  // opcional: si quieres que el CIF “aplique” a un periodo específico
+  anio Int?
+  mes  Int?
+
+  valor     Float    @default(0)
+  nota      String? // ej: "CIF Enero", "Actualización arriendo", etc.
+  creado_en DateTime @default(now())
+
+  // relación inversa
+  hhempleados HHEmpleado[]
+
+  @@index([empresa_id])
+  @@index([empresa_id, creado_en])
+  @@index([empresa_id, anio, mes])
+}
+
 model HHEmpleado {
   id String @id @default(cuid())
 
@@ -867,16 +903,19 @@ model HHEmpleado {
   liquido   Float?
   empleador Float?
 
-  pagado         Float?
-  feriado        Float?
-  indemnizacion  Float?
-  total          Float?
-  costoHH        Float?
-  cif            Float?
+  pagado        Float?
+  feriado       Float?
+  indemnizacion Float?
+  total         Float?
+  costoHH       Float?
+
   horasMensuales Float?
   horasEfectivas Float?
 
   raw Json?
+
+  cif_id String?
+  cif    CIF?    @relation(fields: [cif_id], references: [id], onDelete: SetNull)
 
   creado_en      DateTime       @default(now())
   actualizado_en DateTime       @updatedAt

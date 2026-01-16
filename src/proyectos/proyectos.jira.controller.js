@@ -74,6 +74,33 @@ function pickBestEmpleadoId(importAssigneeName, empleadosMiembros) {
 }
 
 /* =========================
+   Utils: query parsing + fechas
+========================= */
+function parseBool(v, def = true) {
+  if (v === true || v === false) return v;
+  if (v == null) return def;
+  const s = String(v).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "si"].includes(s)) return true;
+  if (["false", "0", "no", "n"].includes(s)) return false;
+  return def;
+}
+
+function ensureDate(d) {
+  const x = d instanceof Date ? d : d ? new Date(d) : null;
+  return x && !Number.isNaN(x.getTime()) ? x : null;
+}
+
+function daysBetweenInclusive(a, b) {
+  const A = new Date(a);
+  const B = new Date(b);
+  A.setHours(0, 0, 0, 0);
+  B.setHours(0, 0, 0, 0);
+  const ms = B.getTime() - A.getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24)) + 1;
+  return Math.max(1, days);
+}
+
+/* =========================
    CSV columns flexibles (Jira export)
 ========================= */
 function getCol(row, keys) {
@@ -112,11 +139,20 @@ function normStatusToEstado(s) {
 
 /* =========================
    POST /proyectos/:id/jira/import
-   Body: { rows: [...] }
+   multipart/form-data con file
+   query: ?hoursPerDay=8&overwrite=true
 ========================= */
 export async function importJiraCSV(request, reply) {
   const scope = resolveScope(request);
   const { id: proyectoId } = request.params;
+
+  // ✅ por si Fastify valida querystring y te llega string
+  const overwrite = parseBool(request.query?.overwrite, true);
+  const hoursPerDay = Number(request.query?.hoursPerDay) || 8; // (si después lo usas)
+
+  // OJO: tu frontend envía FormData("file"), así que tu ruta backend
+  // debe parsear el CSV y convertirlo a { rows: [...] } antes de llegar aquí,
+  // o bien aquí debes parsear el archivo. Asumo que ya te llega rows.
   const { rows } = request.body || {};
 
   if (!Array.isArray(rows) || rows.length === 0) {
@@ -134,9 +170,7 @@ export async function importJiraCSV(request, reply) {
     include: {
       miembros: {
         include: {
-          empleado: {
-            include: { usuario: true },
-          },
+          empleado: { include: { usuario: true } },
         },
       },
     },
@@ -177,11 +211,6 @@ export async function importJiraCSV(request, reply) {
     .filter((x) => x.summary);
 
   // 3) Bucket: EPIC -> children
-  // Regla:
-  // - Issue Type = Epic: crea tarea padre con summary
-  // - Si trae Epic Name: ese Epic Name es el padre de la fila (la fila es subtarea/detalle)
-  // - Si trae Parent: parentKey como padre (fallback)
-  // - Si no trae nada: se crea como tarea padre
   const buckets = new Map(); // key -> { title, parentAssignee, children[] }
 
   function ensureBucket(bucketKey, title) {
@@ -196,7 +225,8 @@ export async function importJiraCSV(request, reply) {
 
   for (const it of normalized) {
     const typeNorm = normName(it.issueType);
-    const isEpic = typeNorm === "epic" || typeNorm.includes("epica") || typeNorm.includes("épica");
+    const isEpic =
+      typeNorm === "epic" || typeNorm.includes("epica") || typeNorm.includes("épica");
 
     if (isEpic) {
       const b = ensureBucket(`EPIC:${it.summary}`, it.summary);
@@ -220,7 +250,7 @@ export async function importJiraCSV(request, reply) {
     ensureBucket(`TASK:${it.summary}`, it.summary);
   }
 
-  // 4) Crear/actualizar tareas + detalles, con responsable asignado
+  // 4) Crear/actualizar tareas + detalles
   const created = { tareas: 0, detalles: 0, asignados: 0, skippedDetalles: 0 };
 
   for (const b of buckets.values()) {
@@ -242,6 +272,24 @@ export async function importJiraCSV(request, reply) {
       },
     });
 
+    // ✅ calcular fechas obligatorias del padre
+    let padreInicio = null;
+    let padreFin = null;
+
+    if (Array.isArray(b.children) && b.children.length) {
+      const starts = b.children.map((c) => ensureDate(c.startISO)).filter(Boolean);
+      const dues = b.children.map((c) => ensureDate(c.dueISO)).filter(Boolean);
+
+      if (starts.length) padreInicio = new Date(Math.min(...starts.map((d) => d.getTime())));
+      if (dues.length) padreFin = new Date(Math.max(...dues.map((d) => d.getTime())));
+    }
+
+    const hoy = new Date();
+    if (!padreInicio) padreInicio = hoy;
+    if (!padreFin) padreFin = padreInicio;
+
+    const padreDiasPlan = daysBetweenInclusive(padreInicio, padreFin);
+
     if (!tarea) {
       tarea = await prisma.tarea.create({
         data: {
@@ -251,20 +299,61 @@ export async function importJiraCSV(request, reply) {
           estado: "pendiente",
           avance: 0,
           responsable_id: responsablePadreId,
+
+          // ✅ obligatorios en tu schema
+          fecha_inicio_plan: padreInicio,
+          fecha_fin_plan: padreFin,
+          dias_plan: padreDiasPlan,
+
+          source: "JIRA",
         },
       });
       created.tareas++;
     } else {
-      // si ya existe, igual intenta setear responsable si está vacío
-      if (!tarea.responsable_id && responsablePadreId) {
+      // overwrite: si quieres que sobreescriba fechas del padre también
+      if (overwrite) {
         await prisma.tarea.update({
           where: { id: tarea.id },
-          data: { responsable_id: responsablePadreId },
+          data: {
+            responsable_id: tarea.responsable_id || responsablePadreId || null,
+            fecha_inicio_plan: padreInicio,
+            fecha_fin_plan: padreFin,
+            dias_plan: padreDiasPlan,
+            source: tarea.source || "JIRA",
+          },
         });
+        tarea = await prisma.tarea.findUnique({ where: { id: tarea.id } });
+      } else {
+        // si ya existe, setea responsable solo si está vacío
+        if (!tarea.responsable_id && responsablePadreId) {
+          await prisma.tarea.update({
+            where: { id: tarea.id },
+            data: { responsable_id: responsablePadreId },
+          });
+          tarea = await prisma.tarea.findUnique({ where: { id: tarea.id } });
+        }
+
+        // si por algún motivo quedó sin fechas (viejo data), asegúralas
+        if (!tarea?.fecha_inicio_plan || !tarea?.fecha_fin_plan) {
+          await prisma.tarea.update({
+            where: { id: tarea.id },
+            data: {
+              fecha_inicio_plan: tarea?.fecha_inicio_plan || padreInicio,
+              fecha_fin_plan: tarea?.fecha_fin_plan || padreFin,
+              dias_plan:
+                tarea?.dias_plan ??
+                daysBetweenInclusive(
+                  tarea?.fecha_inicio_plan || padreInicio,
+                  tarea?.fecha_fin_plan || padreFin
+                ),
+            },
+          });
+          tarea = await prisma.tarea.findUnique({ where: { id: tarea.id } });
+        }
       }
     }
 
-    // hijos => detalles
+    // hijos => TareaDetalle
     if (Array.isArray(b.children) && b.children.length) {
       for (const ch of b.children) {
         const responsableDetalleId = ch.assignee
@@ -272,32 +361,63 @@ export async function importJiraCSV(request, reply) {
           : null;
         if (responsableDetalleId) created.asignados++;
 
-        // evitar duplicado básico: misma subtarea por nombre en misma tarea
-        const exists = await prisma.detalleTarea.findFirst({
+        // fechas obligatorias en detalle
+        const ini = ensureDate(ch.startISO) || tarea.fecha_inicio_plan || new Date();
+        const fin = ensureDate(ch.dueISO) || tarea.fecha_fin_plan || ini;
+        const diasPlan = daysBetweenInclusive(ini, fin);
+
+        // evitar duplicado básico
+        const exists = await prisma.tareaDetalle.findFirst({
           where: {
             tarea_id: tarea.id,
-            nombre: ch.summary,
+            titulo: ch.summary,
             eliminado: false,
           },
           select: { id: true },
         });
 
         if (exists) {
-          created.skippedDetalles++;
+          if (overwrite) {
+            await prisma.tareaDetalle.update({
+              where: { id: exists.id },
+              data: {
+                descripcion: null,
+                estado: normStatusToEstado(ch.status),
+                fecha_inicio_plan: ini,
+                fecha_fin_plan: fin,
+                dias_plan: diasPlan,
+                responsable_id: responsableDetalleId,
+                source: "JIRA",
+                jira_key: ch.key || null,
+                jira_tipo: ch.issueType || null,
+                jira_estado: ch.status || null,
+              },
+            });
+          } else {
+            created.skippedDetalles++;
+          }
           continue;
         }
 
-        await prisma.detalleTarea.create({
+        await prisma.tareaDetalle.create({
           data: {
             tarea_id: tarea.id,
-            nombre: ch.summary,
+            titulo: ch.summary,
             descripcion: null,
             estado: normStatusToEstado(ch.status),
-            fecha_inicio_plan: ch.startISO ? new Date(ch.startISO) : null,
-            fecha_fin_plan: ch.dueISO ? new Date(ch.dueISO) : null,
             avance: 0,
+
+            fecha_inicio_plan: ini,
+            fecha_fin_plan: fin,
+            dias_plan: diasPlan,
+
             responsable_id: responsableDetalleId,
             eliminado: false,
+
+            source: "JIRA",
+            jira_key: ch.key || null,
+            jira_tipo: ch.issueType || null,
+            jira_estado: ch.status || null,
           },
         });
 
@@ -306,5 +426,11 @@ export async function importJiraCSV(request, reply) {
     }
   }
 
-  return reply.send({ ok: true, message: "Import Jira OK", created });
+  return reply.send({
+    ok: true,
+    message: "Import Jira OK",
+    created,
+    overwrite,
+    hoursPerDay,
+  });
 }
