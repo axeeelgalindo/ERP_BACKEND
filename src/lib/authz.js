@@ -1,18 +1,18 @@
 // src/lib/authz.js
-export default async function authz(server) {
+import fp from "fastify-plugin";
+
+export default fp(async function authz(server) {
   server.decorate("authenticate", async (request, reply) => {
     try {
-      const user = await request.jwtVerify();        // ← payload del token en request.user
+      const user = await request.jwtVerify(); // payload del JWT
 
-      // ⬇️ Toma empresaId desde varias formas (la importante: empresa.id)
       const empresaId =
         user?.empresa?.id ??
         user?.empresa_id ??
         user?.empresaId ??
-        request.headers["x-empresa-id"] ??           // override manual si quieres
+        request.headers["x-empresa-id"] ??
         null;
 
-      // Normaliza scope
       request.user = user;
       request.scope = {
         empresaId,
@@ -29,4 +29,4 @@ export default async function authz(server) {
       return reply.unauthorized("Token inválido o ausente");
     }
   });
-}
+});

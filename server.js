@@ -1,3 +1,4 @@
+//server.js
 import Fastify from "fastify";
 import sensible from "@fastify/sensible";
 import cors from "@fastify/cors";

@@ -13,7 +13,10 @@ function parseNumber(value) {
   if (typeof value === "number") return value;
 
   if (typeof value === "string") {
-    const cleaned = value.replace(/\./g, "").replace(/\s/g, "").replace(",", ".");
+    const cleaned = value
+      .replace(/\./g, "")
+      .replace(/\s/g, "")
+      .replace(",", ".");
     const n = parseFloat(cleaned);
     return Number.isNaN(n) ? null : n;
   }
@@ -83,7 +86,9 @@ async function ensureUniqueEmail(tx, empresaId, emailLocalPart, domain) {
   const safeLocal = String(emailLocalPart || "").trim();
   if (!safeLocal) return null;
 
-  const safeDomain = String(domain || "").trim().toLowerCase();
+  const safeDomain = String(domain || "")
+    .trim()
+    .toLowerCase();
   if (!safeDomain) return null;
 
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -102,10 +107,10 @@ async function ensureUniqueEmail(tx, empresaId, emailLocalPart, domain) {
 }
 
 function randomPassword(len = 10) {
-  const chars =
-    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%";
   let out = "";
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < len; i++)
+    out += chars[Math.floor(Math.random() * chars.length)];
   return out;
 }
 
@@ -134,12 +139,138 @@ function getEmpresaId(request) {
   return String(empresa_id);
 }
 
+// *****************************
+// HELPERS AUTH HH (BACKEND ONLY)
+// *****************************
+function normalizeText(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+// 👇 Allowlist exacta por “primernombre primerapellido”
+// (con tu captura: Aguayo Canales, Jonathan... => jonathan aguayo)
+const HH_ALLOWED_NAME_KEYS = new Set([
+  "jonathan aguayo",
+  "victor morales",
+  "tulio mayorga",
+  "camila nahuelcar",
+  "esteban barria",
+]);
+
+// por seguridad: también permitimos por correo exacto (admin + los 5 si quieres)
+const HH_ALLOWED_EMAILS = new Set([
+  "admin@blueinge.com",
+  // si quieres endurecer más, descomenta estos:
+  // "jaguayo@blueinge.com",
+  // "vmorales@blueinge.com",
+  // "tmayorga@blueinge.com", // si existe
+  // "cnahuelcar@blueinge.com",
+  // "ebarria@blueinge.com",
+]);
+
+// Intenta leer rol desde varios posibles shapes del token
+function getRoleCodeFromUser(user) {
+  const raw =
+    user?.rol?.codigo ||
+    user?.rol?.nombre ||
+    user?.role?.codigo ||
+    user?.role?.name ||
+    user?.rolCodigo ||
+    user?.rolNombre ||
+    user?.userRole ||
+    user?.userRoleCode ||
+    user?.userRoleName ||
+    "";
+  return normalizeText(raw);
+}
+
+function isAdminLike(user) {
+  const role = getRoleCodeFromUser(user);
+  // normalizeText => lowercase
+  return (
+    role === "ADMIN" ||
+    role === "superadmin" ||
+    role === "super-admin" ||
+    role === "super_admin" ||
+    role === "administrador"
+  );
+}
+
+function getUserEmailFromToken(user) {
+  return normalizeText(
+    user?.correo ||
+      user?.email ||
+      user?.usuario?.correo ||
+      user?.usuario?.email ||
+      "",
+  );
+}
+
+function getUserNameFromToken(user) {
+  return (
+    user?.nombre ||
+    user?.name ||
+    user?.usuario?.nombre ||
+    user?.usuario?.name ||
+    user?.profile?.name ||
+    ""
+  );
+}
+
+/**
+ * Convierte nombres tipo:
+ * - "Aguayo Canales, Jonathan Efrain" -> key "jonathan aguayo"
+ * - "Administrador" -> key "administrador"
+ */
+function buildNameKey(fullName) {
+  const { nombres, apellidos } = parseExcelFullName(fullName);
+  const firstName = (nombres?.[0] || "").trim();
+  const firstLast = (apellidos?.[0] || "").trim();
+  const key = normalizeText(`${firstName} ${firstLast}`.trim());
+  return key || normalizeText(fullName);
+}
+
+function requireHHAccess(request) {
+  const user = request.user;
+console.log("[HH] auth header:", request.headers.authorization);
+console.log("[HH] request.user:", request.user);
+  // no auth
+  if (!user) {
+    const err = new Error("No autenticado");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  // ✅ admin/superadmin siempre pasan
+  if (isAdminLike(user)) return;
+
+  // ✅ admin@blueinge.com (por si el token no trae rol bien)
+  const email = getUserEmailFromToken(user);
+  if (email && HH_ALLOWED_EMAILS.has(email)) return;
+
+  // ✅ allowlist por nombre (primer nombre + primer apellido)
+  const fullName = getUserNameFromToken(user);
+  const key = buildNameKey(fullName);
+
+  if (!HH_ALLOWED_NAME_KEYS.has(key)) {
+    const err = new Error("Acceso restringido: módulo HH confidencial");
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
 // =============================
 // CONTROLLERS
 // =============================
 
 export const uploadLibroRemuneraciones = async (request, reply) => {
   try {
+    // ✅ proteger import HH (confidencial)
+    requireHHAccess(request);
+
     const parts = request.parts();
 
     let empresa_id = null;
@@ -167,7 +298,8 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         if (part.fieldname === "empresa_id") empresa_id = part.value;
         if (part.fieldname === "anio") anio = parseInt(part.value, 10);
         if (part.fieldname === "mes") mes = parseInt(part.value, 10);
-        if (part.fieldname === "horas_mensuales") horas_mensuales = parseFloat(part.value);
+        if (part.fieldname === "horas_mensuales")
+          horas_mensuales = parseFloat(part.value);
         if (part.fieldname === "porcentaje_efectividad")
           porcentaje_efectividad = parseFloat(part.value);
 
@@ -179,10 +311,14 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     // VALIDACIONES
     // =============================
     if (!empresa_id || !anio || !mes) {
-      return reply.code(400).send({ error: "empresa_id, anio y mes son obligatorios" });
+      return reply
+        .code(400)
+        .send({ error: "empresa_id, anio y mes son obligatorios" });
     }
     if (!fileBuffer) {
-      return reply.code(400).send({ error: "Debe enviar archivo Excel en 'file'" });
+      return reply
+        .code(400)
+        .send({ error: "Debe enviar archivo Excel en 'file'" });
     }
     if (mes < 1 || mes > 12) {
       return reply.code(400).send({ error: "mes inválido (1..12)" });
@@ -276,7 +412,9 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       return reply.code(400).send({ error: "Excel vacío o ilegible" });
     }
 
-    const headerRowIndex = rows.findIndex((r) => r?.[0] === "Nombre" && r?.[1] === "RUT");
+    const headerRowIndex = rows.findIndex(
+      (r) => r?.[0] === "Nombre" && r?.[1] === "RUT",
+    );
     if (headerRowIndex === -1) {
       return reply.code(400).send({
         error: "No se encontró cabecera con columnas 'Nombre' y 'RUT'",
@@ -469,36 +607,50 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       const dias_trabajados =
         idx.dias_trabajados != null ? parseInt(row[idx.dias_trabajados]) : null;
 
-      const sueldo_base = idx.sueldo_base != null ? parseNumber(row[idx.sueldo_base]) : null;
+      const sueldo_base =
+        idx.sueldo_base != null ? parseNumber(row[idx.sueldo_base]) : null;
       const extras = idx.extras != null ? parseNumber(row[idx.extras]) : null;
       const gratificacion =
         idx.gratificacion != null ? parseNumber(row[idx.gratificacion]) : null;
 
-      const imponible1 = idx.imponible1 != null ? parseNumber(row[idx.imponible1]) : null;
-      const imponible2 = idx.imponible2 != null ? parseNumber(row[idx.imponible2]) : null;
+      const imponible1 =
+        idx.imponible1 != null ? parseNumber(row[idx.imponible1]) : null;
+      const imponible2 =
+        idx.imponible2 != null ? parseNumber(row[idx.imponible2]) : null;
       const movilizacion =
         idx.movilizacion != null ? parseNumber(row[idx.movilizacion]) : null;
-      const colacion = idx.colacion != null ? parseNumber(row[idx.colacion]) : null;
-      const imponible3 = idx.imponible3 != null ? parseNumber(row[idx.imponible3]) : null;
-      const imponible4 = idx.imponible4 != null ? parseNumber(row[idx.imponible4]) : null;
+      const colacion =
+        idx.colacion != null ? parseNumber(row[idx.colacion]) : null;
+      const imponible3 =
+        idx.imponible3 != null ? parseNumber(row[idx.imponible3]) : null;
+      const imponible4 =
+        idx.imponible4 != null ? parseNumber(row[idx.imponible4]) : null;
 
-      const haberes = idx.haberes != null ? parseNumber(row[idx.haberes]) : null;
+      const haberes =
+        idx.haberes != null ? parseNumber(row[idx.haberes]) : null;
 
       const afp = idx.afp != null ? parseNumber(row[idx.afp]) : null;
       const unico = idx.unico != null ? parseNumber(row[idx.unico]) : null;
       const previsional =
         idx.previsional != null ? parseNumber(row[idx.previsional]) : null;
       const salud = idx.salud != null ? parseNumber(row[idx.salud]) : null;
-      const antiguo = idx.antiguo != null ? parseNumber(row[idx.antiguo]) : null;
-      const anticipos = idx.anticipos != null ? parseNumber(row[idx.anticipos]) : null;
-      const prestamos = idx.prestamos != null ? parseNumber(row[idx.prestamos]) : null;
+      const antiguo =
+        idx.antiguo != null ? parseNumber(row[idx.antiguo]) : null;
+      const anticipos =
+        idx.anticipos != null ? parseNumber(row[idx.anticipos]) : null;
+      const prestamos =
+        idx.prestamos != null ? parseNumber(row[idx.prestamos]) : null;
       const apv = idx.apv != null ? parseNumber(row[idx.apv]) : null;
 
-      const desctos1 = idx.desctos1 != null ? parseNumber(row[idx.desctos1]) : null;
-      const desctos2 = idx.desctos2 != null ? parseNumber(row[idx.desctos2]) : null;
+      const desctos1 =
+        idx.desctos1 != null ? parseNumber(row[idx.desctos1]) : null;
+      const desctos2 =
+        idx.desctos2 != null ? parseNumber(row[idx.desctos2]) : null;
 
-      const liquido = idx.liquido != null ? parseNumber(row[idx.liquido]) : null;
-      const empleador = idx.empleador != null ? parseNumber(row[idx.empleador]) : null;
+      const liquido =
+        idx.liquido != null ? parseNumber(row[idx.liquido]) : null;
+      const empleador =
+        idx.empleador != null ? parseNumber(row[idx.empleador]) : null;
 
       let pagado = null;
       let feriado = null;
@@ -506,7 +658,8 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       let total = null;
       let costoHH = null;
 
-      if (haberes != null || empleador != null) pagado = (haberes || 0) + (empleador || 0);
+      if (haberes != null || empleador != null)
+        pagado = (haberes || 0) + (empleador || 0);
 
       if (pagado != null && dias_trabajados > 0) {
         feriado = (pagado / dias_trabajados) * 2.05;
@@ -619,7 +772,7 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       });
       if (!rolDefault) {
         throw new Error(
-          "No se encontró un rol default (USER/USUARIO/EMPLEADO/ADMIN). Crea uno en el seed antes de importar."
+          "No se encontró un rol default (USER/USUARIO/EMPLEADO/ADMIN). Crea uno en el seed antes de importar.",
         );
       }
 
@@ -643,7 +796,11 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
             data: { rut: String(rutRaw), activo: true, usuario_id: null },
             select: { id: true, rut: true, usuario_id: true },
           });
-          rutMap.set(rutNorm, { id: nuevo.id, rut: nuevo.rut, usuario_id: nuevo.usuario_id });
+          rutMap.set(rutNorm, {
+            id: nuevo.id,
+            rut: nuevo.rut,
+            usuario_id: nuevo.usuario_id,
+          });
           stats.empleadosCreados++;
         } else {
           await tx.empleado.update({
@@ -664,7 +821,12 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
 
         // C) crear/asegurar correo único
         const local = buildEmailLocalPartFromName(nombreRaw);
-        const correo = await ensureUniqueEmail(tx, empresa_id, local, DEFAULT_EMAIL_DOMAIN);
+        const correo = await ensureUniqueEmail(
+          tx,
+          empresa_id,
+          local,
+          DEFAULT_EMAIL_DOMAIN,
+        );
 
         if (!correo) {
           stats.warnings.push({
@@ -708,7 +870,12 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         // E) vincular empleado a usuario
         await tx.empleado.update({
           where: { id: cur.id },
-          data: { usuario_id: usuario.id, eliminado: false, eliminado_en: null, activo: true },
+          data: {
+            usuario_id: usuario.id,
+            eliminado: false,
+            eliminado_en: null,
+            activo: true,
+          },
         });
 
         rutMap.set(rutNorm, { ...cur, usuario_id: usuario.id });
@@ -718,7 +885,9 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       // 4.2 Inserta HHEmpleado para el periodo (con empleado_id si existe en rutMap)
       const dataFinal = registros.map((r) => {
         const empleado_id =
-          r._rutNorm && rutMap.has(r._rutNorm) ? rutMap.get(r._rutNorm).id : null;
+          r._rutNorm && rutMap.has(r._rutNorm)
+            ? rutMap.get(r._rutNorm).id
+            : null;
         const { _rutNorm, ...rest } = r;
         return { ...rest, empleado_id };
       });
@@ -752,6 +921,8 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
 
 export const listHH = async (request, reply) => {
   try {
+    requireHHAccess(request);
+
     const empresa_id = getEmpresaId(request);
     const { anio, mes } = request.query || {};
 
@@ -762,9 +933,7 @@ export const listHH = async (request, reply) => {
     const registros = await prisma.hHEmpleado.findMany({
       where,
       orderBy: [{ anio: "desc" }, { mes: "desc" }, { nombre: "asc" }],
-      include: {
-        cif: true, // ✅ requiere relación HHEmpleado -> CIF
-      },
+      include: { cif: true },
     });
 
     return reply.code(200).send(registros);
@@ -783,6 +952,8 @@ export const listHH = async (request, reply) => {
 
 export const createCIF = async (request, reply) => {
   try {
+    requireHHAccess(request);
+
     const empresa_id = getEmpresaId(request);
     const { anio = null, mes = null, valor, nota = null } = request.body || {};
 
@@ -812,6 +983,8 @@ export const createCIF = async (request, reply) => {
 
 export const listCIF = async (request, reply) => {
   try {
+    requireHHAccess(request);
+
     const empresa_id = getEmpresaId(request);
     const { anio, mes, take } = request.query || {};
 
@@ -844,6 +1017,8 @@ export const listCIF = async (request, reply) => {
 
 export const getUltimoCIF = async (request, reply) => {
   try {
+    requireHHAccess(request);
+
     const empresa_id = getEmpresaId(request);
     const { anio, mes } = request.query || {};
 

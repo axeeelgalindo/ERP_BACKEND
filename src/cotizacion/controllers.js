@@ -414,6 +414,10 @@ export const updateCotizacion = async (request, reply) => {
 
 /* =========================
    POST /cotizaciones/:id/estado
+   ✅ Si pasa de COTIZACION -> ORDEN_VENTA:
+   - crea automáticamente un PROYECTO
+   - nombre = "numero - asunto"
+   - vincula cotización.proyecto_id
 ========================= */
 export const updateCotizacionEstado = async (request, reply) => {
   try {
@@ -433,31 +437,74 @@ export const updateCotizacionEstado = async (request, reply) => {
       PAGADA: [],
     };
 
-    const actual = await prisma.cotizacion.findFirst({
-      where: { id, empresa_id: empresaId, eliminado: false },
-      select: { estado: true },
-    });
-
-    if (!actual) return reply.code(404).send({ error: "Cotización no encontrada" });
-
-    if (!allowed[actual.estado].includes(estado)) {
-      return reply.code(400).send({
-        error: `Transición no permitida: ${actual.estado} → ${estado}`,
+    const result = await prisma.$transaction(async (tx) => {
+      // 1) Traer cotización actual (con campos reales)
+      const cot = await tx.cotizacion.findFirst({
+        where: { id, empresa_id: empresaId, eliminado: false },
+        select: {
+          id: true,
+          numero: true,
+          asunto: true,
+          estado: true,
+          proyecto_id: true,
+          empresa_id: true,
+          cliente_id: true,
+          vendedor_id: true,
+        },
       });
-    }
 
-    const updated = await prisma.cotizacion.update({
-      where: { id },
-      data: { estado },
-      include: {
-        proyecto: true,
-        cliente: true,
-        vendedor: { select: { id: true, nombre: true, correo: true } },
-        glosas: { orderBy: { orden: "asc" } },
-      },
+      if (!cot) {
+        const err = new Error("Cotización no encontrada");
+        err.statusCode = 404;
+        throw err;
+      }
+
+      // 2) Validar transición
+      if (!allowed[cot.estado].includes(estado)) {
+        const err = new Error(`Transición no permitida: ${cot.estado} → ${estado}`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      let proyectoIdFinal = cot.proyecto_id;
+
+      // 3) Crear proyecto SOLO si es COTIZACION -> ORDEN_VENTA y no hay proyecto
+      const isCotToOV = cot.estado === "COTIZACION" && estado === "ORDEN_VENTA";
+      if (isCotToOV && !proyectoIdFinal) {
+        const asunto = String(cot.asunto || "Sin asunto").trim();
+        const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
+
+        const proyecto = await tx.proyecto.create({
+          data: {
+            empresa_id: cot.empresa_id,
+            nombre: nombreProyecto,
+            // todo lo demás es opcional en tu model, así que por ahora no se rellena
+          },
+          select: { id: true },
+        });
+
+        proyectoIdFinal = proyecto.id;
+      }
+
+      // 4) Actualizar cotización con estado + proyecto_id (si se creó)
+      const updated = await tx.cotizacion.update({
+        where: { id: cot.id },
+        data: {
+          estado, // Prisma acepta string o enum; con tu schema enum, string coincide
+          proyecto_id: proyectoIdFinal ?? null,
+        },
+        include: {
+          proyecto: true,
+          cliente: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+        },
+      });
+
+      return updated;
     });
 
-    return reply.send(updated);
+    return reply.send(result);
   } catch (e) {
     return reply.code(e.statusCode || 500).send({
       error: "Error al actualizar estado",
@@ -465,3 +512,4 @@ export const updateCotizacionEstado = async (request, reply) => {
     });
   }
 };
+

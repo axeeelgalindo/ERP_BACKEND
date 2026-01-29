@@ -1,6 +1,7 @@
 // src/empleados/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
+import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
@@ -19,6 +20,17 @@ const parseBool = (value) => {
   }
   return undefined;
 }
+
+/** Solo ADMIN o MASTER (ajusta a tu gusto) */
+function requireAdminOrMaster(scope, reply) {
+  const rol = String(scope?.rolCodigo || "").toUpperCase();
+  if (rol !== "ADMIN" && rol !== "MASTER") {
+    reply.forbidden("No autorizado");
+    return false;
+  }
+  return true;
+}
+
 
 /* ================= LIST ================= */
 export const listEmpleados = async (request, reply) => {
@@ -240,6 +252,78 @@ export const updateEmpleado = async (request, reply) => {
   });
 
   return reply.send(emp);
+};
+
+export const updateEmpleadoUsuario = async (request, reply) => {
+  try {
+    const scope = resolveScope(request);
+    const { id } = request.params;
+    const body = request.body || {};
+
+    const rol_id = body.rol_id ?? null;
+    const contrasena = body.contrasena ? String(body.contrasena) : "";
+
+    // 1) Buscar empleado + usuario
+    const emp = await prisma.empleado.findUnique({
+      where: { id },
+      include: {
+        usuario: {
+          select: {
+            id: true,
+            empresa_id: true,
+            eliminado: true,
+            rol_id: true,
+          },
+        },
+      },
+    });
+
+    if (!emp) return reply.notFound("Empleado no encontrado");
+    if (!emp.usuario) return reply.conflict("Este empleado no tiene usuario vinculado");
+
+    // 2) Seguridad empresa
+    if (!scope.isMaster && emp.usuario.empresa_id !== scope.empresaId) {
+      return reply.forbidden("Empleado fuera de tu empresa");
+    }
+
+    // 3) Validar que venga algo
+    const wantsRol = rol_id !== null && rol_id !== undefined && rol_id !== "";
+    const wantsPass = Boolean(contrasena && contrasena.trim().length > 0);
+
+    if (!wantsRol && !wantsPass) {
+      return reply.badRequest("Debes enviar rol_id y/o contrasena");
+    }
+
+    // 4) (Opcional) Validar rol existe
+    if (wantsRol) {
+      const rol = await prisma.rolUsuario.findUnique({ where: { id: rol_id } });
+      if (!rol) return reply.badRequest("rol_id inválido");
+    }
+
+    // 5) Armar update
+    const data = {};
+    if (wantsRol) data.rol_id = rol_id;
+
+    if (wantsPass) {
+      const hash = await bcrypt.hash(contrasena, 10);
+      data.contrasena = hash;
+    }
+
+    // 6) Actualizar usuario
+    const updated = await prisma.usuario.update({
+      where: { id: emp.usuario.id },
+      data,
+      include: {
+        rol: { select: { id: true, nombre: true, codigo: true } },
+        empresa: { select: { id: true, nombre: true } },
+      },
+    });
+
+    return reply.send({ success: true, usuario: updated });
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Error al actualizar usuario del empleado" });
+  }
 };
 
 /* ============== DELETE (BORRADO REAL) ================= */
