@@ -153,42 +153,112 @@ export const createEmpleado = async (request, reply) => {
   const scope = resolveScope(request);
   const body = request.body || {};
 
-  // si viene usuario_id, validar que el usuario pertenezca a la empresa del scope
+  // ✅ si vas a crear usuario o tocar usuario: exigir ADMIN/MASTER
+  const wantsCreateUsuario = !!body.usuarioCreate;
+  const wantsLinkUsuario = !!body.usuario_id;
+
+  if ((wantsCreateUsuario || wantsLinkUsuario) && !requireAdminOrMaster(scope, reply)) {
+    return;
+  }
+
+  // ✅ si viene usuario_id, validar que el usuario pertenezca a la empresa del scope
   if (body.usuario_id) {
     const usr = await prisma.usuario.findUnique({
       where: { id: body.usuario_id },
-      select: { empresa_id: true },
+      select: { id: true, empresa_id: true, eliminado: true },
     });
     if (!usr) return reply.badRequest("usuario_id inválido");
+    if (usr.eliminado) return reply.badRequest("El usuario está eliminado");
     if (!scope.isMaster && usr.empresa_id !== scope.empresaId) {
       return reply.forbidden("No puedes vincular usuario de otra empresa");
     }
   }
 
-  const emp = await prisma.empleado.create({
-    data: {
-      usuario_id: body.usuario_id ?? null,
-      cargo: body.cargo ?? null,
-      telefono: body.telefono ?? null,
-      fecha_ingreso: body.fecha_ingreso ? new Date(body.fecha_ingreso) : null,
-      sueldo_base:
-        typeof body.sueldo_base === "number" ? body.sueldo_base : null,
-      activo: typeof body.activo === "boolean" ? body.activo : true,
-    },
-    include: {
-      usuario: {
-        select: {
-          id: true,
-          nombre: true,
-          correo: true,
-          empresa: { select: { id: true, nombre: true } },
-          rol: { select: { id: true, nombre: true, codigo: true } },
+  // ✅ si viene usuarioCreate, validarlo
+  const usuarioCreate = body.usuarioCreate || null;
+  if (usuarioCreate) {
+    const nombre = String(usuarioCreate.nombre || "").trim();
+    const correo = String(usuarioCreate.correo || "").trim().toLowerCase();
+    const rol_id = String(usuarioCreate.rol_id || "").trim();
+    const pass = String(usuarioCreate.contrasena || "");
+
+    if (!nombre) return reply.badRequest("usuarioCreate.nombre requerido");
+    if (!correo) return reply.badRequest("usuarioCreate.correo requerido");
+    if (!rol_id) return reply.badRequest("usuarioCreate.rol_id requerido");
+    if (!pass || pass.length < 6)
+      return reply.badRequest("usuarioCreate.contrasena mínimo 6 caracteres");
+
+    // rol existe
+    const rol = await prisma.rolUsuario.findUnique({ where: { id: rol_id } });
+    if (!rol) return reply.badRequest("usuarioCreate.rol_id inválido");
+
+    // correo único (si tu schema lo exige)
+    const exists = await prisma.usuario.findFirst({
+      where: { correo, eliminado: false },
+      select: { id: true },
+    });
+    if (exists) return reply.conflict("Ya existe un usuario con ese correo");
+  }
+
+  // ✅ crear en transacción: usuario (opcional) + empleado
+  const result = await prisma.$transaction(async (tx) => {
+    let usuarioIdFinal = body.usuario_id ?? null;
+
+    if (usuarioCreate) {
+      const nombre = String(usuarioCreate.nombre || "").trim();
+      const correo = String(usuarioCreate.correo || "").trim().toLowerCase();
+      const rol_id = String(usuarioCreate.rol_id || "").trim();
+      const pass = String(usuarioCreate.contrasena || "");
+
+      const hash = await bcrypt.hash(pass, 10);
+
+      const nuevoUsuario = await tx.usuario.create({
+        data: {
+          nombre,
+          correo,
+          rol_id,
+          contrasena: hash,
+          // 👇 empresa desde scope (o la que uses en master)
+          empresa_id: scope.empresaId,
+          eliminado: false,
+        },
+        select: { id: true },
+      });
+
+      usuarioIdFinal = nuevoUsuario.id;
+    }
+
+    const emp = await tx.empleado.create({
+      data: {
+        usuario_id: usuarioIdFinal,
+        cargo: body.cargo ?? null,
+        telefono: body.telefono ?? null,
+        fecha_ingreso: body.fecha_ingreso ? new Date(body.fecha_ingreso) : null,
+        sueldo_base:
+          typeof body.sueldo_base === "number"
+            ? body.sueldo_base
+            : Number.isFinite(Number(body.sueldo_base))
+            ? Number(body.sueldo_base)
+            : null,
+        activo: typeof body.activo === "boolean" ? body.activo : true,
+      },
+      include: {
+        usuario: {
+          select: {
+            id: true,
+            nombre: true,
+            correo: true,
+            empresa: { select: { id: true, nombre: true } },
+            rol: { select: { id: true, nombre: true, codigo: true } },
+          },
         },
       },
-    },
+    });
+
+    return emp;
   });
 
-  return reply.code(201).send(emp);
+  return reply.code(201).send(result);
 };
 
 /* ============== UPDATE ================= */
