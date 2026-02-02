@@ -5,6 +5,7 @@ import {
   createCotizacion,
   updateCotizacion,
   updateCotizacionEstado,
+  importCotizacionFromPdf,
 } from "./controllers.js";
 
 export default async function cotizacionesRoutes(server) {
@@ -27,4 +28,5 @@ export default async function cotizacionesRoutes(server) {
   server.post("/cotizaciones/add", createCotizacion);
   server.put("/cotizaciones/update/:id", updateCotizacion);
   server.post("/cotizaciones/:id/estado", updateCotizacionEstado);
+  server.post("/cotizaciones/import/pdf", importCotizacionFromPdf);
 }

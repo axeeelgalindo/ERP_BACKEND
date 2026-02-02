@@ -41,8 +41,7 @@ model Empresa {
   // 👇 HH por empleado (resultado del Excel + cálculos)
   hhEmpleados HHEmpleado[]
 
-    cifs CIF[]   // ✅ lado inverso
-
+  cifs CIF[] // ✅ lado inverso
 
   // 👇 catálogos admin (por empresa)
   tipoItems   TipoItem[]
@@ -465,8 +464,7 @@ model Cotizacion {
 
   asunto String?
 
-    vigencia_dias Int @default(15)
-
+  vigencia_dias Int @default(15)
 
   subtotal             Float   @default(0)
   iva                  Float   @default(0)
@@ -478,6 +476,9 @@ model Cotizacion {
   actualizado_en DateTime  @updatedAt
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
+
+  fecha_documento       DateTime?
+  vencimiento_documento DateTime?
 
   estado EstadoCotizacion @default(COTIZACION)
 

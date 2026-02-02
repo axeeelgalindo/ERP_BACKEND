@@ -1,5 +1,10 @@
 // src/modules/cotizaciones/controllers.js
 import { PrismaClient } from "@prisma/client";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse"); // ✅ (ojo: v2 NO es function; lo manejamos dentro de import)
+
 const prisma = new PrismaClient();
 
 /* =========================
@@ -7,9 +12,7 @@ const prisma = new PrismaClient();
 ========================= */
 function getScope(request) {
   const empresaId =
-    request?.scope?.empresaId ??
-    request?.headers?.["x-empresa-id"] ??
-    null;
+    request?.scope?.empresaId ?? request?.headers?.["x-empresa-id"] ?? null;
 
   const userId =
     request?.scope?.userId ??
@@ -24,14 +27,19 @@ function getScope(request) {
   }
 
   // Solo obliga empresa para no-MASTER (igual que tu authz.js)
-  const rolCodigo = request?.scope?.rolCodigo ?? request?.user?.rol?.codigo ?? null;
+  const rolCodigo =
+    request?.scope?.rolCodigo ?? request?.user?.rol?.codigo ?? null;
   if (!empresaId && rolCodigo !== "MASTER") {
     const err = new Error("Falta empresa en el contexto");
     err.statusCode = 401;
     throw err;
   }
 
-  return { empresaId: empresaId ? String(empresaId) : null, userId: String(userId), rolCodigo };
+  return {
+    empresaId: empresaId ? String(empresaId) : null,
+    userId: String(userId),
+    rolCodigo,
+  };
 }
 
 const round0 = (n) => Math.round(Number(n || 0));
@@ -39,7 +47,7 @@ const round0 = (n) => Math.round(Number(n || 0));
 function calcTotalVenta(v) {
   return (v?.detalles || []).reduce(
     (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
-    0
+    0,
   );
 }
 
@@ -56,16 +64,15 @@ function sumGlosas(glosas) {
   return (glosas || []).reduce((acc, g) => acc + round0(g?.monto || 0), 0);
 }
 
-
 function normalizeVigenciaDias(v) {
   if (v === undefined || v === null || v === "") return 15; // default “lógico”
   const n = Number(v);
   if (!Number.isFinite(n)) throw new Error("vigencia_dias inválido");
   const i = Math.trunc(n);
-  if (i < 1 || i > 365) throw new Error("vigencia_dias debe estar entre 1 y 365");
+  if (i < 1 || i > 365)
+    throw new Error("vigencia_dias debe estar entre 1 y 365");
   return i;
 }
-
 
 /**
  * Normaliza glosas:
@@ -96,6 +103,409 @@ function normalizeGlosas(inputGlosas) {
     };
   });
 }
+
+function normalizeText(s) {
+  return String(s || "")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * EJEMPLO de parseo “genérico”
+ * Esto lo tendrás que ajustar según tu PDF real.
+ * Lo ideal: tener "parsers" por proveedor/plantilla.
+ */
+function parseCotizacionText(text) {
+  const t = normalizeText(text);
+
+  // ejemplos de extracción
+  const asunto =
+    (t.match(/Asunto\s*:\s*(.+)/i)?.[1] || "").trim() ||
+    (t.match(/Cotizaci[oó]n\s*(.+)/i)?.[1] || "").trim() ||
+    "Cotización importada";
+
+  const totalStr = (t.match(/Total\s*\$?\s*([\d\.\,]+)/i)?.[1] || "").trim();
+  const subtotalStr = (
+    t.match(/Sub\s*Total\s*\$?\s*([\d\.\,]+)/i)?.[1] || ""
+  ).trim();
+
+  const toNumber = (x) => {
+    // soporta "1.234.567" o "1,234,567" o "1234567"
+    const v = String(x || "").replace(/[^\d]/g, "");
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const total = toNumber(totalStr);
+  const subtotal = toNumber(subtotalStr);
+
+  // si viene solo total, aproximamos subtotal con iva 19% (esto es “fallback”)
+  let subtotalFinal = subtotal;
+  let ivaFinal = 0;
+  let totalFinal = total;
+
+  if (!subtotalFinal && totalFinal) {
+    subtotalFinal = Math.round(totalFinal / 1.19);
+    ivaFinal = totalFinal - subtotalFinal;
+  } else if (subtotalFinal) {
+    ivaFinal = Math.round(subtotalFinal * 0.19);
+    totalFinal = subtotalFinal + ivaFinal;
+  }
+
+  // Ejemplo de items (si en tu pdf hay líneas tipo: "2 x Servicio ... $ 120000")
+  // Esto es MUY dependiente del formato.
+  const items = [];
+  const lines = t
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  for (const ln of lines) {
+    const m = ln.match(/^(\d+)\s*x\s*(.+?)\s+\$?\s*([\d\.\,]+)$/i);
+    if (m) {
+      items.push({
+        cantidad: Number(m[1]),
+        descripcion: m[2].trim(),
+        total: toNumber(m[3]),
+      });
+    }
+  }
+
+  return {
+    asunto,
+    subtotal: subtotalFinal || 0,
+    iva: ivaFinal || 0,
+    total: totalFinal || 0,
+    items,
+    rawText: t,
+  };
+}
+
+/**
+ * POST /cotizaciones/import/pdf
+ * Form-data:
+ * - file: PDF
+ * - cliente_id: string (obligatorio, por ahora)
+ * - modo: "preview" | "create" (default preview)
+ */
+export const importCotizacionFromPdf = async (request, reply) => {
+  try {
+    const { empresaId, userId } = getScope(request);
+
+    // ✅ leer multipart completo (campos + archivo) de forma robusta
+    const fields = {};
+    let fileBuffer = null;
+    let fileName = null;
+
+    for await (const part of request.parts()) {
+      if (part.type === "file") {
+        fileName = part.filename;
+        const chunks = [];
+        for await (const chunk of part.file) chunks.push(chunk);
+        fileBuffer = Buffer.concat(chunks);
+      } else {
+        fields[part.fieldname] = part.value;
+      }
+    }
+
+    request.log.info(
+      {
+        empresaId,
+        userId,
+        fields,
+        fileName,
+        fileSize: fileBuffer?.length || 0,
+        contentType: request.headers["content-type"],
+        hasAuth: !!request.headers.authorization,
+        xEmpresa: request.headers["x-empresa-id"],
+      },
+      "IMPORT_PDF_DEBUG",
+    );
+
+    const cliente_id = String(fields?.cliente_id || "").trim();
+    const modo = String(fields?.modo || "preview")
+      .trim()
+      .toLowerCase();
+
+    if (!fileBuffer?.length) {
+      return reply
+        .code(400)
+        .send({ error: "Debes enviar un archivo PDF (file)" });
+    }
+
+    if (!cliente_id) {
+      return reply
+        .code(400)
+        .send({ error: "cliente_id es obligatorio para importar" });
+    }
+
+    // validar cliente en empresa
+    const cliente = await prisma.cliente.findFirst({
+      where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
+      select: { id: true },
+    });
+
+    request.log.info(
+      { cliente_id, empresaId, found: !!cliente },
+      "IMPORT_PDF_CLIENTE_LOOKUP",
+    );
+
+    if (!cliente)
+      return reply
+        .code(400)
+        .send({ error: "Cliente inválido", debug: { cliente_id, empresaId } });
+
+    /* ============================================================
+       ✅ PDF PARSE (compat: pdf-parse v1 y v2)
+    ============================================================ */
+    let parsed = null;
+
+    // v1: pdfParse(buffer) => { text, numpages, ... }
+    if (typeof pdfParse === "function") {
+      parsed = await pdfParse(fileBuffer);
+    }
+    // v2: require("pdf-parse") => { PDFParse }
+    else if (pdfParse?.PDFParse) {
+      const Parser = pdfParse.PDFParse;
+      const parser = new Parser({ data: fileBuffer });
+      const result = await parser.getText();
+      await parser.destroy();
+
+      parsed = {
+        text: result?.text || "",
+        numpages: result?.total || (result?.pages?.length ?? null),
+      };
+    } else {
+      return reply.code(500).send({
+        error: "Error al importar PDF",
+        detalle:
+          "pdf-parse no está disponible correctamente (export inesperado).",
+      });
+    }
+
+    const text = normalizeText(parsed?.text || "");
+    if (!text) {
+      return reply.code(422).send({
+        error: "No se pudo extraer texto del PDF",
+        detalle: "Parece escaneado. Necesitas OCR para este tipo de PDF.",
+      });
+    }
+
+    /* ============================================================
+       ✅ EXTRACCIÓN MEJORADA (Descripción real + fechas)
+       - Evita que el asunto quede como S00xxx
+       - Saca fecha de cotización / vencimiento
+    ============================================================ */
+    const lines = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const matchFirst = (re) => text.match(re)?.[1]?.trim() || "";
+
+    // Número de cotización del PDF (ej: S00195)
+    const numeroPdf =
+      matchFirst(/N[uú]mero de cotizaci[oó]n\s*(S\d+)/i) ||
+      matchFirst(/Cotizaci[oó]n\s*(S\d+)/i) ||
+      "";
+
+    // Fechas (dd/mm/yyyy o dd-mm-yyyy)
+    const parseDateCL = (s) => {
+      const m = String(s || "").match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+      if (!m) return null;
+      const dd = m[1],
+        mm = m[2],
+        yyyy = m[3];
+      // Date en UTC 00:00 para no correrse por zona
+      return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+    };
+
+    const fechaCotizacionStr =
+      matchFirst(/Fecha de cotizaci[oó]n\s*:?[\s]*([0-9\/\-]{10})/i) ||
+      matchFirst(/\bFecha\s*:?[\s]*([0-9\/\-]{10})/i);
+
+    const vencimientoStr =
+      matchFirst(/\bVencimiento\s*:?[\s]*([0-9\/\-]{10})/i) || "";
+
+    const fechaCotizacionDate = parseDateCL(fechaCotizacionStr);
+    const vencimientoDate = parseDateCL(vencimientoStr);
+
+    const diffDays = (a, b) => {
+      if (!a || !b) return null;
+      const ms = b.getTime() - a.getTime();
+      const d = Math.round(ms / (1000 * 60 * 60 * 24));
+      return Number.isFinite(d) ? d : null;
+    };
+
+    // Vigencia: si hay fechas, se calcula; si no, 15
+    let vigencia_dias = 15;
+    const vcalc = diffDays(fechaCotizacionDate, vencimientoDate);
+    if (vcalc && vcalc > 0 && vcalc <= 365) vigencia_dias = vcalc;
+
+    // ✅ Descripción real desde la tabla:
+    // buscamos el primer texto “bueno” después de "Descripción"
+    const idxDesc = lines.findIndex((l) => /^descripci[oó]n$/i.test(l));
+    const isProbablyCode = (s) => /^S\d+$/i.test(s); // S00195
+    const isMoneyLike = (s) => /[\$]?\s*[\d\.\,]+\s*$/.test(s);
+    const isHeaderLike = (s) =>
+      /^(cantidad|precio|precio unitario|impuestos|importe|subtotal|iva|total)$/i.test(
+        s,
+      );
+
+    let descripcionTabla = "";
+    if (idxDesc >= 0) {
+      for (let i = idxDesc + 1; i < Math.min(idxDesc + 30, lines.length); i++) {
+        const l = lines[i];
+        if (!l) continue;
+        if (isHeaderLike(l)) continue;
+        if (/^subtotal$/i.test(l)) break;
+        if (/^iva\b/i.test(l)) break;
+        if (/^total$/i.test(l)) break;
+        if (isProbablyCode(l)) continue; // evita S00xxx
+        if (isMoneyLike(l) && l.replace(/[^\d]/g, "").length >= 6) continue; // evita montos sueltos
+        // primera frase “real”
+        descripcionTabla = l.trim();
+        break;
+      }
+    }
+
+    // fallback por si el PDF no trae la palabra "Descripción" tal cual:
+    if (!descripcionTabla) {
+      // toma la primera línea “buena” antes de Subtotal
+      const stop = lines.findIndex((l) => /^subtotal$/i.test(l));
+      const limit = stop > 0 ? stop : Math.min(120, lines.length);
+      for (let i = 0; i < limit; i++) {
+        const l = lines[i];
+        if (!l) continue;
+        if (isHeaderLike(l)) continue;
+        if (isProbablyCode(l)) continue;
+        if (numeroPdf && l === numeroPdf) continue;
+        // evita cliente/rut/direcciones muy obvias (heurística)
+        if (/^rut\b/i.test(l)) continue;
+        if (/^av\./i.test(l)) continue;
+        if (/^chile$/i.test(l)) continue;
+        if (/^puerto/i.test(l)) continue;
+
+        // una descripción suele tener letras y espacios
+        if (/[a-záéíóúñ]/i.test(l) && l.length >= 4) {
+          descripcionTabla = l.trim();
+          break;
+        }
+      }
+    }
+
+    // Usa tu parse base para montos, pero reemplaza asunto si logramos una descripción real
+    const extractedBase = parseCotizacionText(text);
+
+    const extracted = {
+      ...extractedBase,
+      // ✅ asunto final = descripción real si existe, si no, lo que salga del parser base
+      asunto: descripcionTabla || extractedBase.asunto,
+      // ✅ dejamos el número del PDF por debug o por si lo quieres guardar después
+      numeroPdf: numeroPdf || null,
+      fechaCotizacion: fechaCotizacionDate || null,
+      vencimiento: vencimientoDate || null,
+      vigencia_dias,
+    };
+
+    // Si no detectó items, crea 1 item con la descripción real (como tus PDFs de ejemplo)
+    if (!Array.isArray(extracted.items) || extracted.items.length === 0) {
+      extracted.items = [
+        {
+          cantidad: 1,
+          descripcion: extracted.asunto,
+          total: round0(extracted.subtotal || 0),
+        },
+      ];
+    }
+
+    if (modo === "preview") {
+      return reply.send({
+        mode: "preview",
+        extracted: {
+          asunto: extracted.asunto,
+          subtotal: extracted.subtotal,
+          iva: extracted.iva,
+          total: extracted.total,
+          items: extracted.items,
+          fecha_cotizacion: extracted.fechaCotizacion
+            ? extracted.fechaCotizacion.toISOString()
+            : null,
+          vencimiento: extracted.vencimiento
+            ? extracted.vencimiento.toISOString()
+            : null,
+          vigencia_dias: extracted.vigencia_dias,
+          numero_pdf: extracted.numeroPdf,
+        },
+        debug: {
+          filename: fileName,
+          pages: parsed.numpages,
+          textSample: extracted.rawText.slice(0, 1200),
+        },
+      });
+    }
+
+    // create
+    const created = await prisma.$transaction(async (tx) => {
+      const subtotal = Math.round(Number(extracted.subtotal || 0));
+      const iva = Math.round(Number(extracted.iva || 0));
+      const total = Math.round(Number(extracted.total || 0));
+
+      if (!subtotal || subtotal <= 0) {
+        throw new Error("No se pudo calcular subtotal desde el PDF");
+      }
+
+      return tx.cotizacion.create({
+        data: {
+          empresa_id: empresaId,
+          proyecto_id: null,
+          cliente_id,
+          vendedor_id: userId,
+
+          // ✅ asunto = descripción real
+          asunto: extracted.asunto?.slice(0, 250) || "Cotización importada",
+
+          // ✅ vigencia desde PDF si se pudo
+          vigencia_dias: normalizeVigenciaDias(extracted.vigencia_dias ?? 15),
+
+          subtotal,
+          iva,
+          total,
+          estado: "COTIZACION",
+
+          // ✅ FECHA: usa la fecha del PDF para que tu cotización muestre la misma
+          ...(extracted.fechaCotizacion
+            ? { creada_en: extracted.fechaCotizacion }
+            : {}),
+
+          glosas: {
+            create: [
+              {
+                descripcion: (extracted.asunto || "Servicios").slice(0, 250),
+                monto: subtotal,
+                manual: true,
+                orden: 0,
+              },
+            ],
+          },
+        },
+        include: {
+          cliente: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+        },
+      });
+    });
+
+    return reply.code(201).send({ mode: "create", cotizacion: created });
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al importar PDF",
+      detalle: e.message,
+    });
+  }
+};
 
 /* =========================
    GET /cotizaciones
@@ -144,13 +554,16 @@ export const getCotizacion = async (request, reply) => {
       },
       include: {
         proyecto: true,
-        cliente: { select: { id: true, nombre: true, rut: true, direccion: true } },
+        cliente: {
+          select: { id: true, nombre: true, rut: true, direccion: true },
+        },
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
       },
     });
 
-    if (!cot) return reply.code(404).send({ error: "Cotización no encontrada" });
+    if (!cot)
+      return reply.code(404).send({ error: "Cotización no encontrada" });
 
     return reply.send(cot);
   } catch (e) {
@@ -160,7 +573,6 @@ export const getCotizacion = async (request, reply) => {
     });
   }
 };
-
 
 /* =========================
    POST /cotizaciones/add
@@ -192,10 +604,13 @@ export const createCotizacion = async (request, reply) => {
       glosas = [],
     } = request.body || {};
 
-    if (!cliente_id) return reply.code(400).send({ error: "cliente_id es obligatorio" });
+    if (!cliente_id)
+      return reply.code(400).send({ error: "cliente_id es obligatorio" });
 
     if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
-      return reply.code(400).send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
+      return reply
+        .code(400)
+        .send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
     }
 
     const ivaRateNum = Number(ivaRate);
@@ -204,7 +619,6 @@ export const createCotizacion = async (request, reply) => {
     }
 
     const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
-
 
     const created = await prisma.$transaction(async (tx) => {
       // validar cliente scope empresa
@@ -225,21 +639,32 @@ export const createCotizacion = async (request, reply) => {
       }
 
       // calcular subtotal neto desde ventas
-      const subtotalBase = ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0);
+      const subtotalBase = ventas.reduce(
+        (acc, v) => acc + calcTotalVenta(v),
+        0,
+      );
       if (!subtotalBase || subtotalBase <= 0) {
         throw new Error("El subtotal neto calculado desde ventas es 0");
       }
 
-      const { subtotal, iva, total } = calcFromSubtotal(subtotalBase, ivaRateNum);
+      const { subtotal, iva, total } = calcFromSubtotal(
+        subtotalBase,
+        ivaRateNum,
+      );
 
       // normalizar glosas
-      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+      let glosasFinal = normalizeGlosas(glosas).sort(
+        (a, b) => a.orden - b.orden,
+      );
 
       // si no vienen glosas, crear 1 automática con el subtotal neto
       if (glosasFinal.length === 0) {
         glosasFinal = [
           {
-            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
+            descripcion: (String(asunto || "").trim() || "Servicios").slice(
+              0,
+              250,
+            ),
             monto: subtotal,
             manual: true,
             orden: 0,
@@ -251,7 +676,7 @@ export const createCotizacion = async (request, reply) => {
       const suma = sumGlosas(glosasFinal);
       if (suma !== subtotal) {
         throw new Error(
-          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`
+          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`,
         );
       }
 
@@ -283,9 +708,6 @@ export const createCotizacion = async (request, reply) => {
             })),
           },
 
-          // ✅ relacionar ventas a esta cotización (si tu modelo usa ordenVentaId)
-          // OJO: tu modelo actual usa ventas: Venta[] (relación). Si en tu schema
-          // la relación se hace por ordenVentaId en Venta, esto lo deja vinculado:
           ventas: {
             connect: ventaIds.map((id) => ({ id })),
           },
@@ -313,10 +735,6 @@ export const createCotizacion = async (request, reply) => {
 
 /* =========================
    PUT /cotizaciones/:id
-   (se mantiene, pero ahora:
-   - NO recalcula por total manual (eso ya no se usa en este flujo)
-   - Permite editar: asunto, términos, acuerdo, cliente, proyecto
-   - Permite reemplazar glosas (deben sumar subtotal actual)
 ========================= */
 export const updateCotizacion = async (request, reply) => {
   try {
@@ -329,8 +747,8 @@ export const updateCotizacion = async (request, reply) => {
       terminos_condiciones,
       acuerdo_pago,
       vigencia_dias,
-      glosas, // opcional: si lo mandas, reemplaza glosas completas
-      proyecto_id, // opcional
+      glosas,
+      proyecto_id,
     } = request.body || {};
 
     const existing = await prisma.cotizacion.findFirst({
@@ -338,10 +756,10 @@ export const updateCotizacion = async (request, reply) => {
       include: { glosas: { orderBy: { orden: "asc" } } },
     });
 
-    if (!existing) return reply.code(404).send({ error: "Cotización no encontrada" });
+    if (!existing)
+      return reply.code(404).send({ error: "Cotización no encontrada" });
 
     const updated = await prisma.$transaction(async (tx) => {
-      // validar cliente si cambia
       if (cliente_id) {
         const c = await tx.cliente.findFirst({
           where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
@@ -350,7 +768,6 @@ export const updateCotizacion = async (request, reply) => {
         if (!c) throw new Error("Cliente inválido");
       }
 
-      // validar proyecto si viene
       if (proyecto_id) {
         const p = await tx.proyecto.findFirst({
           where: { id: proyecto_id, empresa_id: empresaId, eliminado: false },
@@ -359,14 +776,15 @@ export const updateCotizacion = async (request, reply) => {
         if (!p) throw new Error("Proyecto inválido");
       }
 
-      // si vienen glosas, las reemplazamos (deben sumar subtotal neto actual)
       if (Array.isArray(glosas)) {
-        const distrib = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+        const distrib = normalizeGlosas(glosas).sort(
+          (a, b) => a.orden - b.orden,
+        );
 
         const suma = sumGlosas(distrib);
         if (suma !== round0(existing.subtotal)) {
           throw new Error(
-            `Las glosas deben sumar el subtotal neto (${round0(existing.subtotal)}). Suma glosas=${suma}.`
+            `Las glosas deben sumar el subtotal neto (${round0(existing.subtotal)}). Suma glosas=${suma}.`,
           );
         }
 
@@ -387,12 +805,19 @@ export const updateCotizacion = async (request, reply) => {
         where: { id },
         data: {
           ...(cliente_id ? { cliente_id } : {}),
-          ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
-          ...(vigencia_dias !== undefined ? { vigencia_dias: normalizeVigenciaDias(vigencia_dias) } : {}),
-          asunto: asunto !== undefined ? (asunto || null) : undefined,
+          ...(proyecto_id !== undefined
+            ? { proyecto_id: proyecto_id || null }
+            : {}),
+          ...(vigencia_dias !== undefined
+            ? { vigencia_dias: normalizeVigenciaDias(vigencia_dias) }
+            : {}),
+          asunto: asunto !== undefined ? asunto || null : undefined,
           terminos_condiciones:
-            terminos_condiciones !== undefined ? (terminos_condiciones || null) : undefined,
-          acuerdo_pago: acuerdo_pago !== undefined ? (acuerdo_pago || null) : undefined,
+            terminos_condiciones !== undefined
+              ? terminos_condiciones || null
+              : undefined,
+          acuerdo_pago:
+            acuerdo_pago !== undefined ? acuerdo_pago || null : undefined,
         },
         include: {
           cliente: true,
@@ -414,10 +839,6 @@ export const updateCotizacion = async (request, reply) => {
 
 /* =========================
    POST /cotizaciones/:id/estado
-   ✅ Si pasa de COTIZACION -> ORDEN_VENTA:
-   - crea automáticamente un PROYECTO
-   - nombre = "numero - asunto"
-   - vincula cotización.proyecto_id
 ========================= */
 export const updateCotizacionEstado = async (request, reply) => {
   try {
@@ -438,7 +859,6 @@ export const updateCotizacionEstado = async (request, reply) => {
     };
 
     const result = await prisma.$transaction(async (tx) => {
-      // 1) Traer cotización actual (con campos reales)
       const cot = await tx.cotizacion.findFirst({
         where: { id, empresa_id: empresaId, eliminado: false },
         select: {
@@ -459,16 +879,16 @@ export const updateCotizacionEstado = async (request, reply) => {
         throw err;
       }
 
-      // 2) Validar transición
       if (!allowed[cot.estado].includes(estado)) {
-        const err = new Error(`Transición no permitida: ${cot.estado} → ${estado}`);
+        const err = new Error(
+          `Transición no permitida: ${cot.estado} → ${estado}`,
+        );
         err.statusCode = 400;
         throw err;
       }
 
       let proyectoIdFinal = cot.proyecto_id;
 
-      // 3) Crear proyecto SOLO si es COTIZACION -> ORDEN_VENTA y no hay proyecto
       const isCotToOV = cot.estado === "COTIZACION" && estado === "ORDEN_VENTA";
       if (isCotToOV && !proyectoIdFinal) {
         const asunto = String(cot.asunto || "Sin asunto").trim();
@@ -478,7 +898,6 @@ export const updateCotizacionEstado = async (request, reply) => {
           data: {
             empresa_id: cot.empresa_id,
             nombre: nombreProyecto,
-            // todo lo demás es opcional en tu model, así que por ahora no se rellena
           },
           select: { id: true },
         });
@@ -486,11 +905,10 @@ export const updateCotizacionEstado = async (request, reply) => {
         proyectoIdFinal = proyecto.id;
       }
 
-      // 4) Actualizar cotización con estado + proyecto_id (si se creó)
       const updated = await tx.cotizacion.update({
         where: { id: cot.id },
         data: {
-          estado, // Prisma acepta string o enum; con tu schema enum, string coincide
+          estado,
           proyecto_id: proyectoIdFinal ?? null,
         },
         include: {
@@ -512,4 +930,3 @@ export const updateCotizacionEstado = async (request, reply) => {
     });
   }
 };
-
