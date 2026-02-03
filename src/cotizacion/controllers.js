@@ -209,24 +209,17 @@ export const importCotizacionFromPdf = async (request, reply) => {
       }
     }
 
-    request.log.info(
-      {
-        empresaId,
-        userId,
-        fields,
-        fileName,
-        fileSize: fileBuffer?.length || 0,
-        contentType: request.headers["content-type"],
-        hasAuth: !!request.headers.authorization,
-        xEmpresa: request.headers["x-empresa-id"],
-      },
-      "IMPORT_PDF_DEBUG",
-    );
-
-    const cliente_id = String(fields?.cliente_id || "").trim();
     const modo = String(fields?.modo || "preview")
       .trim()
       .toLowerCase();
+
+    // ✅ NUEVO: fecha manual desde UI (YYYY-MM-DD)
+    const fecha_documento_manual = String(
+      fields?.fecha_documento_manual || "",
+    ).trim();
+
+    // ✅ Fallback manual (si el PDF no logra detectar cliente)
+    const cliente_id_fallback = String(fields?.cliente_id || "").trim();
 
     if (!fileBuffer?.length) {
       return reply
@@ -234,39 +227,14 @@ export const importCotizacionFromPdf = async (request, reply) => {
         .send({ error: "Debes enviar un archivo PDF (file)" });
     }
 
-    if (!cliente_id) {
-      return reply
-        .code(400)
-        .send({ error: "cliente_id es obligatorio para importar" });
-    }
-
-    // validar cliente en empresa
-    const cliente = await prisma.cliente.findFirst({
-      where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
-      select: { id: true },
-    });
-
-    request.log.info(
-      { cliente_id, empresaId, found: !!cliente },
-      "IMPORT_PDF_CLIENTE_LOOKUP",
-    );
-
-    if (!cliente)
-      return reply
-        .code(400)
-        .send({ error: "Cliente inválido", debug: { cliente_id, empresaId } });
-
     /* ============================================================
        ✅ PDF PARSE (compat: pdf-parse v1 y v2)
     ============================================================ */
     let parsed = null;
 
-    // v1: pdfParse(buffer) => { text, numpages, ... }
     if (typeof pdfParse === "function") {
       parsed = await pdfParse(fileBuffer);
-    }
-    // v2: require("pdf-parse") => { PDFParse }
-    else if (pdfParse?.PDFParse) {
+    } else if (pdfParse?.PDFParse) {
       const Parser = pdfParse.PDFParse;
       const parser = new Parser({ data: fileBuffer });
       const result = await parser.getText();
@@ -293,9 +261,131 @@ export const importCotizacionFromPdf = async (request, reply) => {
     }
 
     /* ============================================================
-       ✅ EXTRACCIÓN MEJORADA (Descripción real + fechas)
-       - Evita que el asunto quede como S00xxx
-       - Saca fecha de cotización / vencimiento
+       ✅ Helpers cliente desde PDF
+    ============================================================ */
+    const normalizeRut = (rutRaw) => {
+      const s = String(rutRaw || "")
+        .trim()
+        .toUpperCase();
+      const cleaned = s.replace(/[^0-9K\-]/g, "");
+      if (!cleaned.includes("-") && cleaned.length >= 2) {
+        return cleaned.slice(0, -1) + "-" + cleaned.slice(-1);
+      }
+      return cleaned;
+    };
+
+    const parseClienteFromText = (fullText) => {
+      const lines = fullText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+
+      const rutMatch =
+        fullText.match(/\bRUT\s*[:\-]?\s*([0-9\.\-]{7,12}[0-9Kk])\b/) ||
+        fullText.match(/\bR\.?U\.?T\.?\s*[:\-]?\s*([0-9\.\-]{7,12}[0-9Kk])\b/);
+
+      const rut = rutMatch ? normalizeRut(rutMatch[1]) : "";
+
+      const idxNumero = lines.findIndex((l) =>
+        /n[uú]mero de cotizaci[oó]n/i.test(l),
+      );
+      const searchLimitFrom = idxNumero > 0 ? Math.max(0, idxNumero - 25) : 0;
+      const searchLimitTo =
+        idxNumero > 0 ? idxNumero : Math.min(lines.length, 60);
+
+      const isBad = (l) =>
+        /^blue\b/i.test(l) ||
+        /ingenier/i.test(l) ||
+        /tecnolog/i.test(l) ||
+        /capit[aá]n|av\.|puerto|punta arenas|chile/i.test(l) ||
+        /^rut\b/i.test(l) ||
+        /^cotizaci[oó]n\b/i.test(l) ||
+        /^n[uú]mero\b/i.test(l);
+
+      let nombre = "";
+
+      if (rut) {
+        const idxRutLine = lines.findIndex(
+          (l) => /\brut\b/i.test(l) && l.includes(rut.replace(/\./g, "")),
+        );
+        if (idxRutLine > 0) {
+          for (let j = idxRutLine - 1; j >= Math.max(0, idxRutLine - 4); j--) {
+            const cand = lines[j];
+            if (!cand) continue;
+            if (isBad(cand)) continue;
+            if (cand.length < 3) continue;
+            if (/[a-záéíóúñ]/i.test(cand)) {
+              nombre = cand.trim();
+              break;
+            }
+          }
+        }
+      }
+
+      if (!nombre) {
+        for (let i = searchLimitFrom; i < searchLimitTo; i++) {
+          const cand = lines[i];
+          if (!cand) continue;
+          if (isBad(cand)) continue;
+          if (cand.length < 3) continue;
+          if (/\bS\d{3,}\b/.test(cand)) continue;
+          if (/[a-záéíóúñ]/i.test(cand)) {
+            nombre = cand.trim();
+            break;
+          }
+        }
+      }
+
+      return { nombre: nombre || "", rut: rut || "" };
+    };
+
+    const upsertClienteFromPdf = async (tx, empresaId, clientePdf) => {
+      const nombre = String(clientePdf?.nombre || "").trim();
+      const rut = normalizeRut(clientePdf?.rut || "");
+
+      if (!nombre && !rut) return { cliente: null, created: false };
+
+      if (rut) {
+        const foundByRut = await tx.cliente.findFirst({
+          where: { empresa_id: empresaId, rut, eliminado: false },
+          select: { id: true, nombre: true, rut: true },
+        });
+
+        if (foundByRut) return { cliente: foundByRut, created: false };
+
+        const created = await tx.cliente.create({
+          data: { empresa_id: empresaId, nombre: nombre || rut, rut },
+          select: { id: true, nombre: true, rut: true },
+        });
+
+        return { cliente: created, created: true };
+      }
+
+      if (nombre) {
+        const foundByName = await tx.cliente.findFirst({
+          where: {
+            empresa_id: empresaId,
+            eliminado: false,
+            nombre: { equals: nombre, mode: "insensitive" },
+          },
+          select: { id: true, nombre: true, rut: true },
+        });
+
+        if (foundByName) return { cliente: foundByName, created: false };
+
+        const created = await tx.cliente.create({
+          data: { empresa_id: empresaId, nombre, rut: null },
+          select: { id: true, nombre: true, rut: true },
+        });
+
+        return { cliente: created, created: true };
+      }
+
+      return { cliente: null, created: false };
+    };
+
+    /* ============================================================
+       ✅ EXTRACCIÓN (asunto + fechas + montos)
     ============================================================ */
     const lines = text
       .split("\n")
@@ -304,7 +394,6 @@ export const importCotizacionFromPdf = async (request, reply) => {
 
     const matchFirst = (re) => text.match(re)?.[1]?.trim() || "";
 
-    // Número de cotización del PDF (ej: S00195)
     const numeroPdf =
       matchFirst(/N[uú]mero de cotizaci[oó]n\s*(S\d+)/i) ||
       matchFirst(/Cotizaci[oó]n\s*(S\d+)/i) ||
@@ -317,8 +406,22 @@ export const importCotizacionFromPdf = async (request, reply) => {
       const dd = m[1],
         mm = m[2],
         yyyy = m[3];
-      // Date en UTC 00:00 para no correrse por zona
-      return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+      // ✅ mediodía UTC evita que al convertir a -03 se vaya al día anterior
+      return new Date(
+        Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd), 12, 0, 0),
+      );
+    };
+
+    const parseDateISODateOnly = (s) => {
+      const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return null;
+      const yyyy = m[1],
+        mm = m[2],
+        dd = m[3];
+      // ✅ mediodía UTC
+      return new Date(
+        Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd), 12, 0, 0),
+      );
     };
 
     const fechaCotizacionStr =
@@ -338,78 +441,160 @@ export const importCotizacionFromPdf = async (request, reply) => {
       return Number.isFinite(d) ? d : null;
     };
 
-    // Vigencia: si hay fechas, se calcula; si no, 15
     let vigencia_dias = 15;
     const vcalc = diffDays(fechaCotizacionDate, vencimientoDate);
     if (vcalc && vcalc > 0 && vcalc <= 365) vigencia_dias = vcalc;
 
-    // ✅ Descripción real desde la tabla:
-    // buscamos el primer texto “bueno” después de "Descripción"
-    const idxDesc = lines.findIndex((l) => /^descripci[oó]n$/i.test(l));
-    const isProbablyCode = (s) => /^S\d+$/i.test(s); // S00195
-    const isMoneyLike = (s) => /[\$]?\s*[\d\.\,]+\s*$/.test(s);
+    /* ============================================================
+       ✅✅ FIX REAL: ASUNTO/DESCRIPCIÓN (NO S00xxx)
+       - Encuentra "Descripción" aunque venga con más columnas en la misma línea
+       - Toma "Arriendo terreno" + línea detalle si existe
+    ============================================================ */
+    const idxDesc = lines.findIndex((l) =>
+      /^descripci[oó]n\b/i.test(String(l || "").trim()),
+    );
+
+    const hasLetters = (s) =>
+      /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(String(s || "").trim());
+    const isProbablyCode = (s) => /^S\d{3,}$/i.test(String(s || "").trim()); // S00195 / S00259
     const isHeaderLike = (s) =>
-      /^(cantidad|precio|precio unitario|impuestos|importe|subtotal|iva|total)$/i.test(
-        s,
+      /^(descripci[oó]n|cantidad|precio|precio unitario|impuestos|importe|subtotal|iva|total)\b/i.test(
+        String(s || "").trim(),
       );
+    const looksLikeUnits = (s) =>
+      /\b(unidades?|unidad)\b/i.test(String(s || "").trim());
+    const looksLikeTax = (s) =>
+      /\biva\b/i.test(String(s || "").trim()) ||
+      /\b\d+\s*%\b/.test(String(s || "").trim());
+    const isMoneyLike = (s) =>
+      /[$]?\s*[\d\.\,]+\s*$/.test(String(s || "").trim());
+    const isStop = (s) => {
+      const t = String(s || "").trim();
+      return /^subtotal\b/i.test(t) || /^iva\b/i.test(t) || /^total\b/i.test(t);
+    };
+
+    // si viene una línea estilo "Arriendo terreno 1,00 Unidades", extrae lo de la izquierda
+    const extractDescFromQtyLine = (line) => {
+      const t = String(line || "").trim();
+      const m = t.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(unidades?|unidad)\b/i);
+      if (!m) return "";
+      const left = String(m[1] || "").trim();
+      if (!left) return "";
+      if (!hasLetters(left)) return "";
+      if (isProbablyCode(left)) return "";
+      if (numeroPdf && left === numeroPdf) return "";
+      if (isHeaderLike(left)) return "";
+      return left;
+    };
 
     let descripcionTabla = "";
+    let descripcionDetalle = "";
+
     if (idxDesc >= 0) {
-      for (let i = idxDesc + 1; i < Math.min(idxDesc + 30, lines.length); i++) {
-        const l = lines[i];
+      // bloque de tabla: desde "Descripción..." hacia abajo, hasta Subtotal/IVA/Total
+      const block = [];
+      for (
+        let i = idxDesc + 1;
+        i < Math.min(idxDesc + 120, lines.length);
+        i++
+      ) {
+        const l = String(lines[i] || "").trim();
         if (!l) continue;
+        if (isStop(l)) break;
         if (isHeaderLike(l)) continue;
-        if (/^subtotal$/i.test(l)) break;
-        if (/^iva\b/i.test(l)) break;
-        if (/^total$/i.test(l)) break;
-        if (isProbablyCode(l)) continue; // evita S00xxx
-        if (isMoneyLike(l) && l.replace(/[^\d]/g, "").length >= 6) continue; // evita montos sueltos
-        // primera frase “real”
-        descripcionTabla = l.trim();
-        break;
+        block.push({ l, i });
       }
-    }
 
-    // fallback por si el PDF no trae la palabra "Descripción" tal cual:
-    if (!descripcionTabla) {
-      // toma la primera línea “buena” antes de Subtotal
-      const stop = lines.findIndex((l) => /^subtotal$/i.test(l));
-      const limit = stop > 0 ? stop : Math.min(120, lines.length);
-      for (let i = 0; i < limit; i++) {
-        const l = lines[i];
-        if (!l) continue;
-        if (isHeaderLike(l)) continue;
-        if (isProbablyCode(l)) continue;
-        if (numeroPdf && l === numeroPdf) continue;
-        // evita cliente/rut/direcciones muy obvias (heurística)
-        if (/^rut\b/i.test(l)) continue;
-        if (/^av\./i.test(l)) continue;
-        if (/^chile$/i.test(l)) continue;
-        if (/^puerto/i.test(l)) continue;
+      // 1) Caso: "DESC 1,00 Unidades" en misma línea
+      for (const row of block) {
+        const d = extractDescFromQtyLine(row.l);
+        if (d) {
+          descripcionTabla = d;
+          const next = String(lines[row.i + 1] || "").trim();
+          if (
+            next &&
+            hasLetters(next) &&
+            !isHeaderLike(next) &&
+            !isProbablyCode(next) &&
+            !(numeroPdf && next === numeroPdf) &&
+            !looksLikeUnits(next) &&
+            !looksLikeTax(next) &&
+            !(isMoneyLike(next) && next.replace(/[^\d]/g, "").length >= 6)
+          ) {
+            descripcionDetalle = next;
+          }
+          break;
+        }
+      }
 
-        // una descripción suele tener letras y espacios
-        if (/[a-záéíóúñ]/i.test(l) && l.length >= 4) {
-          descripcionTabla = l.trim();
+      // 2) Fallback: primera línea "real" con letras (saltando S00195, IVA, Unidades, montos)
+      if (!descripcionTabla) {
+        for (const row of block) {
+          const t = row.l;
+          if (!hasLetters(t)) continue;
+          if (isProbablyCode(t)) continue;
+          if (numeroPdf && t === numeroPdf) continue;
+          if (isHeaderLike(t)) continue;
+          if (looksLikeUnits(t)) continue;
+          if (looksLikeTax(t)) continue;
+          if (isMoneyLike(t) && t.replace(/[^\d]/g, "").length >= 6) continue;
+
+          descripcionTabla = t;
+
+          const next = String(lines[row.i + 1] || "").trim();
+          if (
+            next &&
+            hasLetters(next) &&
+            !isHeaderLike(next) &&
+            !isProbablyCode(next) &&
+            !(numeroPdf && next === numeroPdf) &&
+            !looksLikeUnits(next) &&
+            !looksLikeTax(next) &&
+            !(isMoneyLike(next) && next.replace(/[^\d]/g, "").length >= 6)
+          ) {
+            descripcionDetalle = next;
+          }
           break;
         }
       }
     }
 
-    // Usa tu parse base para montos, pero reemplaza asunto si logramos una descripción real
+    if (descripcionTabla && descripcionDetalle) {
+      descripcionTabla = `${descripcionTabla} — ${descripcionDetalle}`;
+    }
+
     const extractedBase = parseCotizacionText(text);
 
+    // fecha sugerida desde PDF
+    const fecha_documento_sugerida = fechaCotizacionDate || null;
+
+    // fecha final (create): manual > sugerida
+    const fecha_documento_manual_date = parseDateISODateOnly(
+      fecha_documento_manual,
+    );
+    const fecha_documento_final = fecha_documento_manual_date
+      ? fecha_documento_manual_date
+      : fecha_documento_sugerida;
+
+    // ✅ cliente desde PDF
+    const clientePdf = parseClienteFromText(text);
+
+    // Construcción extracted
     const extracted = {
       ...extractedBase,
-      // ✅ asunto final = descripción real si existe, si no, lo que salga del parser base
+      // ✅ asunto: SI encontramos "Arriendo terreno", NO permitimos que caiga al S00xxx
       asunto: descripcionTabla || extractedBase.asunto,
-      // ✅ dejamos el número del PDF por debug o por si lo quieres guardar después
       numeroPdf: numeroPdf || null,
-      fechaCotizacion: fechaCotizacionDate || null,
-      vencimiento: vencimientoDate || null,
+
+      cliente_pdf: clientePdf, // { nombre, rut }
+
+      fecha_documento_sugerida,
+      fecha_documento: fecha_documento_final,
+      vencimiento_documento: vencimientoDate || null,
+
       vigencia_dias,
     };
 
-    // Si no detectó items, crea 1 item con la descripción real (como tus PDFs de ejemplo)
     if (!Array.isArray(extracted.items) || extracted.items.length === 0) {
       extracted.items = [
         {
@@ -420,53 +605,92 @@ export const importCotizacionFromPdf = async (request, reply) => {
       ];
     }
 
+    // ✅ PREVIEW: NO exige cliente_id
     if (modo === "preview") {
+      const toYMD = (d) => (!d ? "" : d.toISOString().slice(0, 10));
+
+      const resolved = await prisma.$transaction(async (tx) => {
+        const { cliente, created } = await upsertClienteFromPdf(
+          tx,
+          empresaId,
+          extracted.cliente_pdf,
+        );
+        return { cliente, created };
+      });
+
       return reply.send({
         mode: "preview",
         extracted: {
+          cliente: resolved.cliente
+            ? { ...resolved.cliente, created: resolved.created }
+            : null,
+
           asunto: extracted.asunto,
           subtotal: extracted.subtotal,
           iva: extracted.iva,
           total: extracted.total,
           items: extracted.items,
-          fecha_cotizacion: extracted.fechaCotizacion
-            ? extracted.fechaCotizacion.toISOString()
-            : null,
-          vencimiento: extracted.vencimiento
-            ? extracted.vencimiento.toISOString()
-            : null,
+
+          fecha_documento_sugerida: toYMD(extracted.fecha_documento_sugerida),
+          vencimiento_documento_sugerido: toYMD(
+            extracted.vencimiento_documento,
+          ),
+
           vigencia_dias: extracted.vigencia_dias,
           numero_pdf: extracted.numeroPdf,
         },
         debug: {
           filename: fileName,
           pages: parsed.numpages,
-          textSample: extracted.rawText.slice(0, 1200),
+          textSample: extracted.rawText?.slice(0, 1200) || "",
         },
       });
     }
 
-    // create
+    // ✅ CREATE
     const created = await prisma.$transaction(async (tx) => {
+      const { cliente: clienteResolved } = await upsertClienteFromPdf(
+        tx,
+        empresaId,
+        extracted.cliente_pdf,
+      );
+
+      let cliente_id_final = clienteResolved?.id || "";
+
+      if (!cliente_id_final && cliente_id_fallback) {
+        const cli = await tx.cliente.findFirst({
+          where: {
+            id: cliente_id_fallback,
+            empresa_id: empresaId,
+            eliminado: false,
+          },
+          select: { id: true },
+        });
+        if (!cli) throw new Error("Cliente inválido (fallback)");
+        cliente_id_final = cli.id;
+      }
+
+      if (!cliente_id_final) {
+        throw new Error(
+          "No se pudo resolver cliente desde el PDF (y no se envió cliente_id).",
+        );
+      }
+
       const subtotal = Math.round(Number(extracted.subtotal || 0));
       const iva = Math.round(Number(extracted.iva || 0));
       const total = Math.round(Number(extracted.total || 0));
 
-      if (!subtotal || subtotal <= 0) {
+      if (!subtotal || subtotal <= 0)
         throw new Error("No se pudo calcular subtotal desde el PDF");
-      }
 
       return tx.cotizacion.create({
         data: {
           empresa_id: empresaId,
           proyecto_id: null,
-          cliente_id,
+          cliente_id: cliente_id_final,
           vendedor_id: userId,
 
-          // ✅ asunto = descripción real
           asunto: extracted.asunto?.slice(0, 250) || "Cotización importada",
-
-          // ✅ vigencia desde PDF si se pudo
           vigencia_dias: normalizeVigenciaDias(extracted.vigencia_dias ?? 15),
 
           subtotal,
@@ -474,10 +698,8 @@ export const importCotizacionFromPdf = async (request, reply) => {
           total,
           estado: "COTIZACION",
 
-          // ✅ FECHA: usa la fecha del PDF para que tu cotización muestre la misma
-          ...(extracted.fechaCotizacion
-            ? { creada_en: extracted.fechaCotizacion }
-            : {}),
+          fecha_documento: extracted.fecha_documento || null,
+          vencimiento_documento: extracted.vencimiento_documento || null,
 
           glosas: {
             create: [
