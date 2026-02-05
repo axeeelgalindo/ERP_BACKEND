@@ -184,10 +184,7 @@ function parseCotizacionText(text) {
 
 /**
  * POST /cotizaciones/import/pdf
- * Form-data:
- * - file: PDF
- * - cliente_id: string (obligatorio, por ahora)
- * - modo: "preview" | "create" (default preview)
+  1 PDF 
  */
 export const importCotizacionFromPdf = async (request, reply) => {
   try {
@@ -724,6 +721,261 @@ export const importCotizacionFromPdf = async (request, reply) => {
   } catch (e) {
     return reply.code(e.statusCode || 400).send({
       error: "Error al importar PDF",
+      detalle: e.message,
+    });
+  }
+};
+
+// + 1 PDF
+export const importCotizacionesFromPdfBatch = async (request, reply) => {
+  try {
+    const { empresaId, userId } = getScope(request);
+
+    const fields = {};
+    const files = []; // [{ filename, buffer }]
+
+    const MAX_FILES = 50; // ajusta a gusto
+    const MAX_MB_EACH = 10; // por seguridad
+
+    for await (const part of request.parts()) {
+      if (part.type === "file") {
+        const filename = part.filename || "archivo.pdf";
+        const chunks = [];
+        let total = 0;
+
+        for await (const chunk of part.file) {
+          total += chunk.length;
+          if (total > MAX_MB_EACH * 1024 * 1024) {
+            const err = new Error(
+              `Archivo ${filename} excede ${MAX_MB_EACH}MB (muy grande)`,
+            );
+            err.statusCode = 413;
+            throw err;
+          }
+          chunks.push(chunk);
+        }
+
+        files.push({ filename, buffer: Buffer.concat(chunks) });
+
+        if (files.length > MAX_FILES) {
+          const err = new Error(`Máximo ${MAX_FILES} PDFs por carga`);
+          err.statusCode = 413;
+          throw err;
+        }
+      } else {
+        fields[part.fieldname] = part.value;
+      }
+    }
+
+    if (!files.length) {
+      return reply.code(400).send({ error: "Debes enviar al menos 1 PDF" });
+    }
+
+    const modo = String(fields?.modo || "preview").trim().toLowerCase();
+    const fecha_documento_manual = String(fields?.fecha_documento_manual || "").trim();
+    const cliente_id_fallback = String(fields?.cliente_id || "").trim();
+
+    // worker interno: procesa 1 PDF usando tu misma lógica
+    const processOne = async ({ filename, buffer }) => {
+      // ====== acá reutilizamos lo que ya tienes ======
+      // 1) parse pdf
+      let parsed = null;
+      if (typeof pdfParse === "function") {
+        parsed = await pdfParse(buffer);
+      } else if (pdfParse?.PDFParse) {
+        const Parser = pdfParse.PDFParse;
+        const parser = new Parser({ data: buffer });
+        const result = await parser.getText();
+        await parser.destroy();
+        parsed = { text: result?.text || "", numpages: result?.total || (result?.pages?.length ?? null) };
+      } else {
+        const err = new Error("pdf-parse no está disponible correctamente");
+        err.statusCode = 500;
+        throw err;
+      }
+
+      const text = normalizeText(parsed?.text || "");
+      if (!text) {
+        const err = new Error("No se pudo extraer texto del PDF (posible escaneado, requiere OCR)");
+        err.statusCode = 422;
+        throw err;
+      }
+
+      // 2) tu extracción (usa tus funciones ya definidas arriba)
+      //    IMPORTANTE: estas funciones deben estar en el mismo scope del archivo:
+      //    parseCotizacionText, normalizeVigenciaDias, round0, etc.
+      //    Y también las internas: parseClienteFromText, upsertClienteFromPdf, parseDateISODateOnly, parseDateCL...
+      //    (si actualmente están dentro de importCotizacionFromPdf, hay que subirlas a helpers globales)
+
+      // Para no duplicar 200 líneas aquí: lo mínimo es llamar a tu función actual
+      // pero tu función actual lee multipart, así que no sirve directo.
+      // Entonces: mueve estos helpers (parseClienteFromText/upsertClienteFromPdf/parseDateCL/parseDateISODateOnly)
+      // fuera del endpoint original para poder reutilizarlos acá.
+
+      // ==== EJEMPLO usando las mismas helpers que ya tienes (asumiendo que están arriba como helpers globales) ====
+      const extractedBase = parseCotizacionText(text);
+
+      // fechas (igual que tu lógica)
+      const matchFirst = (re) => text.match(re)?.[1]?.trim() || "";
+      const fechaCotizacionStr =
+        matchFirst(/Fecha de cotizaci[oó]n\s*:?[\s]*([0-9\/\-]{10})/i) ||
+        matchFirst(/\bFecha\s*:?[\s]*([0-9\/\-]{10})/i);
+
+      const vencimientoStr =
+        matchFirst(/\bVencimiento\s*:?[\s]*([0-9\/\-]{10})/i) || "";
+
+      const fechaCotizacionDate = parseDateCL(fechaCotizacionStr);
+      const vencimientoDate = parseDateCL(vencimientoStr);
+
+      const fecha_documento_manual_date = parseDateISODateOnly(fecha_documento_manual);
+      const fecha_documento_final = fecha_documento_manual_date || fechaCotizacionDate || null;
+
+      const clientePdf = parseClienteFromText(text);
+
+      // fallback simple de vigencia
+      let vigencia_dias = 15;
+      if (fechaCotizacionDate && vencimientoDate) {
+        const ms = vencimientoDate.getTime() - fechaCotizacionDate.getTime();
+        const d = Math.round(ms / (1000 * 60 * 60 * 24));
+        if (d > 0 && d <= 365) vigencia_dias = d;
+      }
+
+      const extracted = {
+        ...extractedBase,
+        cliente_pdf: clientePdf,
+        fecha_documento: fecha_documento_final,
+        vencimiento_documento: vencimientoDate || null,
+        vigencia_dias,
+      };
+
+      if (!Array.isArray(extracted.items) || extracted.items.length === 0) {
+        extracted.items = [
+          { cantidad: 1, descripcion: extracted.asunto, total: round0(extracted.subtotal || 0) },
+        ];
+      }
+
+      // 3) preview vs create
+      if (modo === "preview") {
+        const resolved = await prisma.$transaction(async (tx) => {
+          const r = await upsertClienteFromPdf(tx, empresaId, extracted.cliente_pdf);
+          return r;
+        });
+
+        const toYMD = (d) => (!d ? "" : d.toISOString().slice(0, 10));
+
+        return {
+          ok: true,
+          filename,
+          mode: "preview",
+          extracted: {
+            cliente: resolved?.cliente
+              ? { ...resolved.cliente, created: resolved.created }
+              : null,
+            asunto: extracted.asunto,
+            subtotal: extracted.subtotal,
+            iva: extracted.iva,
+            total: extracted.total,
+            items: extracted.items,
+            fecha_documento: toYMD(extracted.fecha_documento),
+            vencimiento_documento: toYMD(extracted.vencimiento_documento),
+            vigencia_dias: extracted.vigencia_dias,
+          },
+        };
+      }
+
+      // CREATE
+      const created = await prisma.$transaction(async (tx) => {
+        const { cliente: clienteResolved } = await upsertClienteFromPdf(
+          tx,
+          empresaId,
+          extracted.cliente_pdf,
+        );
+
+        let cliente_id_final = clienteResolved?.id || "";
+
+        if (!cliente_id_final && cliente_id_fallback) {
+          const cli = await tx.cliente.findFirst({
+            where: { id: cliente_id_fallback, empresa_id: empresaId, eliminado: false },
+            select: { id: true },
+          });
+          if (!cli) throw new Error("Cliente inválido (fallback)");
+          cliente_id_final = cli.id;
+        }
+
+        if (!cliente_id_final) {
+          throw new Error("No se pudo resolver cliente desde el PDF (y no se envió cliente_id).");
+        }
+
+        const subtotal = Math.round(Number(extracted.subtotal || 0));
+        const iva = Math.round(Number(extracted.iva || 0));
+        const total = Math.round(Number(extracted.total || 0));
+        if (!subtotal || subtotal <= 0) throw new Error("No se pudo calcular subtotal desde el PDF");
+
+        return tx.cotizacion.create({
+          data: {
+            empresa_id: empresaId,
+            proyecto_id: null,
+            cliente_id: cliente_id_final,
+            vendedor_id: userId,
+            asunto: extracted.asunto?.slice(0, 250) || "Cotización importada",
+            vigencia_dias: normalizeVigenciaDias(extracted.vigencia_dias ?? 15),
+            subtotal,
+            iva,
+            total,
+            estado: "COTIZACION",
+            fecha_documento: extracted.fecha_documento || null,
+            vencimiento_documento: extracted.vencimiento_documento || null,
+            glosas: {
+              create: [
+                {
+                  descripcion: (extracted.asunto || "Servicios").slice(0, 250),
+                  monto: subtotal,
+                  manual: true,
+                  orden: 0,
+                },
+              ],
+            },
+          },
+          include: {
+            cliente: true,
+            vendedor: { select: { id: true, nombre: true, correo: true } },
+            glosas: { orderBy: { orden: "asc" } },
+          },
+        });
+      });
+
+      return { ok: true, filename, mode: "create", cotizacion: created };
+    };
+
+    // Procesar todos (secuencial y seguro)
+    const results = [];
+    for (const f of files) {
+      try {
+        results.push(await processOne(f));
+      } catch (e) {
+        results.push({
+          ok: false,
+          filename: f.filename,
+          error: "IMPORT_FAIL",
+          detalle: e.message,
+          statusCode: e.statusCode || 400,
+        });
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    const failCount = results.length - okCount;
+
+    return reply.send({
+      mode: modo,
+      total: results.length,
+      ok: okCount,
+      fail: failCount,
+      results,
+    });
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al importar PDFs (batch)",
       detalle: e.message,
     });
   }
