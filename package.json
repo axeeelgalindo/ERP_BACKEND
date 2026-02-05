@@ -14,26 +14,26 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@fastify/ajv-compiler": "^4.0.5",
+    "@fastify/ajv-compiler": "4.0.5",
     "@fastify/cors": "11.1.0",
     "@fastify/jwt": "10.0.0",
-    "@fastify/multipart": "^9.3.0",
+    "@fastify/multipart": "9.3.0",
     "@fastify/sensible": "6.0.3",
-    "@prisma/client": "^6.11.1",
-    "@sinclair/typebox": "^0.34.41",
-    "ajv-formats": "^3.0.1",
-    "bcryptjs": "^3.0.3",
-    "csv-parse": "^6.1.0",
-    "csvtojson": "^2.0.14",
-    "dotenv": "^17.2.3",
+    "@prisma/client": "6.11.1",
+    "@sinclair/typebox": "0.34.41",
+    "ajv-formats": "3.0.1",
+    "bcryptjs": "3.0.3",
+    "csv-parse": "6.1.0",
+    "csvtojson": "2.0.14",
+    "dotenv": "17.2.3",
     "fastify": "5.6.1",
-    "pdf-parse": "^2.4.5",
-    "pg": "^8.16.3",
-    "xlsx": "^0.18.5",
+    "pdf-parse": "2.4.5",
+    "pg": "8.16.3",
+    "xlsx": "0.18.5",
     "zod": "4.1.12"
   },
   "devDependencies": {
     "nodemon": "3.1.10",
-    "prisma": "^6.11.1"
+    "prisma": "6.11.1"
   }
 }

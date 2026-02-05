@@ -1318,19 +1318,66 @@ export const updateCotizacionEstado = async (request, reply) => {
   try {
     const { empresaId } = getScope(request);
     const { id } = request.params;
-    const { estado } = request.body || {};
 
-    const valid = ["COTIZACION", "ORDEN_VENTA", "FACTURADA", "PAGADA"];
+    const {
+      estado,
+      fecha_inicio_plan,
+      fecha_fin_plan,
+      motivo_rechazo,
+    } = request.body || {};
+
+    const valid = [
+      "COTIZACION",
+      "ACEPTADA",
+      "RECHAZADA",
+      "ORDEN_VENTA",
+      "FACTURADA",
+      "PAGADA",
+    ];
     if (!valid.includes(estado)) {
       return reply.code(400).send({ error: "Estado inválido" });
     }
 
     const allowed = {
-      COTIZACION: ["ORDEN_VENTA"],
+      COTIZACION: ["ACEPTADA", "RECHAZADA"],
+      ACEPTADA: ["ORDEN_VENTA"],
       ORDEN_VENTA: ["FACTURADA"],
       FACTURADA: ["PAGADA"],
       PAGADA: [],
+      RECHAZADA: [],
     };
+
+    const parseDate = (v) => (v ? new Date(v) : null);
+    const toAceptada = estado === "ACEPTADA";
+    const toRechazada = estado === "RECHAZADA";
+
+    const inicioPlan = parseDate(fecha_inicio_plan);
+    const finPlan = parseDate(fecha_fin_plan);
+
+    if (toAceptada) {
+      if (!inicioPlan || !finPlan || Number.isNaN(+inicioPlan) || Number.isNaN(+finPlan)) {
+        return reply.code(400).send({
+          error: "Faltan fechas planificadas",
+          detalle: "Envía fecha_inicio_plan y fecha_fin_plan (YYYY-MM-DD o ISO).",
+        });
+      }
+      if (finPlan < inicioPlan) {
+        return reply.code(400).send({
+          error: "Rango inválido",
+          detalle: "La fecha fin planificada no puede ser menor que la fecha inicio planificada.",
+        });
+      }
+    }
+
+    if (toRechazada) {
+      // motivo opcional pero si viene, lo limpiamos
+      if (motivo_rechazo && String(motivo_rechazo).length > 500) {
+        return reply.code(400).send({
+          error: "Motivo muy largo",
+          detalle: "Máximo 500 caracteres.",
+        });
+      }
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const cot = await tx.cotizacion.findFirst({
@@ -1342,8 +1389,6 @@ export const updateCotizacionEstado = async (request, reply) => {
           estado: true,
           proyecto_id: true,
           empresa_id: true,
-          cliente_id: true,
-          vendedor_id: true,
         },
       });
 
@@ -1353,18 +1398,17 @@ export const updateCotizacionEstado = async (request, reply) => {
         throw err;
       }
 
-      if (!allowed[cot.estado].includes(estado)) {
-        const err = new Error(
-          `Transición no permitida: ${cot.estado} → ${estado}`,
-        );
+      if (!allowed[cot.estado]?.includes(estado)) {
+        const err = new Error(`Transición no permitida: ${cot.estado} → ${estado}`);
         err.statusCode = 400;
         throw err;
       }
 
       let proyectoIdFinal = cot.proyecto_id;
 
-      const isCotToOV = cot.estado === "COTIZACION" && estado === "ORDEN_VENTA";
-      if (isCotToOV && !proyectoIdFinal) {
+      // ✅ crear proyecto al ACEPTAR
+      const isCotToAceptada = cot.estado === "COTIZACION" && estado === "ACEPTADA";
+      if (isCotToAceptada && !proyectoIdFinal) {
         const asunto = String(cot.asunto || "Sin asunto").trim();
         const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
 
@@ -1372,6 +1416,8 @@ export const updateCotizacionEstado = async (request, reply) => {
           data: {
             empresa_id: cot.empresa_id,
             nombre: nombreProyecto,
+            fecha_inicio_plan: inicioPlan,
+            fecha_fin_plan: finPlan,
           },
           select: { id: true },
         });
@@ -1379,11 +1425,23 @@ export const updateCotizacionEstado = async (request, reply) => {
         proyectoIdFinal = proyecto.id;
       }
 
+      // ✅ si ya existía proyecto y se vuelve a setear plan (por si acaso)
+      if (toAceptada && proyectoIdFinal) {
+        await tx.proyecto.update({
+          where: { id: proyectoIdFinal },
+          data: {
+            fecha_inicio_plan: inicioPlan,
+            fecha_fin_plan: finPlan,
+          },
+        });
+      }
+
       const updated = await tx.cotizacion.update({
         where: { id: cot.id },
         data: {
           estado,
           proyecto_id: proyectoIdFinal ?? null,
+          motivo_rechazo: toRechazada ? (motivo_rechazo ? String(motivo_rechazo).trim() : null) : null,
         },
         include: {
           proyecto: true,
@@ -1404,3 +1462,4 @@ export const updateCotizacionEstado = async (request, reply) => {
     });
   }
 };
+

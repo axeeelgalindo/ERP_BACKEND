@@ -265,13 +265,24 @@ model Producto {
  * =========================
  */
 model Proyecto {
-  id             String    @id @default(cuid())
-  empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  nombre         String
-  descripcion    String?
-  presupuesto    Float?
-  estado         String    @default("activo")
+  id          String  @id @default(cuid())
+  empresa_id  String
+  empresa     Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  nombre      String
+  descripcion String?
+  presupuesto Float?
+  estado      String  @default("activo")
+
+  // ✅ NUEVO: planificación del proyecto
+  fecha_inicio_plan DateTime?
+  fecha_fin_plan    DateTime?
+  dias_plan         Int?
+
+  // ✅ ejecución real
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+
   creada_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
   // soft delete
@@ -434,9 +445,11 @@ model TareaDependencia {
  */
 enum EstadoCotizacion {
   COTIZACION
+  ACEPTADA
   ORDEN_VENTA
   FACTURADA
   PAGADA
+  RECHAZADA
 }
 
 /**
@@ -479,6 +492,8 @@ model Cotizacion {
 
   fecha_documento       DateTime?
   vencimiento_documento DateTime?
+
+  motivo_rechazo String?
 
   estado EstadoCotizacion @default(COTIZACION)
 
