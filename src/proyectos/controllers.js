@@ -56,6 +56,10 @@ export async function listProyectos(request, reply) {
     "nombre",
     "estado",
     "presupuesto",
+    "fecha_inicio_plan",
+    "fecha_fin_plan",
+    "fecha_inicio_real",
+    "fecha_fin_real",
   ];
   const sortField = allowedSort.includes(String(sort)) ? sort : "creada_en";
   const sortDir = String(order).toLowerCase() === "asc" ? "asc" : "desc";
@@ -146,9 +150,7 @@ export async function getProyecto(request, reply) {
   const valorHHPlan = subtareas.reduce((sum, d) => {
     const costoPlanDirecto = d.costo_plan ?? null;
     const costoPlanCalc =
-      d.horas_plan != null && d.valor_hora != null
-        ? d.horas_plan * d.valor_hora
-        : 0;
+      d.horas_plan != null && d.valor_hora != null ? d.horas_plan * d.valor_hora : 0;
     const costoPlan = costoPlanDirecto != null ? costoPlanDirecto : costoPlanCalc;
     return sum + (costoPlan || 0);
   }, 0);
@@ -157,25 +159,19 @@ export async function getProyecto(request, reply) {
   const valorHHReal = subtareas.reduce((sum, d) => {
     const costoRealDirecto = d.costo_real ?? null;
     const costoRealCalc =
-      d.horas_real != null && d.valor_hora != null
-        ? d.horas_real * d.valor_hora
-        : 0;
+      d.horas_real != null && d.valor_hora != null ? d.horas_real * d.valor_hora : 0;
     const costoReal = costoRealDirecto != null ? costoRealDirecto : costoRealCalc;
     return sum + (costoReal || 0);
   }, 0);
 
   // ====== FINANCIERO ======
-  // (sin relación ventas directa en Proyecto)
   const ventas = [];
   const compras = row.compras || [];
   const rendiciones = row.rendiciones || [];
 
   const totalVentas = ventas.reduce((sum, v) => sum + (v.total ?? 0), 0);
   const totalCompras = compras.reduce((sum, c) => sum + (c.total ?? 0), 0);
-  const totalRendiciones = rendiciones.reduce(
-    (sum, r) => sum + (r.monto_total ?? 0),
-    0
-  );
+  const totalRendiciones = rendiciones.reduce((sum, r) => sum + (r.monto_total ?? 0), 0);
 
   const presupuesto = row.presupuesto ?? 0;
 
@@ -192,9 +188,7 @@ export async function getProyecto(request, reply) {
 
   // ====== MÉTRICAS TAREAS ======
   const totalTareas = tareas.length;
-  const tareasCompletas = tareas.filter(
-    (t) => t.estado === "completa" || (t.avance ?? 0) >= 100
-  ).length;
+  const tareasCompletas = tareas.filter((t) => t.estado === "completa" || (t.avance ?? 0) >= 100).length;
   const tareasEnCurso = tareas.filter(
     (t) => t.estado === "en_progreso" || ((t.avance ?? 0) > 0 && (t.avance ?? 0) < 100)
   ).length;
@@ -205,8 +199,7 @@ export async function getProyecto(request, reply) {
       ? Math.round(tareas.reduce((sum, t) => sum + (t.avance ?? 0), 0) / totalTareas)
       : 0;
 
-  const porcentajeCompletado =
-    totalTareas > 0 ? Math.round((tareasCompletas / totalTareas) * 100) : 0;
+  const porcentajeCompletado = totalTareas > 0 ? Math.round((tareasCompletas / totalTareas) * 100) : 0;
 
   const costoPromedioPorTarea = totalTareas > 0 ? costoTotal / totalTareas : 0;
   const ventaPromedioPorTarea = totalTareas > 0 ? totalVentas / totalTareas : 0;
@@ -264,7 +257,6 @@ export const createProyecto = async (request, reply) => {
     cliente_id != null ? `V-${new Date().getFullYear()}-${randCode()}` : null;
 
   try {
-    // 1) crear proyecto
     const proyecto = await prisma.proyecto.create({
       data: {
         empresa_id: empresaId,
@@ -272,7 +264,6 @@ export const createProyecto = async (request, reply) => {
         descripcion: descripcion?.trim() || null,
         presupuesto: cleanPresupuesto,
         estado: estado || "activo",
-
         ...(Array.isArray(miembros) && miembros.length
           ? {
               miembros: {
@@ -298,9 +289,6 @@ export const createProyecto = async (request, reply) => {
       },
     });
 
-    // 2) crear venta si viene cliente_id
-    // ✅ CLAVE: tu modelo Venta NO tiene empresa_id y NO tiene relación "proyecto"
-    // por lo tanto usamos FKs escalares: proyecto_id y cliente_id (que sí existen)
     let ventas = [];
     if (cliente_id && ventaNumero) {
       const venta = await prisma.venta.create({
@@ -345,6 +333,79 @@ export async function updateProyecto(request, reply) {
 
   const row = await prisma.proyecto.update({ where: { id }, data });
   return reply.send({ ok: true, row });
+}
+
+/* ========== ✅ INICIAR PROYECTO (fecha real) ========== */
+export async function iniciarProyecto(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params;
+
+  const p = await prisma.proyecto.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      empresa_id: true,
+      eliminado: true,
+      fecha_inicio_real: true,
+      fecha_fin_real: true,
+    },
+  });
+
+  if (!p) return httpError(reply, 404, "Proyecto no encontrado");
+  if (p.eliminado) return httpError(reply, 409, "Proyecto está deshabilitado");
+  if (!scope.isMaster && p.empresa_id !== scope.empresaId)
+    return httpError(reply, 403, "Proyecto fuera de tu empresa");
+
+  if (p.fecha_inicio_real) return httpError(reply, 400, "El proyecto ya está iniciado");
+  if (p.fecha_fin_real) return httpError(reply, 400, "El proyecto ya está finalizado");
+
+  const upd = await prisma.proyecto.update({
+    where: { id },
+    data: {
+      fecha_inicio_real: new Date(),
+      // opcional: estado si quieres
+      estado: p.estado === "activo" ? "en_progreso" : p.estado,
+    },
+  });
+
+  return reply.send({ ok: true, row: upd });
+}
+
+/* ========== ✅ FINALIZAR PROYECTO (fecha real) ========== */
+export async function finalizarProyecto(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params;
+
+  const p = await prisma.proyecto.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      empresa_id: true,
+      eliminado: true,
+      fecha_inicio_real: true,
+      fecha_fin_real: true,
+    },
+  });
+
+  if (!p) return httpError(reply, 404, "Proyecto no encontrado");
+  if (p.eliminado) return httpError(reply, 409, "Proyecto está deshabilitado");
+  if (!scope.isMaster && p.empresa_id !== scope.empresaId)
+    return httpError(reply, 403, "Proyecto fuera de tu empresa");
+
+  if (!p.fecha_inicio_real)
+    return httpError(reply, 400, "No puedes finalizar un proyecto que no ha sido iniciado");
+  if (p.fecha_fin_real) return httpError(reply, 400, "El proyecto ya está finalizado");
+
+  const upd = await prisma.proyecto.update({
+    where: { id },
+    data: {
+      fecha_fin_real: new Date(),
+      // opcional: estado si quieres
+      estado: "finalizado",
+    },
+  });
+
+  return reply.send({ ok: true, row: upd });
 }
 
 /* ========== SOFT DELETE ========== */
@@ -428,10 +489,7 @@ export async function deleteProyecto(request, reply) {
   await prisma.$transaction(async (tx) => {
     await tx.tareaDependencia.deleteMany({
       where: {
-        OR: [
-          { tarea: { proyecto_id: id } },
-          { predecesora: { proyecto_id: id } },
-        ],
+        OR: [{ tarea: { proyecto_id: id } }, { predecesora: { proyecto_id: id } }],
       },
     });
     await tx.tarea.deleteMany({ where: { proyecto_id: id } });

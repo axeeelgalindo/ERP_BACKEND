@@ -7,6 +7,8 @@ import {
   disableProyecto,
   restoreProyecto,
   approveProyecto,
+  iniciarProyecto,
+  finalizarProyecto,
 } from "./controllers.js";
 
 import { importJiraCSV } from "./proyectos.jira.controller.js";
@@ -68,4 +70,8 @@ export default async function proyectosRoutes(server) {
 
   // ✅ Import Jira
   server.post("/proyectos/:id/jira/import", { ...guard }, importJiraCSV);
+
+
+  server.post("/proyectos/:id/iniciar", iniciarProyecto);
+server.post("/proyectos/:id/finalizar", finalizarProyecto);
 }
