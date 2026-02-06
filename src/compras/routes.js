@@ -8,11 +8,23 @@ import {
   updateCompra,
   listComprasDisponiblesVenta,
   importComprasCSV,
+
+  // ✅ NUEVO
+  uploadFacturaCompra,
+  getCompraCosteos,
+  setCompraCosteos,
 } from "./controllers.js";
 
 export default async function compraRoutes(server) {
   // upload csv
   server.post("/compras/import-csv", importComprasCSV);
+
+  // ✅ subir factura pdf
+  server.post("/compras/:id/factura", uploadFacturaCompra);
+
+  // ✅ costeos (ventas)
+  server.get("/compras/:id/costeos", getCompraCosteos);
+  server.put("/compras/:id/costeos", setCompraCosteos);
 
   // LIST
   server.get("/compras", listCompras);

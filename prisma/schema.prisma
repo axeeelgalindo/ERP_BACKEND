@@ -44,9 +44,10 @@ model Empresa {
   cifs CIF[] // ✅ lado inverso
 
   // 👇 catálogos admin (por empresa)
-  tipoItems   TipoItem[]
-  tipoDias    TipoDia[]
-  unidadItems UnidadItem[]
+  tipoItems     TipoItem[]
+  tipoDias      TipoDia[]
+  unidadItems   UnidadItem[]
+  compraCosteos CompraCosteo[]
 }
 
 /**
@@ -562,13 +563,14 @@ enum DetalleVentaModo {
 }
 
 model Venta {
-  id           String         @id @default(cuid())
-  numero       Int            @unique @default(autoincrement())
-  fecha        DateTime       @default(now())
-  ordenVentaId String?
-  descripcion  String?
-  ordenVenta   Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
-  detalles     detalleVenta[]
+  id                  String         @id @default(cuid())
+  numero              Int            @unique @default(autoincrement())
+  fecha               DateTime       @default(now())
+  ordenVentaId        String?
+  descripcion         String?
+  ordenVenta          Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
+  detalles            detalleVenta[]
+  asignaciones_costeo CompraCosteo[]
 
   createdAt DateTime @default(now())
 }
@@ -713,9 +715,10 @@ model Compra {
   eliminado      Boolean      @default(false)
   eliminado_en   DateTime?
 
-  cotizacionId String?
-  cotizacion   Cotizacion?  @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
-  items        CompraItem[]
+  cotizacionId        String?
+  cotizacion          Cotizacion?    @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  items               CompraItem[]
+  asignaciones_costeo CompraCosteo[]
 
   proveedor   Proveedor? @relation(fields: [proveedorId], references: [id])
   proveedorId String?
@@ -760,6 +763,28 @@ model CompraItem {
 
   @@index([compra_id])
   @@index([tipoItemId])
+}
+
+model CompraCosteo {
+  id String @id @default(cuid())
+
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  compra_id String
+  compra    Compra @relation(fields: [compra_id], references: [id], onDelete: Cascade)
+
+  venta_id String
+  venta    Venta  @relation(fields: [venta_id], references: [id], onDelete: Cascade)
+
+  monto          Float    @default(0)
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  @@unique([compra_id, venta_id])
+  @@index([empresa_id])
+  @@index([compra_id])
+  @@index([venta_id])
 }
 
 /**

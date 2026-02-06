@@ -1,13 +1,22 @@
+// src/controllers/compras/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 import { parse } from "csv-parse/sync";
+
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import crypto from "crypto";
+
 const prisma = new PrismaClient();
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_SIZE = 20;
 
-/* ===== Helpers ===== */
+/* =========================
+   Helpers
+========================= */
 function toInt(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -29,7 +38,7 @@ function normalizeEstadoCompra(v) {
 }
 
 async function assertEntidadEmpresa(tx, tabla, id, empresaId) {
-  if (!id) return; // si viene null/undefined, no valida (porque es opcional en algunos casos)
+  if (!id) return;
 
   const map = {
     proyecto: () =>
@@ -52,13 +61,22 @@ async function assertEntidadEmpresa(tx, tabla, id, empresaId) {
         where: { id, empresa_id: empresaId, eliminado: false },
         select: { id: true },
       }),
+    // ✅ tu costeo es Venta (si Venta tiene empresa_id, agrega filtro aquí)
+    venta: () =>
+      tx.venta.findFirst({
+        where: { id },
+        select: { id: true },
+      }),
   };
 
   const q = map[tabla];
   if (!q) return;
 
   const ok = await q();
-  if (!ok) throw Object.assign(new Error(`${tabla} no pertenece a tu empresa`), { statusCode: 403 });
+  if (!ok)
+    throw Object.assign(new Error(`${tabla} no pertenece a tu empresa`), {
+      statusCode: 403,
+    });
 }
 
 function calcTotal(items = []) {
@@ -69,33 +87,13 @@ function calcTotal(items = []) {
   }, 0);
 }
 
-function pickCompraSelect() {
-  return {
-    id: true,
-    numero: true,
-    empresa_id: true,
-    proyecto_id: true,
-    estado: true,
-    total: true,
-    creada_en: true,
-    actualizado_en: true,
-    eliminado: true,
-    eliminado_en: true,
-    cotizacionId: true,
-    proveedorId: true,
-  };
-}
-
 function parseCLP(v) {
-  // soporta "", null
   const s = String(v ?? "").trim();
   if (!s) return 0;
-  // RCV suele venir sin separadores. Igual limpiamos.
   const cleaned = s.replace(/\./g, "").replace(/,/g, "."); // por si viniera con coma
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
-
 
 function parseDateDMY(v) {
   // "01/12/2025"
@@ -118,7 +116,9 @@ function parseDateTimeDMY(v) {
   const [dd, mm, yyyy] = datePart.split("/");
   if (!dd || !mm || !yyyy) return null;
 
-  let hh = 0, mi = 0, ss = 0;
+  let hh = 0,
+    mi = 0,
+    ss = 0;
   if (timePart) {
     const parts = timePart.split(":");
     hh = Number(parts[0] ?? 0);
@@ -144,12 +144,115 @@ function normStr(v) {
   return s ? s : null;
 }
 
+/* =========================
+   Vinculación Compra -> Costeo (Venta)
+========================= */
+function getPrevPeriod(year, month) {
+  if (month === 1) return { y: year - 1, m: 12 };
+  return { y: year, m: month - 1 };
+}
+
+async function countComprasNoVinculadas(tx, empresa_id, year, month) {
+  const start = new Date(year, month - 1, 1);
+  const end = new Date(year, month, 1);
+
+  const compras = await tx.compra.findMany({
+    where: {
+      empresa_id,
+      eliminado: false,
+      fecha_docto: { gte: start, lt: end },
+      estado: { in: ["FACTURADA", "PAGADA"] },
+    },
+    select: { id: true, total: true },
+  });
+
+  if (!compras.length) return { total: 0, pendientes: 0, ids: [] };
+
+  const ids = compras.map((c) => c.id);
+
+  const sums = await tx.compraCosteo.groupBy({
+    by: ["compra_id"],
+    where: { empresa_id, compra_id: { in: ids } },
+    _sum: { monto: true },
+  });
+
+  const map = new Map(
+    sums.map((x) => [x.compra_id, Number(x._sum.monto || 0)])
+  );
+
+  const pendingIds = [];
+  for (const c of compras) {
+    const sum = map.get(c.id) || 0;
+    const pct = c.total > 0 ? sum / c.total : 0;
+    if (pct < 0.999999) pendingIds.push(c.id);
+  }
+
+  return {
+    total: compras.length,
+    pendientes: pendingIds.length,
+    ids: pendingIds,
+  };
+}
+
+async function attachVinculadoPct(empresa_id, compras) {
+  const ids = compras.map((c) => c.id);
+  if (!ids.length) return compras;
+
+  const sums = await prisma.compraCosteo.groupBy({
+    by: ["compra_id"],
+    where: { empresa_id, compra_id: { in: ids } },
+    _sum: { monto: true },
+  });
+
+  const map = new Map(
+    sums.map((x) => [x.compra_id, Number(x._sum.monto || 0)])
+  );
+
+  return compras.map((c) => {
+    const sum = map.get(c.id) || 0;
+    const pct = c.total > 0 ? Math.min(1, sum / c.total) : 0;
+    return { ...c, vinculadoMonto: sum, vinculadoPct: pct };
+  });
+}
+
+/* =========================
+   PDFs (facturas)
+   Se guardan en: <proyecto>/uploads/facturas/<empresaId>/<archivo>.pdf
+   Se sirven por: /api/uploads/* (fastify-static en server.js)
+   URL guardada en DB: /uploads/facturas/<empresaId>/<archivo>.pdf
+========================= */
+const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
+
+function facturasDir(empresaId) {
+  return path.join(UPLOADS_ROOT, "facturas", String(empresaId));
+}
+
+function facturasPublicPrefix(empresaId) {
+  return `/uploads/facturas/${String(empresaId)}`;
+}
+
+async function ensureDir(dir) {
+  if (!fs.existsSync(dir)) await fsp.mkdir(dir, { recursive: true });
+}
+
+function safeFileName(name) {
+  const base = String(name || "factura.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return base.toLowerCase();
+}
+
+/* =========================
+   IMPORT CSV (RCV)
+========================= */
 export async function importComprasCSV(request, reply) {
   const scope = resolveScope(request);
 
-  // multipart: file=<csv>
   const file = await request.file();
-  if (!file) return httpError(reply, 400, "Debes enviar un archivo CSV en form-data (file)");
+  if (!file)
+    return httpError(
+      reply,
+      400,
+      "Debes enviar un archivo CSV en form-data (file)"
+    );
 
   const empresa_id = scope.empresaId;
 
@@ -163,7 +266,7 @@ export async function importComprasCSV(request, reply) {
       skip_empty_lines: true,
       bom: true,
       relax_quotes: true,
-      relax_column_count: true, // el CSV suele traer ; al final
+      relax_column_count: true,
       trim: true,
     });
 
@@ -171,11 +274,37 @@ export async function importComprasCSV(request, reply) {
       return httpError(reply, 400, "CSV vacío o formato inválido");
     }
 
+    // ✅ bloquear import si mes anterior tiene compras no 100% vinculadas
+    const firstRow = records.find((r) => r["Fecha Docto"]);
+    const firstDate = parseDateDMY(firstRow?.["Fecha Docto"]);
+    if (!firstDate) {
+      return httpError(
+        reply,
+        400,
+        "No se pudo detectar el periodo del CSV (Fecha Docto)"
+      );
+    }
+
+    const csvYear = firstDate.getFullYear();
+    const csvMonth = firstDate.getMonth() + 1;
+    const prev = getPrevPeriod(csvYear, csvMonth);
+
+    const check = await prisma.$transaction((tx) =>
+      countComprasNoVinculadas(tx, empresa_id, prev.y, prev.m)
+    );
+
+    if (check.pendientes > 0) {
+      return httpError(
+        reply,
+        409,
+        `No puedes importar el RCV ${csvMonth}/${csvYear}: hay ${check.pendientes} compras del periodo ${prev.m}/${prev.y} sin 100% vincular a un costeo`
+      );
+    }
+
     let created = 0;
     let skipped = 0;
     const errors = [];
 
-    // Opcional: si quieres performance real, sube chunkSize a 200-500
     const chunkSize = 50;
 
     for (let start = 0; start < records.length; start += chunkSize) {
@@ -187,9 +316,7 @@ export async function importComprasCSV(request, reply) {
           const row = chunk[j];
 
           try {
-            // ====== columnas reales del RCV ======
-            const tipoDoc = toIntOrNull(row["Tipo Doc"]); // 33, 34, etc.
-            const tipoCompra = normStr(row["Tipo Compra"]); // "Del Giro" u otros (no lo guardamos en el modelo actual)
+            const tipoDoc = toIntOrNull(row["Tipo Doc"]);
             const rutProv = normRut(row["RUT Proveedor"]);
             const razon = normStr(row["Razon Social"]);
             const folio = normStr(row["Folio"]);
@@ -199,14 +326,15 @@ export async function importComprasCSV(request, reply) {
 
             const montoTotal = parseCLP(row["Monto Total"]);
 
-            // mínimos para crear
             if (!rutProv || !folio || montoTotal <= 0) {
               throw new Error(
-                `Fila inválida: rutProv=${rutProv || "-"} folio=${folio || "-"} montoTotal=${montoTotal}`
+                `Fila inválida: rutProv=${rutProv || "-"} folio=${
+                  folio || "-"
+                } montoTotal=${montoTotal}`
               );
             }
 
-            // 1) Proveedor: buscar por rut + empresa (si no existe, crearlo)
+            // 1) proveedor por rut
             let prov = await tx.proveedor.findFirst({
               where: { empresa_id, eliminado: false, rut: rutProv },
               select: { id: true },
@@ -223,13 +351,12 @@ export async function importComprasCSV(request, reply) {
               });
             }
 
-            // 2) Dedupe: evitar importar 2 veces el mismo doc
-            //    (empresa + proveedor + tipo_doc + folio)
+            // 2) dedupe: empresa + proveedor + tipo_doc + folio
             const exists = await tx.compra.findFirst({
               where: {
                 empresa_id,
                 proveedorId: prov.id,
-                folio: folio,
+                folio,
                 tipo_doc: tipoDoc,
                 eliminado: false,
               },
@@ -241,25 +368,22 @@ export async function importComprasCSV(request, reply) {
               continue;
             }
 
-            // 3) Crear compra + 1 item
+            // 3) crear compra
             await tx.compra.create({
               data: {
                 empresa_id,
                 proveedorId: prov.id,
 
-                // Import RCV: normalmente ya está facturada
                 estado: "FACTURADA",
                 total: montoTotal,
 
-                // ===== campos de tu modelo =====
                 tipo_doc: tipoDoc,
-                folio: folio,
+                folio,
                 rut_proveedor: rutProv,
                 razon_social: razon,
                 fecha_docto: fechaDocto,
                 fecha_recepcion: fechaRecep,
 
-                // Guardamos 1 item “resumen”
                 items: {
                   create: [
                     {
@@ -302,9 +426,9 @@ export async function importComprasCSV(request, reply) {
   }
 }
 
-
-
-/* ===== LIST ===== */
+/* =========================
+   LIST
+========================= */
 export async function listCompras(request, reply) {
   const scope = resolveScope(request);
 
@@ -320,7 +444,7 @@ export async function listCompras(request, reply) {
     pageSize = DEFAULT_SIZE,
   } = request.query || {};
 
-  const empresa_id = scope.isMaster ? (empresaId || scope.empresaId) : scope.empresaId;
+  const empresa_id = scope.isMaster ? empresaId || scope.empresaId : scope.empresaId;
 
   const pageN = Math.max(1, toInt(page, DEFAULT_PAGE));
   const sizeN = Math.min(100, Math.max(1, toInt(pageSize, DEFAULT_SIZE)));
@@ -337,16 +461,18 @@ export async function listCompras(request, reply) {
     ...(q
       ? {
           OR: [
-            // numero es Int, si q es numérico filtramos exacto
             ...(Number.isFinite(Number(q)) ? [{ numero: Number(q) }] : []),
             { proveedor: { nombre: { contains: String(q), mode: "insensitive" } } },
             { proyecto: { nombre: { contains: String(q), mode: "insensitive" } } },
+            { folio: { contains: String(q), mode: "insensitive" } },
+            { razon_social: { contains: String(q), mode: "insensitive" } },
+            { rut_proveedor: { contains: String(q), mode: "insensitive" } },
           ],
         }
       : {}),
   };
 
-  const [total, data] = await Promise.all([
+  const [total, dataRaw] = await Promise.all([
     prisma.compra.count({ where }),
     prisma.compra.findMany({
       where,
@@ -367,9 +493,14 @@ export async function listCompras(request, reply) {
     }),
   ]);
 
+  const data = await attachVinculadoPct(empresa_id, dataRaw);
+
   return reply.send({ total, page: pageN, pageSize: sizeN, data });
 }
 
+/* =========================
+   LIST DISPONIBLES PARA VENTA
+========================= */
 export async function listComprasDisponiblesVenta(request, reply) {
   const scope = resolveScope(request);
 
@@ -378,17 +509,11 @@ export async function listComprasDisponiblesVenta(request, reply) {
       empresa_id: scope.empresaId,
       eliminado: false,
       estado: { in: ["PAGADA", "FACTURADA"] },
-
-      // basta con que tenga items
       items: { some: {} },
-
-      // opcional: que no esté usada en ventas
       NOT: {
         items: {
           some: {
-            detalleVentas: {
-              some: {},
-            },
+            detalleVentas: { some: {} },
           },
         },
       },
@@ -404,14 +529,14 @@ export async function listComprasDisponiblesVenta(request, reply) {
   return reply.send(compras);
 }
 
-/* ===== GET ===== */
+/* =========================
+   GET
+========================= */
 export async function getCompra(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
 
-  const where = scope.isMaster
-    ? { id }
-    : { id, empresa_id: scope.empresaId };
+  const where = scope.isMaster ? { id } : { id, empresa_id: scope.empresaId };
 
   const row = await prisma.compra.findFirst({
     where,
@@ -420,6 +545,11 @@ export async function getCompra(request, reply) {
       proyecto: true,
       cotizacion: true,
       items: { include: { producto: true, proveedor: true } },
+      asignaciones_costeo: {
+        include: {
+          venta: { select: { id: true, numero: true, descripcion: true, fecha: true } },
+        },
+      },
     },
   });
 
@@ -427,38 +557,25 @@ export async function getCompra(request, reply) {
   return reply.send(row);
 }
 
-/* ===== CREATE =====
-Body esperado:
-{
-  "proyecto_id": "...?" ,
-  "proveedorId": "...?" ,
-  "cotizacionId": "...?" ,
-  "estado": "ORDEN_COMPRA" | "FACTURADA" | "PAGADA" ,
-  "items": [
-    { "producto_id": "...?", "proveedor_id": "...?", "item": "texto?", "cantidad": 2, "precio_unit": 1000 }
-  ],
-  "total": 123 // opcional, si no lo mandas lo calcula
-  "empresa_id": "..." // solo master opcional
-}
-*/
+/* =========================
+   CREATE
+========================= */
 export async function createCompra(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
 
-  const empresa_id = scope.isMaster ? (body.empresa_id || scope.empresaId) : scope.empresaId;
+  const empresa_id = scope.isMaster ? body.empresa_id || scope.empresaId : scope.empresaId;
 
   const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
   const items = Array.isArray(body.items) ? body.items : [];
   const total = body.total != null ? Number(body.total) : calcTotal(items);
 
-  // Validaciones tenant + integridad (todo en transaction)
   const created = await prisma.$transaction(async (tx) => {
     await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
     await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
     await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
 
-    // validar items (producto y/o proveedor si viene)
     for (const it of items) {
       if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
       if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
@@ -474,6 +591,18 @@ export async function createCompra(request, reply) {
         estado: estadoNorm,
         total: Number(total || 0),
 
+        tipo_doc: body.tipo_doc ?? null,
+        folio: body.folio ?? null,
+        rut_proveedor: body.rut_proveedor ?? null,
+        razon_social: body.razon_social ?? null,
+        fecha_docto: body.fecha_docto ? new Date(body.fecha_docto) : null,
+        fecha_recepcion: body.fecha_recepcion ? new Date(body.fecha_recepcion) : null,
+
+        factura_url: body.factura_url ?? null,
+        factura_numero: body.factura_numero ?? null,
+        factura_fecha: body.factura_fecha ? new Date(body.factura_fecha) : null,
+        factura_monto: body.factura_monto != null ? Number(body.factura_monto) : null,
+
         items: {
           create: items.map((it) => {
             const cantidad = Number(it.cantidad || 0);
@@ -485,6 +614,7 @@ export async function createCompra(request, reply) {
               cantidad,
               precio_unit,
               total: cantidad * precio_unit,
+              tipoItemId: it.tipoItemId ?? null,
             };
           }),
         },
@@ -493,7 +623,7 @@ export async function createCompra(request, reply) {
         proveedor: { select: { id: true, nombre: true } },
         proyecto: { select: { id: true, nombre: true } },
         cotizacion: { select: { id: true, numero: true } },
-        items: { include: { producto: true, proveedor: true } },
+        items: { include: { producto: true, proveedor: true, tipoItem: true } },
       },
     });
   });
@@ -501,10 +631,9 @@ export async function createCompra(request, reply) {
   return reply.code(201).send(created);
 }
 
-/* ===== UPDATE =====
-- Permite actualizar cabecera (proyecto, proveedor, cotizacion, estado, total)
-- Si viene items => reemplazo completo (simple y consistente)
-*/
+/* =========================
+   UPDATE
+========================= */
 export async function updateCompra(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
@@ -519,14 +648,12 @@ export async function updateCompra(request, reply) {
     return httpError(reply, 403, "Compra fuera de tu empresa");
 
   const empresa_id = exists.empresa_id;
-
   const estadoNorm = normalizeEstadoCompra(body.estado);
 
   const hasItems = Array.isArray(body.items);
   const nextItems = hasItems ? body.items : null;
 
   const updated = await prisma.$transaction(async (tx) => {
-    // validar cambios de relaciones si vienen
     if (body.proyecto_id && body.proyecto_id !== exists.proyecto_id) {
       await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
     }
@@ -537,17 +664,31 @@ export async function updateCompra(request, reply) {
       await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
     }
 
-    // preparar data cabecera
     const data = {};
 
     if (body.proyecto_id !== undefined) data.proyecto_id = body.proyecto_id || null;
     if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
     if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
     if (estadoNorm) data.estado = estadoNorm;
-    if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado); // por si quieres permitirlo (opcional)
+    if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado);
+
+    if (body.tipo_doc !== undefined) data.tipo_doc = body.tipo_doc ?? null;
+    if (body.folio !== undefined) data.folio = body.folio ?? null;
+    if (body.rut_proveedor !== undefined) data.rut_proveedor = body.rut_proveedor ?? null;
+    if (body.razon_social !== undefined) data.razon_social = body.razon_social ?? null;
+    if (body.fecha_docto !== undefined)
+      data.fecha_docto = body.fecha_docto ? new Date(body.fecha_docto) : null;
+    if (body.fecha_recepcion !== undefined)
+      data.fecha_recepcion = body.fecha_recepcion ? new Date(body.fecha_recepcion) : null;
+
+    if (body.factura_url !== undefined) data.factura_url = body.factura_url ?? null;
+    if (body.factura_numero !== undefined) data.factura_numero = body.factura_numero ?? null;
+    if (body.factura_fecha !== undefined)
+      data.factura_fecha = body.factura_fecha ? new Date(body.factura_fecha) : null;
+    if (body.factura_monto !== undefined)
+      data.factura_monto = body.factura_monto != null ? Number(body.factura_monto) : null;
 
     if (hasItems) {
-      // validar items
       for (const it of nextItems) {
         if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
         if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
@@ -556,7 +697,6 @@ export async function updateCompra(request, reply) {
       const newTotal = body.total != null ? Number(body.total) : calcTotal(nextItems);
       data.total = Number(newTotal || 0);
 
-      // reemplazo completo items
       await tx.compraItem.deleteMany({ where: { compra_id: id } });
       if (nextItems.length) {
         await tx.compraItem.createMany({
@@ -571,6 +711,7 @@ export async function updateCompra(request, reply) {
               cantidad,
               precio_unit,
               total: cantidad * precio_unit,
+              tipoItemId: it.tipoItemId ?? null,
             };
           }),
         });
@@ -581,33 +722,32 @@ export async function updateCompra(request, reply) {
 
     await tx.compra.update({ where: { id }, data });
 
-    return tx.compra.findUnique({
+    const row = await tx.compra.findUnique({
       where: { id },
       include: {
         proveedor: true,
         proyecto: true,
         cotizacion: true,
-        items: { include: { producto: true, proveedor: true } },
+        items: { include: { producto: true, proveedor: true, tipoItem: true } },
       },
     });
+
+    return row;
   });
 
-  return reply.send(updated);
+  const [withPct] = await attachVinculadoPct(empresa_id, [updated]);
+  return reply.send(withPct);
 }
 
-/* ===== DELETE (físico) =====
-Regla recomendada:
-- si estado = ORDEN_COMPRA -> permite
-- si no -> requiere ?force=true
-*/
+/* =========================
+   DELETE (físico)
+========================= */
 export async function deleteCompra(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
   const { force } = request.query || {};
 
-  const where = scope.isMaster
-    ? { id }
-    : { id, empresa_id: scope.empresaId };
+  const where = scope.isMaster ? { id } : { id, empresa_id: scope.empresaId };
 
   const row = await prisma.compra.findFirst({
     where,
@@ -624,6 +764,7 @@ export async function deleteCompra(request, reply) {
   }
 
   await prisma.$transaction(async (tx) => {
+    await tx.compraCosteo.deleteMany({ where: { compra_id: id } });
     await tx.compraItem.deleteMany({ where: { compra_id: id } });
     await tx.compra.delete({ where: { id } });
   });
@@ -631,14 +772,14 @@ export async function deleteCompra(request, reply) {
   return reply.send({ success: true });
 }
 
-/* ===== SOFT DELETE ===== */
+/* =========================
+   SOFT DELETE
+========================= */
 export async function disableCompra(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
 
-  const where = scope.isMaster
-    ? { id }
-    : { id, empresa_id: scope.empresaId };
+  const where = scope.isMaster ? { id } : { id, empresa_id: scope.empresaId };
 
   const row = await prisma.compra.findFirst({ where });
   if (!row) return httpError(reply, 404, "Compra no encontrada");
@@ -652,14 +793,14 @@ export async function disableCompra(request, reply) {
   return reply.send({ success: true, compra: upd });
 }
 
-/* ===== RESTORE ===== */
+/* =========================
+   RESTORE
+========================= */
 export async function restoreCompra(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
 
-  const where = scope.isMaster
-    ? { id }
-    : { id, empresa_id: scope.empresaId };
+  const where = scope.isMaster ? { id } : { id, empresa_id: scope.empresaId };
 
   const row = await prisma.compra.findFirst({ where });
   if (!row) return httpError(reply, 404, "Compra no encontrada");
@@ -671,4 +812,176 @@ export async function restoreCompra(request, reply) {
   });
 
   return reply.send({ success: true, compra: upd });
+}
+
+/* =========================
+   ✅ POST /compras/:id/factura
+   multipart: file=<pdf>
+========================= */
+export async function uploadFacturaCompra(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params;
+
+  const compra = await prisma.compra.findUnique({ where: { id } });
+  if (!compra) return httpError(reply, 404, "Compra no encontrada");
+  if (!scope.isMaster && compra.empresa_id !== scope.empresaId)
+    return httpError(reply, 403, "Compra fuera de tu empresa");
+
+  const file = await request.file();
+  if (!file) return httpError(reply, 400, "Debes enviar file (PDF) en form-data");
+
+  const mimetype = String(file.mimetype || "").toLowerCase();
+  if (mimetype !== "application/pdf") {
+    return httpError(reply, 400, "El archivo debe ser un PDF (application/pdf)");
+  }
+
+  const empresa_id = compra.empresa_id;
+
+  // guardar en uploads/facturas/<empresa_id>/
+  const dir = facturasDir(empresa_id);
+  await ensureDir(dir);
+
+  const original = safeFileName(file.filename || "factura.pdf");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const rnd = crypto.randomBytes(6).toString("hex");
+
+  // siempre .pdf (no confiamos en original)
+  const filename = `compra_${id}_${stamp}_${rnd}.pdf`;
+  const fullpath = path.join(dir, filename);
+
+  const buf = await file.toBuffer();
+  const MAX = 15 * 1024 * 1024;
+  if (buf.length > MAX) return httpError(reply, 400, "PDF supera 15MB");
+
+  await fsp.writeFile(fullpath, buf);
+
+  // ✅ guardar URL pública en DB (SIN /api)
+  const factura_url = `${facturasPublicPrefix(empresa_id)}/${filename}`;
+
+  const updated = await prisma.compra.update({
+    where: { id },
+    data: {
+      factura_url,
+      factura_fecha: new Date(),
+      factura_numero: compra.folio ?? null,
+      factura_monto: compra.total ?? null,
+    },
+    select: { id: true, factura_url: true },
+  });
+
+  return reply.send({ ok: true, ...updated });
+}
+
+/* =========================
+   ✅ GET /compras/:id/costeos
+========================= */
+export async function getCompraCosteos(req, reply) {
+  const scope = resolveScope(req);
+  const compraId = String(req.params.id);
+
+  const compra = await prisma.compra.findUnique({ where: { id: compraId } });
+  if (!compra) return httpError(reply, 404, "Compra no encontrada");
+  if (!scope.isMaster && compra.empresa_id !== scope.empresaId)
+    return httpError(reply, 403, "Compra fuera de tu empresa");
+
+  const empresa_id = compra.empresa_id;
+
+  const rows = await prisma.compraCosteo.findMany({
+    where: { empresa_id, compra_id: compraId },
+    include: {
+      venta: { select: { id: true, numero: true, descripcion: true, fecha: true } },
+    },
+    orderBy: { creado_en: "asc" },
+  });
+
+  return reply.send({ data: rows });
+}
+
+/* =========================
+   ✅ PUT /compras/:id/costeos
+   Acepta body en cualquiera de estas formas:
+   - { items: [{ venta_id, monto }, ...] }
+   - { data:  [{ venta_id, monto }, ...] }
+   - [{ venta_id, monto }, ...]   (array directo)
+   Y acepta ventaId / venta_id
+========================= */
+export async function setCompraCosteos(req, reply) {
+  const scope = resolveScope(req);
+  const compraId = String(req.params.id);
+
+  const body = req.body ?? {};
+
+  // 1) normalizar items desde múltiples formatos
+  let items = [];
+  if (Array.isArray(body)) items = body;
+  else if (Array.isArray(body.items)) items = body.items;
+  else if (Array.isArray(body.data)) items = body.data;
+  else items = [];
+
+  // helper para monto "80.000" o "80,000" o 80000
+  const parseMonto = (v) => {
+    if (typeof v === "number") return v;
+    const s = String(v ?? "").trim();
+    if (!s) return NaN;
+    // quita separador miles y deja decimal estándar
+    const cleaned = s.replace(/\./g, "").replace(/,/g, ".");
+    return Number(cleaned);
+  };
+
+  // 2) validar compra y empresa
+  const compra = await prisma.compra.findUnique({ where: { id: compraId } });
+  if (!compra) return httpError(reply, 404, "Compra no encontrada");
+  if (!scope.isMaster && compra.empresa_id !== scope.empresaId)
+    return httpError(reply, 403, "Compra fuera de tu empresa");
+
+  const empresa_id = compra.empresa_id;
+
+  // 3) validar items (pero permite array vacío = desvincular todo)
+  for (const it of items) {
+    const venta_id = it?.venta_id ?? it?.ventaId ?? it?.venta?.id;
+    const monto = parseMonto(it?.monto);
+
+    if (!venta_id) return reply.badRequest("Falta venta_id (o ventaId) en items");
+    if (!Number.isFinite(monto) || monto < 0) return reply.badRequest("Monto inválido");
+
+    // opcional pero recomendado: validar que la venta exista
+    // (si tu Venta tiene empresa_id, filtra por empresa_id también)
+    const ventaOk = await prisma.venta.findFirst({
+      where: { id: String(venta_id) },
+      select: { id: true },
+    });
+    if (!ventaOk) return reply.badRequest(`Venta no existe: ${venta_id}`);
+  }
+
+  // 4) guardar (borra y vuelve a crear)
+  const inserted = await prisma.$transaction(async (tx) => {
+    await tx.compraCosteo.deleteMany({
+      where: { empresa_id, compra_id: compraId },
+    });
+
+    if (!items.length) return 0;
+
+    const res = await tx.compraCosteo.createMany({
+      data: items.map((it) => ({
+        empresa_id,
+        compra_id: compraId,
+        venta_id: String(it?.venta_id ?? it?.ventaId ?? it?.venta?.id),
+        monto: Number(parseMonto(it.monto)),
+      })),
+    });
+
+    return res.count;
+  });
+
+  // 5) devolver también el % para que tu UI actualice altiro
+  const sum = await prisma.compraCosteo.aggregate({
+    where: { empresa_id, compra_id: compraId },
+    _sum: { monto: true },
+  });
+
+  const vinculadoMonto = Number(sum._sum.monto || 0);
+  const vinculadoPct =
+    compra.total > 0 ? Math.min(1, vinculadoMonto / Number(compra.total)) : 0;
+
+  return reply.send({ ok: true, inserted, vinculadoMonto, vinculadoPct });
 }

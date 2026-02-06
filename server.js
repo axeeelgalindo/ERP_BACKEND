@@ -1,12 +1,15 @@
-//server.js
+// server.js
 import Fastify from "fastify";
 import sensible from "@fastify/sensible";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import fastifyMultipart from "@fastify/multipart";
+import fastifyStatic from "@fastify/static";
 import { PrismaClient } from "@prisma/client";
+import path from "path";
+import fs from "fs";
 
-import authz from "./src/lib/authz.js";     // 👈 ruta correcta
+import authz from "./src/lib/authz.js";
 import Router from "./src/utils/Routes.js";
 
 const server = Fastify({ logger: true });
@@ -20,19 +23,26 @@ await server.register(cors, {
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-empresa-id"],
-  exposedHeaders: [],
   maxAge: 86400,
 });
 
-// 👇 IMPORTANTE: registrar multipart ANTES de las rutas que lo usan
+// multipart ANTES de rutas que lo usan
 await server.register(fastifyMultipart, {
-  limits: {
-    fileSize: 20 * 1024 * 1024, // 20 MB
-  },
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-// 👇 Debe ir ANTES del Router (crea server.authenticate)
+// auth (crea server.authenticate)
 await server.register(authz);
+
+// ✅ SERVIR /api/uploads/* desde backend/uploads/*
+const uploadsRoot = path.resolve(process.cwd(), "uploads");
+if (!fs.existsSync(uploadsRoot)) fs.mkdirSync(uploadsRoot, { recursive: true });
+
+await server.register(fastifyStatic, {
+  root: uploadsRoot,
+  prefix: "/api/uploads/", // ahora /api/uploads/facturas/... funciona
+  decorateReply: false,
+});
 
 server.get("/", async () => ({ hello: "Soy la api" }));
 
@@ -41,4 +51,5 @@ await server.register(Router, { prefix: "/api" });
 
 const PORT = Number(process.env.PORT || 3001);
 server.addHook("onClose", async () => prisma.$disconnect());
+
 server.listen({ port: PORT, host: "0.0.0.0" });
