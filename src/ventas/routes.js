@@ -1,4 +1,10 @@
-import { listVentas, createVenta,listOrdenesVenta, getVenta } from "./controllers.js";
+import {
+  listVentas,
+  createVenta,
+  listOrdenesVenta,
+  getVenta,
+  updateVenta,
+} from "./controllers.js";
 
 import {
   createTipoDia,
@@ -10,15 +16,14 @@ import {
   listCompraItemsForVentas,
   listEmpleadosForVentas,
   listHHEmpleadosForVentas,
-  
-
 } from "./complements/controllers.js";
-
 
 export default async function ventasRoutes(server) {
   server.get("/ventas/ordenes-venta", listOrdenesVenta);
 
   server.post("/ventas/add", createVenta);
+  server.put("/ventas/:id", updateVenta);
+
   server.get("/ventas", listVentas);
   server.get("/ventas/:id", getVenta);
   server.post("/tipoDia/add", createTipoDia);
