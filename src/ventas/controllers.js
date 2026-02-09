@@ -119,7 +119,17 @@ export const listOrdenesVenta = async (request, reply) => {
 
 export const createVenta = async (request, reply) => {
   try {
-    const { ordenVentaId, descripcion, detalles = [] } = request.body || {};
+    const {
+      ordenVentaId,
+      descripcion,
+      detalles = [],
+
+      // ✅ objetivo global (puede ser 130, 180 si base=COSTO)
+      utilidadPctObjetivo,
+
+      // ✅ "COSTO" | "VENTA" (opcional)
+      utilidadObjetivoBase,
+    } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
       return reply
@@ -127,27 +137,66 @@ export const createVenta = async (request, reply) => {
         .send({ error: "Debe enviar al menos un detalle de venta" });
     }
 
+    // =========================
+    // ✅ normalización base + validación
+    // =========================
+    const utilidadPct =
+      utilidadPctObjetivo == null || utilidadPctObjetivo === ""
+        ? null
+        : Number(utilidadPctObjetivo);
+
+    let base = utilidadObjetivoBase
+      ? String(utilidadObjetivoBase).toUpperCase()
+      : null;
+
+    // Backward compatible:
+    // - si no viene base:
+    //   - u >= 100 => COSTO (porque VENTA no permite >=100)
+    //   - u < 100  => VENTA (comportamiento anterior)
+    if (!base) {
+      if (utilidadPct != null && Number.isFinite(utilidadPct) && utilidadPct >= 100) {
+        base = "COSTO";
+      } else {
+        base = "VENTA";
+      }
+    }
+
+    if (base !== "COSTO" && base !== "VENTA") {
+      return reply
+        .status(400)
+        .send({ error: "utilidadObjetivoBase inválido (COSTO | VENTA)" });
+    }
+
+    if (utilidadPct != null) {
+      if (!Number.isFinite(utilidadPct) || utilidadPct < 0) {
+        return reply
+          .status(400)
+          .send({ error: "utilidadPctObjetivo inválido (>= 0)" });
+      }
+      if (base === "VENTA" && utilidadPct >= 100) {
+        return reply
+          .status(400)
+          .send({ error: "En base VENTA el % debe ser < 100" });
+      }
+    }
+
     /**
      * Acepta alpha como:
-     * - porcentaje: 10, 20, 0  (UI)
-     * - decimal: 0.1, 0.2, 0  (por si FE lo manda así)
+     * - porcentaje: 10, 20, 0
+     * - decimal: 0.1, 0.2, 0
      * Devuelve alphaPct (0..100)
      */
     const normalizeAlphaPct = (v) => {
-      if (v == null || v === "") return 10; // default 10%
+      if (v == null || v === "") return 10;
       const n = Number(v);
       if (!Number.isFinite(n)) return 10;
-
-      // si viene como decimal (0..1), lo convertimos a %
       if (n > 0 && n <= 1) return n * 100;
-
-      // si viene en % normal
       if (n < 0) return 0;
       return n;
     };
 
     const ventaCreada = await prisma.$transaction(async (tx) => {
-      // TipoItem HH (forzado cuando modo=HH)
+      // TipoItem HH forzado
       const tipoItemHH = await tx.tipoItem.findFirst({
         where: { codigo: "HH" },
       });
@@ -168,36 +217,30 @@ export const createVenta = async (request, reply) => {
           modo: modoRaw,
 
           // COMPRA
-          compraId, // CompraItem.id (opcional)
-          costoUnitarioManual, // si es COMPRA manual
+          compraId,
+          costoUnitarioManual,
 
           // HH
           tipoDiaId,
-          alpha: alphaRaw, // puede venir 10 o 0.1
+          alpha: alphaRaw,
           empleadoId,
           hhEmpleadoId,
         } = det;
 
-        if (!descDetalle)
-          throw new Error("Cada detalle debe tener 'descripcion'");
+        if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
 
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
         const modo = String(modoRaw || "").toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
-          throw new Error(
-            "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'"
-          );
+          throw new Error("Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'");
         }
 
-        // alpha como porcentaje y multiplicador
-        const alphaPct = normalizeAlphaPct(alphaRaw); // 0..100
+        const alphaPct = normalizeAlphaPct(alphaRaw);
         const alphaMult = 1 + alphaPct / 100;
 
-        // =====================================
-        // CARGAR RELACIONES
-        // =====================================
+        // ===== cargar relaciones =====
         let tipoItem = null;
         let compraItem = null;
         let hhEmpleado = null;
@@ -207,15 +250,10 @@ export const createVenta = async (request, reply) => {
           tipoItem = tipoItemHH;
         } else {
           if (!tipoItemIdRaw) {
-            throw new Error(
-              "Cada detalle COMPRA debe seleccionar un Tipo ítem (tipoItemId)"
-            );
+            throw new Error("Cada detalle COMPRA debe seleccionar un Tipo ítem (tipoItemId)");
           }
-          tipoItem = await tx.tipoItem.findUnique({
-            where: { id: tipoItemIdRaw },
-          });
-          if (!tipoItem)
-            throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
+          tipoItem = await tx.tipoItem.findUnique({ where: { id: tipoItemIdRaw } });
+          if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
         if (tipoDiaId) {
@@ -227,39 +265,28 @@ export const createVenta = async (request, reply) => {
           if (!empleadoId) throw new Error("HH requiere empleadoId");
           if (!hhEmpleadoId) throw new Error("HH requiere hhEmpleadoId");
 
-          hhEmpleado = await tx.hHEmpleado.findUnique({
-            where: { id: hhEmpleadoId },
-          });
-          if (!hhEmpleado)
-            throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
+          hhEmpleado = await tx.hHEmpleado.findUnique({ where: { id: hhEmpleadoId } });
+          if (!hhEmpleado) throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
         }
 
         if (modo === "COMPRA" && compraId) {
-          compraItem = await tx.compraItem.findUnique({
-            where: { id: compraId },
-          });
+          compraItem = await tx.compraItem.findUnique({ where: { id: compraId } });
           if (!compraItem) throw new Error(`compraId inválido: ${compraId}`);
         }
 
-        // =====================================
-        // VALIDACIONES
-        // =====================================
-        if (modo === "HH" && compraId) {
-          throw new Error("Un detalle HH no puede traer compraId");
-        }
+        // ===== validaciones =====
+        if (modo === "HH" && compraId) throw new Error("Un detalle HH no puede traer compraId");
 
         if (modo === "COMPRA") {
           if (empleadoId || hhEmpleadoId) {
-            throw new Error(
-              "Un detalle COMPRA no puede traer empleadoId/hhEmpleadoId"
-            );
+            throw new Error("Un detalle COMPRA no puede traer empleadoId/hhEmpleadoId");
           }
 
           const manualPU =
             costoUnitarioManual != null ? Number(costoUnitarioManual) : null;
+
           const tieneCompraVinculada = !!compraItem;
-          const tieneManual =
-            manualPU != null && Number.isFinite(manualPU) && manualPU > 0;
+          const tieneManual = manualPU != null && Number.isFinite(manualPU) && manualPU > 0;
 
           if (!tieneCompraVinculada && !tieneManual) {
             throw new Error(
@@ -268,45 +295,32 @@ export const createVenta = async (request, reply) => {
           }
         }
 
-        // =====================================
-        // CÁLCULOS
-        // =====================================
+        // ===== cálculos =====
         let costoHH = null;
         let costoUnitario = 0;
         let costoTotal = 0;
         let ventaUnitario = 0;
         let ventaTotal = 0;
 
-        const gananciaPct = Number(tipoItem?.porcentajeUtilidad ?? 0); // ej 30 => 30%
-        const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0; // ✅ fijo por ítem
+        const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
 
-        // --------- HH ---------
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null) {
-            throw new Error(
-              `El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`
-            );
+            throw new Error(`El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`);
           }
 
           costoHH = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado.cif ?? 0);
 
-          // costo real (CIF 1 vez por ítem)
           costoUnitario = costoHH;
           costoTotal = costoHH * cantidad + cif;
 
-          // ✅ VENTA BASE: variable por cantidad + CIF (1 vez) + extra fijo (1 vez)
-          const ventaVariable = costoHH * (1 + gananciaPct / 100) * cantidad;
-          const ventaBase = ventaVariable + cif + extraFijo;
+          const ventaBase = costoTotal + extraFijo;
 
-          // alpha sobre total base
           ventaTotal = ventaBase * alphaMult;
-
-          // guardamos unitario informativo (no “incluye” extra multiplicado)
           ventaUnitario = cantidad > 0 ? ventaBase / cantidad : ventaBase;
         }
 
-        // --------- COMPRA ---------
         if (modo === "COMPRA") {
           if (compraItem) {
             if (compraItem.precio_unit != null) {
@@ -321,18 +335,14 @@ export const createVenta = async (request, reply) => {
 
           costoTotal = costoUnitario * cantidad;
 
-          // ✅ VENTA BASE: variable por cantidad + extra fijo (1 vez)
-          const ventaVariable =
-            costoUnitario * (1 + gananciaPct / 100) * cantidad;
-          const ventaBase = ventaVariable + extraFijo;
+          const ventaBase = costoTotal + extraFijo;
 
           ventaTotal = ventaBase * alphaMult;
           ventaUnitario = cantidad > 0 ? ventaBase / cantidad : ventaBase;
         }
 
         const utilidad = ventaTotal - costoTotal;
-        const porcentajeUtilidad =
-          ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
+        const porcentajeUtilidad = ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
 
         detallesData.push({
           descripcion: descDetalle,
@@ -341,25 +351,17 @@ export const createVenta = async (request, reply) => {
 
           tipoItemId: tipoItem?.id ?? null,
 
-          // COMPRA
           compraId: modo === "COMPRA" ? compraId ?? null : null,
           costoUnitario:
-            modo === "COMPRA" && !compraId
-              ? Number(costoUnitarioManual)
-              : costoUnitario,
+            modo === "COMPRA" && !compraId ? Number(costoUnitarioManual) : costoUnitario,
 
-          // HH
           empleadoId: modo === "HH" ? empleadoId ?? null : null,
           hhEmpleadoId: modo === "HH" ? hhEmpleadoId ?? null : null,
           costoHH,
 
-          // día
           tipoDiaId: tipoDiaId ?? null,
-
-          // guardamos % (0..100)
           alpha: alphaPct,
 
-          // cálculos
           costoTotal,
           ventaUnitario,
           ventaTotal,
@@ -369,18 +371,60 @@ export const createVenta = async (request, reply) => {
         });
       }
 
-      if (ordenVentaId) {
-        const ov = await tx.cotizacion.findUnique({
-          where: { id: ordenVentaId },
-        });
-        if (!ov)
-          throw new Error("ordenVentaId inválido (cotización no existe)");
+      // =========================
+      // ✅ utilidad global => recalcular con factor k
+      // =========================
+      const totalCosto = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
+      const totalVentaActual = detallesData.reduce((acc, d) => acc + (Number(d.ventaTotal) || 0), 0);
+
+      let k = 1;
+
+      if (utilidadPct != null && totalVentaActual > 0) {
+        let ventaObjetivo = null;
+
+        if (base === "COSTO") {
+          // venta = costo * (1 + u/100)
+          ventaObjetivo = totalCosto * (1 + utilidadPct / 100);
+        } else {
+          // venta = costo / (1 - u/100)
+          const denom = 1 - utilidadPct / 100;
+          ventaObjetivo = denom > 0 ? totalCosto / denom : null;
+        }
+
+        if (ventaObjetivo != null && Number.isFinite(ventaObjetivo) && ventaObjetivo > 0) {
+          k = ventaObjetivo / totalVentaActual;
+        }
       }
 
+      if (k !== 1 && Number.isFinite(k)) {
+        for (const d of detallesData) {
+          d.ventaTotal = Number(d.ventaTotal || 0) * k;
+          d.total = d.ventaTotal;
+
+          d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
+
+          d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
+          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+        }
+      }
+
+      if (ordenVentaId) {
+        const ov = await tx.cotizacion.findUnique({ where: { id: ordenVentaId } });
+        if (!ov) throw new Error("ordenVentaId inválido (cotización no existe)");
+      }
+
+      // =========================
+      // ✅ CREATE + guardar metadata objetivo
+      // =========================
       const nuevaVenta = await tx.venta.create({
         data: {
           ordenVentaId: ordenVentaId ?? null,
           descripcion: descripcion ?? null,
+
+          utilidadObjetivoBase: utilidadPct == null ? null : base, // si no envían objetivo, queda null
+          utilidadObjetivoPct: utilidadPct,
+          factorKAplicado: Number.isFinite(k) ? k : null,
+
           detalles: { create: detallesData },
         },
         include: {
@@ -414,3 +458,6 @@ export const createVenta = async (request, reply) => {
       .send({ error: "Error al crear venta", detalle: error.message });
   }
 };
+
+
+

@@ -562,17 +562,27 @@ enum DetalleVentaModo {
   COMPRA
 }
 
-model Venta {
-  id                  String         @id @default(cuid())
-  numero              Int            @unique @default(autoincrement())
-  fecha               DateTime       @default(now())
-  ordenVentaId        String?
-  descripcion         String?
-  ordenVenta          Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
-  detalles            detalleVenta[]
-  asignaciones_costeo CompraCosteo[]
+enum UtilidadBase {
+  COSTO // (venta - costo) / costo   -> permite 130%, 180%, etc.
+  VENTA // (venta - costo) / venta   -> debe ser < 100
+}
 
-  createdAt DateTime @default(now())
+model Venta {
+  id                   String         @id @default(cuid())
+  numero               Int            @unique @default(autoincrement())
+  fecha                DateTime       @default(now())
+  ordenVentaId         String?
+  descripcion          String?
+  ordenVenta           Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
+  detalles             detalleVenta[]
+  asignaciones_costeo  CompraCosteo[]
+  
+  // ✅ NUEVO (opcional, no rompe)
+  utilidadObjetivoBase UtilidadBase?  @default(COSTO)
+  utilidadObjetivoPct  Float?
+  factorKAplicado      Float?
+
+  createdAt            DateTime       @default(now())
 }
 
 model detalleVenta {
