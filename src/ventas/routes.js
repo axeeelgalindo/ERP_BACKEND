@@ -4,6 +4,8 @@ import {
   listOrdenesVenta,
   getVenta,
   updateVenta,
+  deleteVenta,
+  disableVenta,
 } from "./controllers.js";
 
 import {
@@ -37,4 +39,11 @@ export default async function ventasRoutes(server) {
   server.get("/ventas/empleados", listEmpleadosForVentas);
   server.get("/ventas/hh-empleados", listHHEmpleadosForVentas);
   server.get("/ventas/compra-items", listCompraItemsForVentas);
+
+
+  // Deshabilitar (soft delete)
+  server.patch("/ventas/:id/disable", disableVenta);
+
+  // Eliminar (hard delete con ?force=true, si no => soft delete)
+  server.delete("/ventas/:id/delete", deleteVenta);
 }

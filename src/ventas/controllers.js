@@ -9,6 +9,7 @@ export const listVentas = async (request, reply) => {
 
     const ventas = await prisma.venta.findMany({
       where: {
+         AND: [{ eliminado: false }],
         OR: [
           // 1) Por OV/Cotización
           { ordenVenta: { empresa_id: String(empresaId), eliminado: false } },
@@ -681,3 +682,139 @@ export async function updateVenta(request, reply) {
   }
 }
 
+export const disableVenta = async (request, reply) => {
+  try {
+    const { id } = request.params;
+    if (!id) return reply.status(400).send({ error: "Falta id" });
+
+    const empresaId = request.headers["x-empresa-id"];
+    if (!empresaId) return reply.status(400).send({ error: "Falta x-empresa-id" });
+
+    // Verifica existencia (y que pertenezca a la empresa por alguna relación)
+    const venta = await prisma.venta.findUnique({
+      where: { id },
+      include: {
+        ordenVenta: { select: { empresa_id: true, eliminado: true } },
+        detalles: {
+          select: {
+            id: true,
+            hhEmpleado: { select: { empresa_id: true } },
+            compras: { select: { compra: { select: { empresa_id: true, eliminado: true } } } },
+          },
+        },
+      },
+    });
+
+    if (!venta) return reply.status(404).send({ error: "Venta no encontrada" });
+
+    const belongs =
+      (venta.ordenVenta?.empresa_id && String(venta.ordenVenta.empresa_id) === String(empresaId)) ||
+      venta.detalles?.some((d) => d.hhEmpleado?.empresa_id && String(d.hhEmpleado.empresa_id) === String(empresaId)) ||
+      venta.detalles?.some(
+        (d) => d.compras?.compra?.empresa_id && String(d.compras.compra.empresa_id) === String(empresaId)
+      );
+
+    // Si quieres dejarlo activo cuando estés listo:
+    // if (!belongs) return reply.status(403).send({ error: "No autorizado para esta empresa" });
+
+    if (!belongs) {
+      return reply.status(403).send({ error: "No autorizado para esta empresa" });
+    }
+
+    const now = new Date();
+
+    // ✅ Transacción: deshabilita venta + deshabilita sus detalles
+    const updated = await prisma.$transaction(async (tx) => {
+      const v = await tx.venta.update({
+        where: { id },
+        data: {
+          eliminado: true,
+          eliminado_en: now, // ✅ correcto (según tu schema)
+        },
+      });
+
+      // opcional pero recomendado para que todo quede consistente
+      await tx.detalleVenta.updateMany({
+        where: { ventaId: id },
+        data: {
+          eliminado: true,
+          eliminado_en: now,
+        },
+      });
+
+      return v;
+    });
+
+    return reply.send({ ok: true, venta: updated });
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Error deshabilitando venta", detalle: err?.message });
+  }
+};
+
+
+export const deleteVenta = async (request, reply) => {
+  try {
+    const { id } = request.params;
+    if (!id) return reply.status(400).send({ error: "Falta id" });
+
+    const empresaId = request.headers["x-empresa-id"];
+    if (!empresaId) return reply.status(400).send({ error: "Falta x-empresa-id" });
+
+    const force = String(request.query?.force || "").toLowerCase() === "true";
+
+    const venta = await prisma.venta.findUnique({
+      where: { id },
+      include: {
+        ordenVenta: { select: { empresa_id: true, eliminado: true } },
+        detalles: {
+          select: {
+            id: true,
+            hhEmpleado: { select: { empresa_id: true } },
+            compras: { select: { compra: { select: { empresa_id: true, eliminado: true } } } },
+          },
+        },
+      },
+    });
+
+    if (!venta) return reply.status(404).send({ error: "Venta no encontrada" });
+
+    const belongs =
+      (venta.ordenVenta?.empresa_id && String(venta.ordenVenta.empresa_id) === String(empresaId)) ||
+      venta.detalles?.some((d) => d.hhEmpleado?.empresa_id && String(d.hhEmpleado.empresa_id) === String(empresaId)) ||
+      venta.detalles?.some(
+        (d) => d.compras?.compra?.empresa_id && String(d.compras.compra.empresa_id) === String(empresaId)
+      );
+
+    if (!belongs) return reply.status(403).send({ error: "No autorizado para esta empresa" });
+
+    // Regla simple:
+    // - si NO force: solo marca eliminado (soft delete) para evitar cagazos
+    if (!force) {
+      const updated = await prisma.venta.update({
+        where: { id },
+        data: { eliminado: true, eliminadoAt: new Date() },
+      });
+      return reply.send({
+        ok: true,
+        softDeleted: true,
+        message: "Venta deshabilitada (usa ?force=true para eliminar definitivamente).",
+        venta: updated,
+      });
+    }
+
+    // force=true => borrar en cascada manual (según tu schema)
+    // Si tienes relations con onDelete: Cascade, puedes simplificar,
+    // pero aquí lo dejo seguro:
+    await prisma.$transaction(async (tx) => {
+      // si DetalleVenta tiene dependencias, bórralas primero acá
+      await tx.detalleVenta.deleteMany({ where: { ventaId: id } });
+      await tx.venta.delete({ where: { id } });
+    });
+
+    return reply.send({ ok: true, deleted: true });
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: "Error eliminando venta", detalle: err?.message });
+  }
+};

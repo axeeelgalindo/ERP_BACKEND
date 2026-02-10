@@ -583,6 +583,10 @@ model Venta {
   factorKAplicado      Float?
 
   createdAt            DateTime       @default(now())
+
+   // ✅ soft delete (AGREGAR)
+  eliminado            Boolean        @default(false)
+  eliminado_en         DateTime?
 }
 
 model detalleVenta {
@@ -628,6 +632,10 @@ model detalleVenta {
 
   hhEmpleado HHEmpleado? @relation(fields: [hhEmpleadoId], references: [id], onDelete: SetNull)
   empleado   Empleado?   @relation(fields: [empleadoId], references: [id], onDelete: SetNull)
+
+   // ✅ soft delete (AGREGAR)
+  eliminado            Boolean        @default(false)
+  eliminado_en         DateTime?
 
   @@index([ventaId])
   @@index([modo])
