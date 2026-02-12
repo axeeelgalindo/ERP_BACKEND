@@ -909,11 +909,6 @@ export const disableVenta = async (request, reply) => {
     // Si quieres dejarlo activo cuando estés listo:
     // if (!belongs) return reply.status(403).send({ error: "No autorizado para esta empresa" });
 
-    if (!belongs) {
-      return reply
-        .status(403)
-        .send({ error: "No autorizado para esta empresa" });
-    }
 
     const now = new Date();
 
@@ -993,10 +988,7 @@ export const deleteVenta = async (request, reply) => {
           String(d.compras.compra.empresa_id) === String(empresaId),
       );
 
-    if (!belongs)
-      return reply
-        .status(403)
-        .send({ error: "No autorizado para esta empresa" });
+  
 
     // Regla simple:
     // - si NO force: solo marca eliminado (soft delete) para evitar cagazos
