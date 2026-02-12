@@ -771,8 +771,12 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
       return reply.code(400).send({ error: "Debes enviar al menos 1 PDF" });
     }
 
-    const modo = String(fields?.modo || "preview").trim().toLowerCase();
-    const fecha_documento_manual = String(fields?.fecha_documento_manual || "").trim();
+    const modo = String(fields?.modo || "preview")
+      .trim()
+      .toLowerCase();
+    const fecha_documento_manual = String(
+      fields?.fecha_documento_manual || "",
+    ).trim();
     const cliente_id_fallback = String(fields?.cliente_id || "").trim();
 
     // worker interno: procesa 1 PDF usando tu misma lógica
@@ -787,7 +791,10 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
         const parser = new Parser({ data: buffer });
         const result = await parser.getText();
         await parser.destroy();
-        parsed = { text: result?.text || "", numpages: result?.total || (result?.pages?.length ?? null) };
+        parsed = {
+          text: result?.text || "",
+          numpages: result?.total || (result?.pages?.length ?? null),
+        };
       } else {
         const err = new Error("pdf-parse no está disponible correctamente");
         err.statusCode = 500;
@@ -796,7 +803,9 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
 
       const text = normalizeText(parsed?.text || "");
       if (!text) {
-        const err = new Error("No se pudo extraer texto del PDF (posible escaneado, requiere OCR)");
+        const err = new Error(
+          "No se pudo extraer texto del PDF (posible escaneado, requiere OCR)",
+        );
         err.statusCode = 422;
         throw err;
       }
@@ -827,8 +836,11 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
       const fechaCotizacionDate = parseDateCL(fechaCotizacionStr);
       const vencimientoDate = parseDateCL(vencimientoStr);
 
-      const fecha_documento_manual_date = parseDateISODateOnly(fecha_documento_manual);
-      const fecha_documento_final = fecha_documento_manual_date || fechaCotizacionDate || null;
+      const fecha_documento_manual_date = parseDateISODateOnly(
+        fecha_documento_manual,
+      );
+      const fecha_documento_final =
+        fecha_documento_manual_date || fechaCotizacionDate || null;
 
       const clientePdf = parseClienteFromText(text);
 
@@ -850,14 +862,22 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
 
       if (!Array.isArray(extracted.items) || extracted.items.length === 0) {
         extracted.items = [
-          { cantidad: 1, descripcion: extracted.asunto, total: round0(extracted.subtotal || 0) },
+          {
+            cantidad: 1,
+            descripcion: extracted.asunto,
+            total: round0(extracted.subtotal || 0),
+          },
         ];
       }
 
       // 3) preview vs create
       if (modo === "preview") {
         const resolved = await prisma.$transaction(async (tx) => {
-          const r = await upsertClienteFromPdf(tx, empresaId, extracted.cliente_pdf);
+          const r = await upsertClienteFromPdf(
+            tx,
+            empresaId,
+            extracted.cliente_pdf,
+          );
           return r;
         });
 
@@ -895,7 +915,11 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
 
         if (!cliente_id_final && cliente_id_fallback) {
           const cli = await tx.cliente.findFirst({
-            where: { id: cliente_id_fallback, empresa_id: empresaId, eliminado: false },
+            where: {
+              id: cliente_id_fallback,
+              empresa_id: empresaId,
+              eliminado: false,
+            },
             select: { id: true },
           });
           if (!cli) throw new Error("Cliente inválido (fallback)");
@@ -903,13 +927,16 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
         }
 
         if (!cliente_id_final) {
-          throw new Error("No se pudo resolver cliente desde el PDF (y no se envió cliente_id).");
+          throw new Error(
+            "No se pudo resolver cliente desde el PDF (y no se envió cliente_id).",
+          );
         }
 
         const subtotal = Math.round(Number(extracted.subtotal || 0));
         const iva = Math.round(Number(extracted.iva || 0));
         const total = Math.round(Number(extracted.total || 0));
-        if (!subtotal || subtotal <= 0) throw new Error("No se pudo calcular subtotal desde el PDF");
+        if (!subtotal || subtotal <= 0)
+          throw new Error("No se pudo calcular subtotal desde el PDF");
 
         return tx.cotizacion.create({
           data: {
@@ -1078,8 +1105,12 @@ export const createCotizacion = async (request, reply) => {
       glosas = [],
     } = request.body || {};
 
-    if (!cliente_id)
+    // =========================
+    // Validaciones base
+    // =========================
+    if (!cliente_id) {
       return reply.code(400).send({ error: "cliente_id es obligatorio" });
+    }
 
     if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
       return reply
@@ -1093,16 +1124,23 @@ export const createCotizacion = async (request, reply) => {
     }
 
     const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
+    if (!Number.isFinite(vigenciaDias) || vigenciaDias < 1 || vigenciaDias > 365) {
+      return reply.code(400).send({ error: "vigencia_dias inválido (1..365)" });
+    }
 
     const created = await prisma.$transaction(async (tx) => {
-      // validar cliente scope empresa
+      // =========================
+      // Validar cliente dentro de la empresa
+      // =========================
       const cliente = await tx.cliente.findFirst({
         where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
         select: { id: true },
       });
       if (!cliente) throw new Error("Cliente inválido");
 
-      // cargar ventas con detalles
+      // =========================
+      // Cargar ventas + detalles
+      // =========================
       const ventas = await tx.venta.findMany({
         where: { id: { in: ventaIds } },
         include: { detalles: true },
@@ -1112,33 +1150,27 @@ export const createCotizacion = async (request, reply) => {
         throw new Error("Una o más ventas no existen");
       }
 
-      // calcular subtotal neto desde ventas
-      const subtotalBase = ventas.reduce(
-        (acc, v) => acc + calcTotalVenta(v),
-        0,
-      );
+      // =========================
+      // Calcular subtotal neto desde ventas
+      // =========================
+      const subtotalBase = ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0);
+
       if (!subtotalBase || subtotalBase <= 0) {
         throw new Error("El subtotal neto calculado desde ventas es 0");
       }
 
-      const { subtotal, iva, total } = calcFromSubtotal(
-        subtotalBase,
-        ivaRateNum,
-      );
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalBase, ivaRateNum);
 
-      // normalizar glosas
-      let glosasFinal = normalizeGlosas(glosas).sort(
-        (a, b) => a.orden - b.orden,
-      );
+      // =========================
+      // Normalizar glosas
+      // =========================
+      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
 
-      // si no vienen glosas, crear 1 automática con el subtotal neto
+      // Si no vienen glosas, crear 1 automática con el subtotal neto
       if (glosasFinal.length === 0) {
         glosasFinal = [
           {
-            descripcion: (String(asunto || "").trim() || "Servicios").slice(
-              0,
-              250,
-            ),
+            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
             monto: subtotal,
             manual: true,
             orden: 0,
@@ -1146,15 +1178,26 @@ export const createCotizacion = async (request, reply) => {
         ];
       }
 
-      // validar que glosas sumen SUBTOTAL neto
+      // Validar que glosas sumen SUBTOTAL neto
       const suma = sumGlosas(glosasFinal);
       if (suma !== subtotal) {
         throw new Error(
-          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`,
+          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`
         );
       }
 
-      // crear cotización
+      // =========================
+      // ✅ FECHAS (se calculan en backend)
+      // fecha_documento: ahora
+      // vencimiento_documento: ahora + vigencia_dias
+      // =========================
+      const fechaDocumento = new Date();
+      const vencimientoDocumento = new Date(fechaDocumento);
+      vencimientoDocumento.setDate(vencimientoDocumento.getDate() + vigenciaDias);
+
+      // =========================
+      // Crear cotización
+      // =========================
       const cot = await tx.cotizacion.create({
         data: {
           empresa_id: empresaId,
@@ -1166,6 +1209,10 @@ export const createCotizacion = async (request, reply) => {
           acuerdo_pago: acuerdo_pago || null,
 
           vigencia_dias: vigenciaDias,
+
+          // ✅ NUEVO (para que no salga "-" en el PDF)
+          fecha_documento: fechaDocumento,
+          vencimiento_documento: vencimientoDocumento,
 
           subtotal,
           iva,
@@ -1206,6 +1253,7 @@ export const createCotizacion = async (request, reply) => {
     });
   }
 };
+
 
 /* =========================
    PUT /cotizaciones/:id
@@ -1319,12 +1367,8 @@ export const updateCotizacionEstado = async (request, reply) => {
     const { empresaId } = getScope(request);
     const { id } = request.params;
 
-    const {
-      estado,
-      fecha_inicio_plan,
-      fecha_fin_plan,
-      motivo_rechazo,
-    } = request.body || {};
+    const { estado, fecha_inicio_plan, fecha_fin_plan, motivo_rechazo } =
+      request.body || {};
 
     const valid = [
       "COTIZACION",
@@ -1355,16 +1399,23 @@ export const updateCotizacionEstado = async (request, reply) => {
     const finPlan = parseDate(fecha_fin_plan);
 
     if (toAceptada) {
-      if (!inicioPlan || !finPlan || Number.isNaN(+inicioPlan) || Number.isNaN(+finPlan)) {
+      if (
+        !inicioPlan ||
+        !finPlan ||
+        Number.isNaN(+inicioPlan) ||
+        Number.isNaN(+finPlan)
+      ) {
         return reply.code(400).send({
           error: "Faltan fechas planificadas",
-          detalle: "Envía fecha_inicio_plan y fecha_fin_plan (YYYY-MM-DD o ISO).",
+          detalle:
+            "Envía fecha_inicio_plan y fecha_fin_plan (YYYY-MM-DD o ISO).",
         });
       }
       if (finPlan < inicioPlan) {
         return reply.code(400).send({
           error: "Rango inválido",
-          detalle: "La fecha fin planificada no puede ser menor que la fecha inicio planificada.",
+          detalle:
+            "La fecha fin planificada no puede ser menor que la fecha inicio planificada.",
         });
       }
     }
@@ -1399,7 +1450,9 @@ export const updateCotizacionEstado = async (request, reply) => {
       }
 
       if (!allowed[cot.estado]?.includes(estado)) {
-        const err = new Error(`Transición no permitida: ${cot.estado} → ${estado}`);
+        const err = new Error(
+          `Transición no permitida: ${cot.estado} → ${estado}`,
+        );
         err.statusCode = 400;
         throw err;
       }
@@ -1407,7 +1460,8 @@ export const updateCotizacionEstado = async (request, reply) => {
       let proyectoIdFinal = cot.proyecto_id;
 
       // ✅ crear proyecto al ACEPTAR
-      const isCotToAceptada = cot.estado === "COTIZACION" && estado === "ACEPTADA";
+      const isCotToAceptada =
+        cot.estado === "COTIZACION" && estado === "ACEPTADA";
       if (isCotToAceptada && !proyectoIdFinal) {
         const asunto = String(cot.asunto || "Sin asunto").trim();
         const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
@@ -1441,7 +1495,11 @@ export const updateCotizacionEstado = async (request, reply) => {
         data: {
           estado,
           proyecto_id: proyectoIdFinal ?? null,
-          motivo_rechazo: toRechazada ? (motivo_rechazo ? String(motivo_rechazo).trim() : null) : null,
+          motivo_rechazo: toRechazada
+            ? motivo_rechazo
+              ? String(motivo_rechazo).trim()
+              : null
+            : null,
         },
         include: {
           proyecto: true,
@@ -1462,4 +1520,3 @@ export const updateCotizacionEstado = async (request, reply) => {
     });
   }
 };
-
