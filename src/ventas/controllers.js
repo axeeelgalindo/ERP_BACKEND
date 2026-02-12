@@ -165,16 +165,19 @@ export const createVenta = async (request, reply) => {
         error: "utilidadObjetivoBase inválido (COSTO | VENTA | VENTA_ACTUAL)",
       });
     }
+
+    // ✅ Ahora la utilidad es MARGEN sobre venta: venta = costo / (1 - u)
+    // Por lo tanto u debe ser < 100 siempre (para cualquier base).
     if (utilidadPct != null) {
       if (!Number.isFinite(utilidadPct) || utilidadPct < 0) {
         return reply
           .status(400)
           .send({ error: "utilidadPctObjetivo inválido (>= 0)" });
       }
-      if (base === "VENTA" && utilidadPct >= 100) {
-        return reply
-          .status(400)
-          .send({ error: "En base VENTA el % debe ser < 100" });
+      if (utilidadPct >= 100) {
+        return reply.status(400).send({
+          error: "El % utilidad objetivo debe ser < 100 (margen sobre venta)",
+        });
       }
     }
 
@@ -226,9 +229,7 @@ export const createVenta = async (request, reply) => {
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "")
-          .trim()
-          .toUpperCase();
+        const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
           throw new Error(
             "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
@@ -255,8 +256,7 @@ export const createVenta = async (request, reply) => {
           tipoItem = await tx.tipoItem.findUnique({
             where: { id: tipoItemIdRaw },
           });
-          if (!tipoItem)
-            throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
+          if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
         // Tipo día (extra fijo)
@@ -318,7 +318,7 @@ export const createVenta = async (request, reply) => {
         const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
 
         // =========================================================
-        // ✅ NUEVA REGLA: alpha + tipoDia son COSTO, no utilidad
+        // ✅ alpha + tipoDia son COSTO, no utilidad
         // =========================================================
 
         if (modo === "HH") {
@@ -332,7 +332,6 @@ export const createVenta = async (request, reply) => {
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
           // 1) costo sin alpha
-          costoUnitario = costoHH;
           const costoSinAlpha = costoHH * cantidad + cif;
 
           // 2) costo base + extra fijo
@@ -341,10 +340,9 @@ export const createVenta = async (request, reply) => {
           // 3) alpha ajusta costo
           const costoConAlpha = costoBase * alphaMult;
 
-          // ✅ Guardamos costoTotal ya con alpha
           costoTotal = costoConAlpha;
 
-          // ✅ antes de % objetivo: venta = costo
+          // ✅ antes del % objetivo: venta = costo
           ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
@@ -371,15 +369,14 @@ export const createVenta = async (request, reply) => {
           // 3) alpha ajusta costo
           const costoConAlpha = costoBase * alphaMult;
 
-          // ✅ Guardamos costoTotal ya con alpha
           costoTotal = costoConAlpha;
 
-          // ✅ antes de % objetivo: venta = costo
+          // ✅ antes del % objetivo: venta = costo
           ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
-        const utilidad = ventaTotal - costoTotal; // aquí aún será 0 antes del k
+        const utilidad = ventaTotal - costoTotal;
         const porcentajeUtilidad =
           ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
 
@@ -423,25 +420,24 @@ export const createVenta = async (request, reply) => {
 
       let k = 1;
 
-      // ✅ base puede ser VENTA_ACTUAL
-      if (utilidadPct != null && totalVentaActual > 0) {
-        let ventaObjetivo = null;
+      // ✅ APLICAR MARGEN: venta = baseCosto / (1 - u)
+      // - Si base=VENTA_ACTUAL, usamos totalVentaActual como “base” (hoy coincide con costo)
+      // - Si base=COSTO o base=VENTA, usamos totalCosto
+      if (utilidadPct != null) {
+        const u = utilidadPct / 100;
+        const denom = 1 - u;
 
-        if (base === "VENTA_ACTUAL") {
-          // objetivo sobre venta actual (que en este modelo = costo con alpha)
-          ventaObjetivo = totalVentaActual * (1 + utilidadPct / 100);
-        } else if (base === "COSTO") {
-          ventaObjetivo = totalCosto * (1 + utilidadPct / 100);
-        } else {
-          // base === "VENTA" (margen sobre venta)
-          const denom = 1 - utilidadPct / 100;
-          ventaObjetivo = denom > 0 ? totalCosto / denom : null;
-        }
+        const baseMonto =
+          base === "VENTA_ACTUAL" ? totalVentaActual : totalCosto;
+
+        const ventaObjetivo =
+          denom > 0 ? baseMonto / denom : null;
 
         if (
           ventaObjetivo != null &&
           Number.isFinite(ventaObjetivo) &&
-          ventaObjetivo > 0
+          ventaObjetivo > 0 &&
+          totalVentaActual > 0
         ) {
           k = ventaObjetivo / totalVentaActual;
         }
@@ -455,13 +451,11 @@ export const createVenta = async (request, reply) => {
           d.ventaUnitario =
             d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
 
-          // ✅ ahora utilidad refleja SOLO el % objetivo
           d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
           d.porcentajeUtilidad =
             d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       } else {
-        // k=1: utilidad sigue siendo 0 (correcto)
         for (const d of detallesData) {
           d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
           d.porcentajeUtilidad =
