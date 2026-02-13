@@ -229,7 +229,9 @@ export const createVenta = async (request, reply) => {
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "").trim().toUpperCase();
+        const modo = String(modoRaw || "")
+          .trim()
+          .toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
           throw new Error(
             "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
@@ -256,7 +258,8 @@ export const createVenta = async (request, reply) => {
           tipoItem = await tx.tipoItem.findUnique({
             where: { id: tipoItemIdRaw },
           });
-          if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
+          if (!tipoItem)
+            throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
         // Tipo día (extra fijo)
@@ -430,8 +433,7 @@ export const createVenta = async (request, reply) => {
         const baseMonto =
           base === "VENTA_ACTUAL" ? totalVentaActual : totalCosto;
 
-        const ventaObjetivo =
-          denom > 0 ? baseMonto / denom : null;
+        const ventaObjetivo = denom > 0 ? baseMonto / denom : null;
 
         if (
           ventaObjetivo != null &&
@@ -470,13 +472,13 @@ export const createVenta = async (request, reply) => {
         if (!ov)
           throw new Error("ordenVentaId inválido (cotización no existe)");
       }
-
+      const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
       const nuevaVenta = await tx.venta.create({
         data: {
           ordenVentaId: ordenVentaId ?? null,
           descripcion: descripcion ?? null,
 
-          utilidadObjetivoBase: utilidadPct == null ? null : base,
+          utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
 
@@ -903,7 +905,6 @@ export const disableVenta = async (request, reply) => {
     // Si quieres dejarlo activo cuando estés listo:
     // if (!belongs) return reply.status(403).send({ error: "No autorizado para esta empresa" });
 
-
     const now = new Date();
 
     // ✅ Transacción: deshabilita venta + deshabilita sus detalles
@@ -981,8 +982,6 @@ export const deleteVenta = async (request, reply) => {
           d.compras?.compra?.empresa_id &&
           String(d.compras.compra.empresa_id) === String(empresaId),
       );
-
-  
 
     // Regla simple:
     // - si NO force: solo marca eliminado (soft delete) para evitar cagazos

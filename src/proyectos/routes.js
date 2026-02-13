@@ -15,6 +15,7 @@ import { importJiraCSV } from "./proyectos.jira.controller.js";
 
 import {
   ProyectoCreateBody,
+  ProyectoCreateRequestBody,
   ProyectoIdParam,
   ProyectoUpdateBody,
 } from "./validators.js";
@@ -34,7 +35,7 @@ export default async function proyectosRoutes(server) {
 
   server.post(
     "/proyectos/add",
-    { schema: { body: ProyectoCreateBody }, ...guard },
+    { schema: { body: ProyectoCreateRequestBody }, ...guard },
     createProyecto
   );
 

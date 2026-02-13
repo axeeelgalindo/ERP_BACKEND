@@ -237,82 +237,86 @@ export async function getProyecto(request, reply) {
   return reply.send({ ok: true, row, metrics });
 }
 
-/* ========== CREAR ========== */
-export const createProyecto = async (request, reply) => {
-  const scope = resolveScope(request);
-  const empresaId = scope.empresaId;
-
-  if (!empresaId) return reply.badRequest("Falta empresaId en el contexto");
-
-  const { nombre, descripcion, presupuesto, estado, miembros = [], cliente_id } =
-    request.body || {};
-
-  if (!nombre || !nombre.trim()) {
-    return reply.badRequest("El nombre del proyecto es obligatorio");
-  }
-
-  const cleanPresupuesto = toFloatOrNull(presupuesto);
-
-  const ventaNumero =
-    cliente_id != null ? `V-${new Date().getFullYear()}-${randCode()}` : null;
-
+export async function createProyecto(req, reply) {
   try {
+    const scope = resolveScope(req);
+
+    req.log.info(
+      {
+        ct: req.headers["content-type"],
+        bodyType: typeof req.body,
+        body: req.body,
+      },
+      "CREATE_PROYECTO_IN"
+    );
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const payload =
+      body?.proyecto && typeof body.proyecto === "object" ? body.proyecto : body;
+
+    const nombre = payload?.nombre;
+    const descripcion = payload?.descripcion;
+    const presupuesto = payload?.presupuesto;
+
+    // ✅ soporta ambos nombres (tu frontend manda "miembros")
+    const miembrosIds = Array.isArray(payload?.miembrosIds)
+      ? payload.miembrosIds
+      : Array.isArray(payload?.miembros)
+      ? payload.miembros
+      : [];
+
+    if (!String(nombre || "").trim()) {
+      return reply.code(400).send({
+        message: "Nombre es obligatorio",
+        debug: {
+          ct: req.headers["content-type"],
+          bodyKeys: Object.keys(body || {}),
+          payloadKeys: Object.keys(payload || {}),
+        },
+      });
+    }
+
+    const empresa_id = scope?.empresaId;
+    if (!empresa_id) {
+      return reply
+        .code(401)
+        .send({ message: "No autorizado (empresa_id no encontrado)" });
+    }
+
+    const presupuestoNum =
+      presupuesto == null || presupuesto === "" ? 0 : Number(presupuesto);
+
     const proyecto = await prisma.proyecto.create({
       data: {
-        empresa_id: empresaId,
-        nombre: nombre.trim(),
-        descripcion: descripcion?.trim() || null,
-        presupuesto: cleanPresupuesto,
-        estado: estado || "activo",
-        ...(Array.isArray(miembros) && miembros.length
+        empresa_id,
+        nombre: String(nombre).trim(),
+        descripcion: descripcion ? String(descripcion).trim() : null,
+        presupuesto: Number.isFinite(presupuestoNum) ? presupuestoNum : 0,
+
+        // ✅ crea ProyectoMiembro
+        ...(miembrosIds.length
           ? {
               miembros: {
-                create: miembros.map((empleadoId) => ({
-                  empleado_id: empleadoId,
-                  rol: "Miembro",
-                })),
+                create: miembrosIds.map((empleado_id) => ({ empleado_id })),
               },
             }
           : {}),
       },
       include: {
-        miembros: {
-          include: {
-            empleado: {
-              include: {
-                usuario: { select: { id: true, nombre: true, correo: true } },
-              },
-            },
-          },
-        },
-        tareas: true,
+        miembros: { include: { empleado: { include: { usuario: true } } } },
       },
     });
 
-    let ventas = [];
-    if (cliente_id && ventaNumero) {
-      const venta = await prisma.venta.create({
-        data: {
-          proyecto_id: proyecto.id,
-          cliente_id: cliente_id,
-          numero: ventaNumero,
-          estado: "pendiente",
-          total: 0,
-        },
-        include: { cliente: true },
-      });
-
-      ventas = [venta];
-    }
-
-    return reply.code(201).send({ ...proyecto, ventas });
-  } catch (error) {
-    console.error("Error creando proyecto:", error);
-    return reply
-      .status(500)
-      .send({ message: "Error al crear proyecto", error: String(error) });
+    return reply.code(201).send({ ok: true, proyecto });
+  } catch (err) {
+    req.log.error({ err }, "Error creando proyecto");
+    return reply.code(500).send({
+      message: "Error creando proyecto",
+      error: err?.message,
+    });
   }
-};
+}
+
 
 /* ========== ACTUALIZAR ========== */
 export async function updateProyecto(request, reply) {
