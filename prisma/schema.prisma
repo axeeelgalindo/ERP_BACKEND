@@ -192,24 +192,92 @@ model SaludConfig {
  * =========================
  */
 model Cliente {
-  id             String    @id @default(cuid())
-  empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  nombre         String
-  rut            String?   @db.VarChar(40)
-  correo         String?
-  telefono       String?
-  notas          String?
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
+  id         String  @id @default(cuid())
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  nombre   String
+  rut      String? @db.VarChar(40)
+  correo   String?
+  telefono String?
+  notas    String?
+
+  // ✅ logo
+  logo_url       String?
+  logo_public_id String?
+
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
   // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
 
   cotizaciones Cotizacion[]
+  ventas       Venta[] // <- si en tu sistema existe relación Cliente -> Venta
+
+  // ✅ cuentas bancarias (lista)
+  cuentas_bancarias ClienteCuentaBancaria[] @relation("ClienteCuentas")
+
+  // ✅ cuenta principal (1 opcional)
+  cuenta_principal_id String?
+  cuenta_principal    ClienteCuentaBancaria? @relation("ClienteCuentaPrincipal", fields: [cuenta_principal_id], references: [id], onDelete: SetNull)
+
+  // ✅ responsables (lista)
+  responsables ClienteResponsable[]
 
   @@unique([correo, eliminado])
   @@index([empresa_id])
+}
+
+model ClienteCuentaBancaria {
+  id String @id @default(cuid())
+
+  // ✅ relación normal (cliente -> muchas cuentas)
+  cliente_id String
+  cliente    Cliente @relation("ClienteCuentas", fields: [cliente_id], references: [id], onDelete: Cascade)
+
+  // ✅ inversa de cuenta_principal (cliente -> 1 cuenta principal)
+  clientes_principal Cliente[] @relation("ClienteCuentaPrincipal")
+
+  banco       String
+  tipo_cuenta String?
+  numero      String
+  titular     String?
+  rut_titular String?
+  correo_pago String?
+  swift       String?
+  iban        String?
+
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
+
+  @@index([cliente_id])
+}
+
+model ClienteResponsable {
+  id String @id @default(cuid())
+
+  cliente_id String
+  cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
+
+  nombre       String
+  correo       String?
+  telefono     String?
+  cargo        String?
+  area         String?
+  es_principal Boolean @default(false)
+
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
+
+  @@index([cliente_id])
 }
 
 model Proveedor {
@@ -568,25 +636,27 @@ enum UtilidadBase {
 }
 
 model Venta {
-  id                   String         @id @default(cuid())
-  numero               Int            @unique @default(autoincrement())
-  fecha                DateTime       @default(now())
-  ordenVentaId         String?
-  descripcion          String?
-  ordenVenta           Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
-  detalles             detalleVenta[]
-  asignaciones_costeo  CompraCosteo[]
-  
+  id                  String         @id @default(cuid())
+  numero              Int            @unique @default(autoincrement())
+  fecha               DateTime       @default(now())
+  ordenVentaId        String?
+  descripcion         String?
+  ordenVenta          Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
+  detalles            detalleVenta[]
+  asignaciones_costeo CompraCosteo[]
+
   // ✅ NUEVO (opcional, no rompe)
-  utilidadObjetivoBase UtilidadBase?  @default(COSTO)
+  utilidadObjetivoBase UtilidadBase? @default(COSTO)
   utilidadObjetivoPct  Float?
   factorKAplicado      Float?
 
-  createdAt            DateTime       @default(now())
+  createdAt DateTime @default(now())
 
-   // ✅ soft delete (AGREGAR)
-  eliminado            Boolean        @default(false)
-  eliminado_en         DateTime?
+  // ✅ soft delete (AGREGAR)
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
+  Cliente      Cliente?  @relation(fields: [clienteId], references: [id])
+  clienteId    String?
 }
 
 model detalleVenta {
@@ -633,9 +703,9 @@ model detalleVenta {
   hhEmpleado HHEmpleado? @relation(fields: [hhEmpleadoId], references: [id], onDelete: SetNull)
   empleado   Empleado?   @relation(fields: [empleadoId], references: [id], onDelete: SetNull)
 
-   // ✅ soft delete (AGREGAR)
-  eliminado            Boolean        @default(false)
-  eliminado_en         DateTime?
+  // ✅ soft delete (AGREGAR)
+  eliminado    Boolean   @default(false)
+  eliminado_en DateTime?
 
   @@index([ventaId])
   @@index([modo])

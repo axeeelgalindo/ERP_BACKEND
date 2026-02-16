@@ -166,8 +166,7 @@ export const createVenta = async (request, reply) => {
       });
     }
 
-    // ✅ Ahora la utilidad es MARGEN sobre venta: venta = costo / (1 - u)
-    // Por lo tanto u debe ser < 100 siempre (para cualquier base).
+    // ✅ Margen sobre venta: u debe ser < 100 siempre
     if (utilidadPct != null) {
       if (!Number.isFinite(utilidadPct) || utilidadPct < 0) {
         return reply
@@ -314,16 +313,14 @@ export const createVenta = async (request, reply) => {
 
         let costoHH = null;
         let costoUnitario = 0;
+
         let costoTotal = 0;
         let ventaUnitario = 0;
         let ventaTotal = 0;
 
         const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
 
-        // =========================================================
-        // ✅ alpha + tipoDia son COSTO, no utilidad
-        // =========================================================
-
+        // ✅ alpha + tipoDia son COSTO (no utilidad)
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null) {
             throw new Error(
@@ -423,9 +420,7 @@ export const createVenta = async (request, reply) => {
 
       let k = 1;
 
-      // ✅ APLICAR MARGEN: venta = baseCosto / (1 - u)
-      // - Si base=VENTA_ACTUAL, usamos totalVentaActual como “base” (hoy coincide con costo)
-      // - Si base=COSTO o base=VENTA, usamos totalCosto
+      // ✅ APLICAR MARGEN (sobre venta): venta = baseMonto / (1 - u)
       if (utilidadPct != null) {
         const u = utilidadPct / 100;
         const denom = 1 - u;
@@ -472,7 +467,10 @@ export const createVenta = async (request, reply) => {
         if (!ov)
           throw new Error("ordenVentaId inválido (cotización no existe)");
       }
+
+      // guardamos base: VENTA_ACTUAL se persiste como VENTA (para no romper enums/back)
       const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
+
       const nuevaVenta = await tx.venta.create({
         data: {
           ordenVentaId: ordenVentaId ?? null,
@@ -527,7 +525,7 @@ export async function updateVenta(request, reply) {
       descripcion = null,
       detalles = [],
       utilidadPctObjetivo,
-      utilidadObjetivoBase,
+      utilidadObjetivoBase, // COSTO | VENTA | VENTA_ACTUAL
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
@@ -536,44 +534,35 @@ export async function updateVenta(request, reply) {
         .send({ error: "Debes enviar al menos 1 ítem en detalles" });
     }
 
-    // =========================
-    // normalización base + validación (igual que createVenta)
-    // =========================
     const utilidadPct =
       utilidadPctObjetivo == null || utilidadPctObjetivo === ""
         ? null
         : Number(utilidadPctObjetivo);
 
+    // ✅ Normalizar base
     let base = utilidadObjetivoBase
-      ? String(utilidadObjetivoBase).toUpperCase()
+      ? String(utilidadObjetivoBase).trim().toUpperCase()
       : null;
 
-    if (!base) {
-      if (
-        utilidadPct != null &&
-        Number.isFinite(utilidadPct) &&
-        utilidadPct >= 100
-      )
-        base = "COSTO";
-      else base = "VENTA";
+    if (!base) base = "VENTA_ACTUAL";
+
+    if (base !== "COSTO" && base !== "VENTA" && base !== "VENTA_ACTUAL") {
+      return reply.status(400).send({
+        error: "utilidadObjetivoBase inválido (COSTO | VENTA | VENTA_ACTUAL)",
+      });
     }
 
-    if (base !== "COSTO" && base !== "VENTA") {
-      return reply
-        .status(400)
-        .send({ error: "utilidadObjetivoBase inválido (COSTO | VENTA)" });
-    }
-
+    // ✅ Margen sobre venta => u < 100 siempre
     if (utilidadPct != null) {
       if (!Number.isFinite(utilidadPct) || utilidadPct < 0) {
         return reply
           .status(400)
           .send({ error: "utilidadPctObjetivo inválido (>= 0)" });
       }
-      if (base === "VENTA" && utilidadPct >= 100) {
-        return reply
-          .status(400)
-          .send({ error: "En base VENTA el % debe ser < 100" });
+      if (utilidadPct >= 100) {
+        return reply.status(400).send({
+          error: "El % utilidad objetivo debe ser < 100 (margen sobre venta)",
+        });
       }
     }
 
@@ -586,6 +575,12 @@ export async function updateVenta(request, reply) {
       return n;
     };
 
+    const toNumberOrNull = (v) => {
+      if (v == null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
     const ventaActual = await prisma.venta.findUnique({
       where: { id },
       select: { id: true },
@@ -594,7 +589,6 @@ export async function updateVenta(request, reply) {
       return reply.status(404).send({ error: "Venta no encontrada" });
 
     const updated = await prisma.$transaction(async (tx) => {
-      // TipoItem HH forzado
       const tipoItemHH = await tx.tipoItem.findFirst({
         where: { codigo: "HH" },
       });
@@ -623,7 +617,7 @@ export async function updateVenta(request, reply) {
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "").toUpperCase();
+        const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
           throw new Error(
             "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
@@ -661,7 +655,7 @@ export async function updateVenta(request, reply) {
 
           hhEmpleado = await tx.hHEmpleado.findUnique({
             where: { id: hhEmpleadoId },
-            include: { cif: true }, // <-- clave para que CIF exista (ajusta si se llama distinto)
+            include: { cif: true },
           });
           if (!hhEmpleado)
             throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
@@ -683,11 +677,9 @@ export async function updateVenta(request, reply) {
               "Detalle COMPRA no puede traer empleadoId/hhEmpleadoId",
             );
 
-          const manualPU =
-            costoUnitarioManual != null ? Number(costoUnitarioManual) : null;
+          const manualPU = toNumberOrNull(costoUnitarioManual);
           const tieneCompraVinculada = !!compraItem;
-          const tieneManual =
-            manualPU != null && Number.isFinite(manualPU) && manualPU > 0;
+          const tieneManual = manualPU != null && manualPU > 0;
 
           if (!tieneCompraVinculada && !tieneManual) {
             throw new Error(
@@ -696,28 +688,32 @@ export async function updateVenta(request, reply) {
           }
         }
 
-        // ===== cálculos (idénticos a createVenta, pero con CIF real)
         let costoHH = null;
         let costoUnitario = 0;
+
         let costoTotal = 0;
         let ventaUnitario = 0;
         let ventaTotal = 0;
 
         const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
 
+        // ✅ mismos cálculos que createVenta: costo incluye extra + alpha
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null)
             throw new Error(`HHEmpleado ${hhEmpleadoId} no tiene costoHH`);
 
           costoHH = Number(hhEmpleado.costoHH);
+          const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          const cif = Number(hhEmpleado?.cif?.valor ?? 0); // <-- aquí calza con el modal
-          costoUnitario = costoHH;
-          costoTotal = costoHH * cantidad + cif;
+          const costoSinAlpha = costoHH * cantidad + cif;
+          const costoBase = costoSinAlpha + extraFijo;
+          const costoConAlpha = costoBase * alphaMult;
 
-          const ventaBase = costoTotal + extraFijo;
-          ventaTotal = ventaBase * alphaMult;
-          ventaUnitario = cantidad > 0 ? ventaBase / cantidad : ventaBase;
+          costoTotal = costoConAlpha;
+
+          // venta base (antes del k) = costo
+          ventaTotal = costoConAlpha;
+          ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
         if (modo === "COMPRA") {
@@ -729,14 +725,18 @@ export async function updateVenta(request, reply) {
               costoUnitario = (Number(compraItem.total) || 0) / cantCompra;
             }
           } else {
-            costoUnitario = Number(costoUnitarioManual);
+            costoUnitario = toNumberOrNull(costoUnitarioManual) ?? 0;
           }
 
-          costoTotal = costoUnitario * cantidad;
+          const costoSinAlpha = costoUnitario * cantidad;
+          const costoBase = costoSinAlpha + extraFijo;
+          const costoConAlpha = costoBase * alphaMult;
 
-          const ventaBase = costoTotal + extraFijo;
-          ventaTotal = ventaBase * alphaMult;
-          ventaUnitario = cantidad > 0 ? ventaBase / cantidad : ventaBase;
+          costoTotal = costoConAlpha;
+
+          // venta base (antes del k) = costo
+          ventaTotal = costoConAlpha;
+          ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
         const utilidad = ventaTotal - costoTotal;
@@ -748,26 +748,29 @@ export async function updateVenta(request, reply) {
           cantidad,
           modo,
           tipoItemId: tipoItem?.id ?? null,
+
           compraId: modo === "COMPRA" ? (compraId ?? null) : null,
           costoUnitario:
             modo === "COMPRA" && !compraId
-              ? Number(costoUnitarioManual)
+              ? (toNumberOrNull(costoUnitarioManual) ?? 0)
               : costoUnitario,
+
           empleadoId: modo === "HH" ? (empleadoId ?? null) : null,
           hhEmpleadoId: modo === "HH" ? (hhEmpleadoId ?? null) : null,
           costoHH,
+
           tipoDiaId: tipoDiaId ?? null,
           alpha: alphaPct,
+
           costoTotal,
           ventaUnitario,
           ventaTotal,
           utilidad,
           porcentajeUtilidad,
-          total: ventaTotal, // <-- esto evita tu error
+          total: ventaTotal,
         });
       }
 
-      // ===== aplicar utilidad global con factor k (igual que createVenta)
       const totalCosto = detallesData.reduce(
         (acc, d) => acc + (Number(d.costoTotal) || 0),
         0,
@@ -779,36 +782,48 @@ export async function updateVenta(request, reply) {
 
       let k = 1;
 
-      if (utilidadPct != null && totalVentaActual > 0) {
-        let ventaObjetivo = null;
+      // ✅ APLICAR MARGEN (sobre venta): venta = baseMonto / (1 - u)
+      if (utilidadPct != null) {
+        const u = utilidadPct / 100;
+        const denom = 1 - u;
 
-        if (base === "COSTO")
-          ventaObjetivo = totalCosto * (1 + utilidadPct / 100);
-        else {
-          const denom = 1 - utilidadPct / 100;
-          ventaObjetivo = denom > 0 ? totalCosto / denom : null;
-        }
+        const baseMonto =
+          base === "VENTA_ACTUAL" ? totalVentaActual : totalCosto;
+
+        const ventaObjetivo = denom > 0 ? baseMonto / denom : null;
 
         if (
           ventaObjetivo != null &&
           Number.isFinite(ventaObjetivo) &&
-          ventaObjetivo > 0
+          ventaObjetivo > 0 &&
+          totalVentaActual > 0
         ) {
           k = ventaObjetivo / totalVentaActual;
         }
       }
 
+      // aplicar k a la venta
       if (k !== 1 && Number.isFinite(k)) {
         for (const d of detallesData) {
           d.ventaTotal = Number(d.ventaTotal || 0) * k;
           d.total = d.ventaTotal;
           d.ventaUnitario =
             d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
+
           d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
           d.porcentajeUtilidad =
             d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
+      } else {
+        for (const d of detallesData) {
+          d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
+          d.porcentajeUtilidad =
+            d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+        }
       }
+
+      // guardamos base: VENTA_ACTUAL se persiste como VENTA
+      const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
 
       // update cabecera
       await tx.venta.update({
@@ -816,7 +831,7 @@ export async function updateVenta(request, reply) {
         data: {
           ordenVentaId,
           descripcion,
-          utilidadObjetivoBase: utilidadPct == null ? null : base,
+          utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
         },
