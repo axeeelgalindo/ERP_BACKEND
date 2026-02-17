@@ -1321,12 +1321,12 @@ export const createCotizacion = async (request, reply) => {
 
 export const updateCotizacion = async (request, reply) => {
   try {
-    const { empresaId, userId } = getScope(request); // userId por consistencia (vendedor/actor)
+    const { empresaId, userId } = getScope(request);
     const { id } = request.params;
 
     const {
       cliente_id,
-      cliente_responsable_id, // ✅ NUEVO
+      cliente_responsable_id,
 
       asunto,
       terminos_condiciones,
@@ -1335,11 +1335,9 @@ export const updateCotizacion = async (request, reply) => {
       ivaRate = 0.19,
       vigencia_dias,
 
-      // ✅ si vienen, recalculamos desde ventas
-      ventaIds,
+      ventaIds, // puede ser [] o undefined
 
-      // ✅ si vienen, se usan; si no vienen, se recalculan auto con 1 glosa
-      glosas,
+      glosas, // puede venir [] o undefined
 
       proyecto_id,
     } = request.body || {};
@@ -1364,7 +1362,6 @@ export const updateCotizacion = async (request, reply) => {
     // =========================
     const finalClienteId = cliente_id ?? existing.cliente_id;
 
-    // ivaRate: si te lo mandan lo aplicas; si no, usas el actual (si existe), si no 0.19
     const ivaRateNum = Number(ivaRate ?? 0.19);
     if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
       return reply.code(400).send({ error: "ivaRate inválido (ej: 0.19)" });
@@ -1383,17 +1380,15 @@ export const updateCotizacion = async (request, reply) => {
       return reply.code(400).send({ error: "vigencia_dias inválido (1..365)" });
     }
 
-    // ventas: si mandan ventaIds => usamos esas; si no => mantenemos las actuales
-    const finalVentaIds =
-      Array.isArray(ventaIds) && ventaIds.length > 0
-        ? ventaIds
-        : (existing.ventas || []).map((v) => v.id);
+    // ventas:
+    // - si viene ventaIds (aunque sea []) => se respeta exactamente
+    // - si NO viene ventaIds => mantenemos las actuales
+    const ventaIdsWasProvided = Array.isArray(ventaIds);
+    const finalVentaIds = ventaIdsWasProvided
+      ? ventaIds
+      : (existing.ventas || []).map((v) => v.id);
 
-    if (!Array.isArray(finalVentaIds) || finalVentaIds.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
-    }
+    const conVentas = Array.isArray(finalVentaIds) && finalVentaIds.length > 0;
 
     const updated = await prisma.$transaction(async (tx) => {
       // =========================
@@ -1417,7 +1412,7 @@ export const updateCotizacion = async (request, reply) => {
       }
 
       // =========================
-      // ✅ Validar responsable (si viene)
+      // Validar responsable (si viene)
       // Debe pertenecer al cliente final
       // =========================
       let responsable = null;
@@ -1438,77 +1433,98 @@ export const updateCotizacion = async (request, reply) => {
       }
 
       // =========================
-      // Cargar ventas + detalles
-      // =========================
-      const ventas = await tx.venta.findMany({
-        where: { id: { in: finalVentaIds } },
-        include: { detalles: true },
-      });
-
-      if (ventas.length !== finalVentaIds.length) {
-        throw new Error("Una o más ventas no existen");
-      }
-
-      // =========================
-      // Calcular subtotal desde ventas (igual create)
-      // =========================
-      const subtotalBase = ventas.reduce(
-        (acc, v) => acc + calcTotalVenta(v),
-        0,
-      );
-
-      if (!subtotalBase || subtotalBase <= 0) {
-        throw new Error("El subtotal neto calculado desde ventas es 0");
-      }
-
-      const { subtotal, iva, total } = calcFromSubtotal(
-        subtotalBase,
-        ivaRateNum,
-      );
-
-      // =========================
       // Normalizar glosas (igual create)
-      // - si no vienen glosas => 1 automática
-      // - si vienen => deben sumar subtotal
       // =========================
       let glosasFinal = Array.isArray(glosas)
         ? normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden)
         : [];
 
-      // Si no vienen glosas en el update => dejamos auto 1 glosa con subtotal
+      // Si no vienen glosas (o vienen vacías/filtradas) => 1 automática
       if (glosasFinal.length === 0) {
         glosasFinal = [
           {
             descripcion: (
               String(asunto ?? existing.asunto ?? "").trim() || "Servicios"
             ).slice(0, 250),
-            monto: subtotal,
+            monto: 0, // lo definimos más abajo según modo
             manual: true,
             orden: 0,
           },
         ];
       }
 
-      const suma = sumGlosas(glosasFinal);
-      if (suma !== subtotal) {
+      // =========================
+      // Calcular subtotal/iva/total (2 modos)
+      // =========================
+      let subtotalBase = 0;
+
+      if (conVentas) {
+        // =========================
+        // Cargar ventas + detalles (validar que existan)
+        // =========================
+        const ventas = await tx.venta.findMany({
+          where: {
+            id: { in: finalVentaIds },
+            empresa_id: empresaId,
+            eliminado: false,
+          },
+          include: { detalles: true },
+        });
+
+        if (ventas.length !== finalVentaIds.length) {
+          throw new Error("Una o más ventas no existen");
+        }
+
+        subtotalBase = ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0);
+
+        if (!subtotalBase || subtotalBase <= 0) {
+          throw new Error("El subtotal neto calculado desde ventas es 0");
+        }
+
+        // Glosas deben sumar al subtotal (neto)
+        const suma = sumGlosas(glosasFinal);
+        if (suma !== subtotalBase) {
+          throw new Error(
+            `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotalBase}`
+          );
+        }
+      } else {
+        // =========================
+        // SIN ventas (importada): subtotal lo definen glosas
+        // =========================
+        subtotalBase = sumGlosas(glosasFinal);
+
+        if (!subtotalBase || subtotalBase <= 0) {
+          throw new Error(
+            "En cotizaciones sin ventas, las glosas deben sumar un monto mayor a 0"
+          );
+        }
+      }
+
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalBase, ivaRateNum);
+
+      // Si glosa auto venía con monto 0, la ajustamos al subtotal calculado (solo si quedó 1 glosa)
+      if (glosasFinal.length === 1 && (!glosasFinal[0].monto || glosasFinal[0].monto === 0)) {
+        glosasFinal[0].monto = subtotal;
+      }
+
+      // Revalidación final por seguridad
+      const sumaFinal = sumGlosas(glosasFinal);
+      if (sumaFinal !== subtotal) {
         throw new Error(
-          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`,
+          `Las glosas deben sumar el subtotal neto. Suma glosas=${sumaFinal} vs subtotal=${subtotal}`
         );
       }
 
       // =========================
       // Fechas (igual create)
-      // - si ya existía fecha_documento, la mantenemos (opcional)
-      // - vencimiento = fecha_documento + vigencia
       // =========================
       const fechaDocumento = existing.fecha_documento
         ? new Date(existing.fecha_documento)
         : new Date();
 
       const vencimientoDocumento = new Date(fechaDocumento);
-      vencimientoDocumento.setDate(
-        vencimientoDocumento.getDate() + finalVigenciaDias,
-      );
+      vencimientoDocumento.setDate(vencimientoDocumento.getDate() + finalVigenciaDias);
 
       // =========================
       // Reemplazar glosas (delete + createMany)
@@ -1526,61 +1542,50 @@ export const updateCotizacion = async (request, reply) => {
       });
 
       // =========================
-      // Actualizar cotización (y ventas)
+      // Actualizar cotización
       // =========================
-      const cot = await tx.cotizacion.update({
+      await tx.cotizacion.update({
         where: { id },
         data: {
           cliente_id: finalClienteId,
-
-          // ✅ NUEVO
           cliente_responsable_id: responsable?.id ?? null,
 
-          // proyecto
-          ...(proyecto_id !== undefined
-            ? { proyecto_id: proyecto_id || null }
-            : {}),
+          ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
 
-          // campos texto
           asunto: asunto !== undefined ? asunto || null : undefined,
           terminos_condiciones:
-            terminos_condiciones !== undefined
-              ? terminos_condiciones || null
-              : undefined,
-          acuerdo_pago:
-            acuerdo_pago !== undefined ? acuerdo_pago || null : undefined,
+            terminos_condiciones !== undefined ? terminos_condiciones || null : undefined,
+          acuerdo_pago: acuerdo_pago !== undefined ? acuerdo_pago || null : undefined,
 
-          // vigencia + fechas
           vigencia_dias: finalVigenciaDias,
           fecha_documento: fechaDocumento,
           vencimiento_documento: vencimientoDocumento,
 
-          // totales recalculados
           subtotal,
           iva,
           total,
-
-          // (opcional) si quieres “marcar” quien actualizó:
-          // vendedor_id: existing.vendedor_id ?? userId, // o NO tocarlo
         },
-
-        // ✅ actualizar relación con ventas si enviaron ventaIds (o siempre set igual)
-        // si quieres que SOLO cambie cuando mandan ventaIds, reemplaza por:
-        // ...(Array.isArray(ventaIds) ? { ventas: { set: finalVentaIds.map((x) => ({ id: x })) } } : {})
-        include: undefined,
       });
 
-      // relación ventas (set)
-      await tx.cotizacion.update({
-        where: { id },
-        data: {
-          ventas: {
-            set: finalVentaIds.map((x) => ({ id: x })),
+      // =========================
+      // Relación ventas
+      // - si el request trajo ventaIds (aunque sea []) => hacemos set exacto
+      // - si no trajo => NO tocamos relación
+      // =========================
+      if (ventaIdsWasProvided) {
+        await tx.cotizacion.update({
+          where: { id },
+          data: {
+            ventas: {
+              set: finalVentaIds.map((x) => ({ id: x })), // si [] => queda sin ventas ✅
+            },
           },
-        },
-      });
+        });
+      }
 
-      // respuesta final
+      // =========================
+      // Respuesta final
+      // =========================
       const out = await tx.cotizacion.findFirst({
         where: { id, empresa_id: empresaId },
         include: {
@@ -1604,6 +1609,7 @@ export const updateCotizacion = async (request, reply) => {
     });
   }
 };
+
 
 /* =========================
    POST /cotizaciones/:id/estado
