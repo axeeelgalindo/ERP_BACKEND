@@ -276,6 +276,8 @@ model ClienteResponsable {
 
   eliminado    Boolean   @default(false)
   eliminado_en DateTime?
+  
+  cotizaciones Cotizacion[]
 
   @@index([cliente_id])
 }
@@ -540,6 +542,11 @@ model Cotizacion {
   cliente_id String
   cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Restrict)
 
+   cliente_responsable_id String?
+  cliente_responsable    ClienteResponsable? @relation(fields: [cliente_responsable_id], references: [id], onDelete: SetNull)
+
+
+
   // ✅ temporalmente opcional
   vendedor_id String?
   vendedor    Usuario? @relation("CotizacionVendedor", fields: [vendedor_id], references: [id], onDelete: Restrict)
@@ -571,6 +578,7 @@ model Cotizacion {
   ventas  Venta[]
   compras Compra[]
 
+  @@index([cliente_responsable_id])
   @@index([empresa_id])
   @@index([proyecto_id])
   @@index([cliente_id])

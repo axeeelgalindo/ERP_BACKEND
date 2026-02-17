@@ -50,7 +50,6 @@ function safeExt(filename = "") {
   return ok.includes(ext) ? ext : ".png";
 }
 
-
 /* =========================
    CLIENTES (base)
 ========================= */
@@ -89,10 +88,28 @@ export async function listClientes(request, reply) {
       orderBy: { creado_en: "desc" },
       include: {
         cuenta_principal: true,
+
+        // ✅ TRAER RESPONSABLES PARA EL SELECT DEL MODAL
+        responsables: {
+          where: { eliminado: false },
+          orderBy: [{ es_principal: "desc" }, { creado_en: "asc" }],
+          select: {
+            id: true,
+            nombre: true,
+            correo: true,
+            telefono: true,
+            cargo: true,
+            area: true,
+            es_principal: true,
+          },
+        },
+
+        // (opcional) también puedes traer cuentas si las ocupas en UI
+        // cuentas_bancarias: { where: { eliminado: false }, orderBy: { creado_en: "desc" } },
+
         _count: {
           select: {
             cotizaciones: true,
-            // si tu modelo tiene ventas:
             ventas: true,
             cuentas_bancarias: true,
             responsables: true,
@@ -160,7 +177,11 @@ export async function updateCliente(request, reply) {
   const { id } = request.params;
   const body = request.body || {};
 
-  const exists = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const exists = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!exists) return reply.notFound("Cliente no encontrado");
 
   const row = await prisma.cliente.update({
@@ -187,13 +208,18 @@ export async function uploadClienteLogo(request, reply) {
   const { id } = request.params;
 
   // valida ownership
-  const exists = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: false });
+  const exists = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: false,
+  });
   if (!exists) return reply.notFound("Cliente no encontrado");
 
   ensureDir(UPLOAD_DIR);
 
   const file = await request.file(); // <-- requiere @fastify/multipart
-  if (!file) return reply.code(400).send({ message: "Archivo requerido (field: file)" });
+  if (!file)
+    return reply.code(400).send({ message: "Archivo requerido (field: file)" });
 
   const ext = safeExt(file.filename);
   const filename = `cliente_${id}_${Date.now()}${ext}`;
@@ -224,7 +250,11 @@ export async function disableCliente(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
 
-  const exists = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: false });
+  const exists = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: false,
+  });
   if (!exists) return reply.notFound("Cliente no encontrado o ya eliminado");
 
   await prisma.cliente.update({
@@ -277,12 +307,11 @@ export async function deleteCliente(request, reply) {
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const hasMoves =
-    (c._count.cotizaciones || 0) > 0 ||
-    (c._count.ventas || 0) > 0;
+    (c._count.cotizaciones || 0) > 0 || (c._count.ventas || 0) > 0;
 
   if (!boolish(force) && hasMoves) {
     return reply.conflict(
-      "Cliente con movimientos. Usa ?force=true para borrado definitivo."
+      "Cliente con movimientos. Usa ?force=true para borrado definitivo.",
     );
   }
 
@@ -299,7 +328,11 @@ export async function listClienteCuentas(request, reply) {
   const { id } = request.params;
   const { includeDeleted } = request.query || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const rows = await prisma.clienteCuentaBancaria.findMany({
@@ -318,7 +351,11 @@ export async function createClienteCuenta(request, reply) {
   const { id } = request.params; // clienteId
   const body = request.body || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: false });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: false,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const row = await prisma.clienteCuentaBancaria.create({
@@ -351,7 +388,11 @@ export async function updateClienteCuenta(request, reply) {
   const { id, cuentaId } = request.params;
   const body = request.body || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const exists = await prisma.clienteCuentaBancaria.findFirst({
@@ -388,7 +429,11 @@ export async function setClienteCuentaPrincipal(request, reply) {
   const scope = resolveScope(request);
   const { id, cuentaId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const cuenta = await prisma.clienteCuentaBancaria.findFirst({
@@ -410,7 +455,11 @@ export async function disableClienteCuenta(request, reply) {
   const scope = resolveScope(request);
   const { id, cuentaId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const cuenta = await prisma.clienteCuentaBancaria.findFirst({
@@ -446,7 +495,11 @@ export async function restoreClienteCuenta(request, reply) {
   const scope = resolveScope(request);
   const { id, cuentaId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const cuenta = await prisma.clienteCuentaBancaria.findFirst({
@@ -467,7 +520,11 @@ export async function deleteClienteCuenta(request, reply) {
   const scope = resolveScope(request);
   const { id, cuentaId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   await prisma.$transaction(async (tx) => {
@@ -500,7 +557,11 @@ export async function listClienteResponsables(request, reply) {
   const { id } = request.params;
   const { includeDeleted } = request.query || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const rows = await prisma.clienteResponsable.findMany({
@@ -519,7 +580,11 @@ export async function createClienteResponsable(request, reply) {
   const { id } = request.params; // clienteId
   const body = request.body || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: false });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: false,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const willBePrincipal = boolish(body.es_principal);
@@ -553,7 +618,11 @@ export async function updateClienteResponsable(request, reply) {
   const { id, responsableId } = request.params;
   const body = request.body || {};
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const exists = await prisma.clienteResponsable.findFirst({
@@ -562,7 +631,8 @@ export async function updateClienteResponsable(request, reply) {
   });
   if (!exists) return reply.notFound("Responsable no encontrado");
 
-  const willBePrincipal = body.es_principal != null ? boolish(body.es_principal) : null;
+  const willBePrincipal =
+    body.es_principal != null ? boolish(body.es_principal) : null;
 
   const row = await prisma.$transaction(async (tx) => {
     if (willBePrincipal === true) {
@@ -592,7 +662,11 @@ export async function setClienteResponsablePrincipal(request, reply) {
   const scope = resolveScope(request);
   const { id, responsableId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const r = await prisma.clienteResponsable.findFirst({
@@ -620,7 +694,11 @@ export async function disableClienteResponsable(request, reply) {
   const scope = resolveScope(request);
   const { id, responsableId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const r = await prisma.clienteResponsable.findFirst({
@@ -645,7 +723,11 @@ export async function restoreClienteResponsable(request, reply) {
   const scope = resolveScope(request);
   const { id, responsableId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   const r = await prisma.clienteResponsable.findFirst({
@@ -666,7 +748,11 @@ export async function deleteClienteResponsable(request, reply) {
   const scope = resolveScope(request);
   const { id, responsableId } = request.params;
 
-  const c = await ensureClienteOwned({ scope, clienteId: id, includeDeleted: true });
+  const c = await ensureClienteOwned({
+    scope,
+    clienteId: id,
+    includeDeleted: true,
+  });
   if (!c) return reply.notFound("Cliente no encontrado");
 
   await prisma.clienteResponsable.delete({
