@@ -662,12 +662,21 @@ export async function updateVenta(request, reply) {
       detalles = [],
       utilidadPctObjetivo,
       utilidadObjetivoBase, // COSTO | VENTA | VENTA_ACTUAL
+
+      // ✅ Extra por costeo (NO por ítem)
+      isFeriado = false,
+      isUrgencia = false,
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
       return reply
         .status(400)
         .send({ error: "Debes enviar al menos 1 ítem en detalles" });
+    }
+
+    const empresaId = request.headers["x-empresa-id"];
+    if (!empresaId) {
+      return reply.status(400).send({ error: "Falta x-empresa-id" });
     }
 
     const utilidadPct =
@@ -717,6 +726,43 @@ export async function updateVenta(request, reply) {
       return Number.isFinite(n) ? n : null;
     };
 
+    const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
+
+    // ✅ Obtiene valores extra (feriado/urgencia) desde catálogo TipoDia
+    async function getExtrasForVenta(prismaTx, { empresaId, isFeriado, isUrgencia }) {
+      if (!empresaId) {
+        return { extra: 0, extraFeriado: 0, extraUrgencia: 0 };
+      }
+
+      const findTipoDiaByNames = async (names = []) => {
+        const ors = names.map((n) => ({
+          nombre: { equals: n, mode: "insensitive" },
+        }));
+
+        return prismaTx.tipoDia.findFirst({
+          where: {
+            empresa_id: String(empresaId),
+            eliminado: false,
+            OR: ors,
+          },
+        });
+      };
+
+      const [tipoFeriado, tipoUrgencia] = await Promise.all([
+        findTipoDiaByNames(["feriado", "festivo"]),
+        findTipoDiaByNames(["urgencia", "urgente"]),
+      ]);
+
+      const vFeriado = tipoFeriado ? Number(tipoFeriado.valor || 0) : 0;
+      const vUrgencia = tipoUrgencia ? Number(tipoUrgencia.valor || 0) : 0;
+
+      return {
+        extra: (isFeriado ? vFeriado : 0) + (isUrgencia ? vUrgencia : 0),
+        extraFeriado: isFeriado ? vFeriado : 0,
+        extraUrgencia: isUrgencia ? vUrgencia : 0,
+      };
+    }
+
     const ventaActual = await prisma.venta.findUnique({
       where: { id },
       select: { id: true },
@@ -728,8 +774,27 @@ export async function updateVenta(request, reply) {
       const tipoItemHH = await tx.tipoItem.findFirst({
         where: { codigo: "HH" },
       });
-      if (!tipoItemHH)
-        throw new Error("Falta el Tipo ítem HH (tipoItem.codigo='HH').");
+      if (!tipoItemHH) {
+        throw new Error(
+          "Falta el Tipo ítem HH (tipoItem.codigo='HH'). Crea ese registro en el catálogo.",
+        );
+      }
+
+      const ventaIsFeriado = toBool(isFeriado);
+      const ventaIsUrgencia = toBool(isUrgencia);
+
+      // ✅ Extra por costeo (cabecera)
+      const extraInfo = await getExtrasForVenta(tx, {
+        empresaId: String(empresaId),
+        isFeriado: ventaIsFeriado,
+        isUrgencia: ventaIsUrgencia,
+      });
+
+      // ✅ validar ordenVentaId si viene
+      if (ordenVentaId) {
+        const ov = await tx.cotizacion.findUnique({ where: { id: ordenVentaId } });
+        if (!ov) throw new Error("ordenVentaId inválido (cotización no existe)");
+      }
 
       const detallesData = [];
 
@@ -741,25 +806,20 @@ export async function updateVenta(request, reply) {
           modo: modoRaw,
           compraId,
           costoUnitarioManual,
-          tipoDiaId,
+          tipoDiaId, // 👈 solo UI/histórico
           alpha: alphaRaw,
           empleadoId,
           hhEmpleadoId,
         } = det;
 
-        if (!descDetalle)
-          throw new Error("Cada detalle debe tener 'descripcion'");
+        if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
 
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "")
-          .trim()
-          .toUpperCase();
+        const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
-          throw new Error(
-            "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
-          );
+          throw new Error("Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'");
         }
 
         const alphaPct = normalizeAlphaPct(alphaRaw);
@@ -768,25 +828,25 @@ export async function updateVenta(request, reply) {
         let tipoItem = null;
         let compraItem = null;
         let hhEmpleado = null;
-        let tipoDia = null;
 
+        // Tipo ítem
         if (modo === "HH") {
           tipoItem = tipoItemHH;
         } else {
-          if (!tipoItemIdRaw)
-            throw new Error("Detalle COMPRA requiere tipoItemId");
-          tipoItem = await tx.tipoItem.findUnique({
-            where: { id: tipoItemIdRaw },
-          });
-          if (!tipoItem)
-            throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
+          if (!tipoItemIdRaw) {
+            throw new Error("Cada detalle COMPRA debe seleccionar un Tipo ítem (tipoItemId)");
+          }
+          tipoItem = await tx.tipoItem.findUnique({ where: { id: tipoItemIdRaw } });
+          if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
+        // Validar tipoDiaId si viene (solo para UI/histórico)
         if (tipoDiaId) {
-          tipoDia = await tx.tipoDia.findUnique({ where: { id: tipoDiaId } });
+          const tipoDia = await tx.tipoDia.findUnique({ where: { id: tipoDiaId } });
           if (!tipoDia) throw new Error(`tipoDiaId inválido: ${tipoDiaId}`);
         }
 
+        // HHEmpleado
         if (modo === "HH") {
           if (!empleadoId) throw new Error("HH requiere empleadoId");
           if (!hhEmpleadoId) throw new Error("HH requiere hhEmpleadoId");
@@ -795,25 +855,24 @@ export async function updateVenta(request, reply) {
             where: { id: hhEmpleadoId },
             include: { cif: true },
           });
-          if (!hhEmpleado)
-            throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
+          if (!hhEmpleado) throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
         }
 
+        // CompraItem
         if (modo === "COMPRA" && compraId) {
-          compraItem = await tx.compraItem.findUnique({
-            where: { id: compraId },
-          });
+          compraItem = await tx.compraItem.findUnique({ where: { id: compraId } });
           if (!compraItem) throw new Error(`compraId inválido: ${compraId}`);
         }
 
-        if (modo === "HH" && compraId)
+        if (modo === "HH" && compraId) {
           throw new Error("Un detalle HH no puede traer compraId");
+        }
 
+        // Validaciones COMPRA
         if (modo === "COMPRA") {
-          if (empleadoId || hhEmpleadoId)
-            throw new Error(
-              "Detalle COMPRA no puede traer empleadoId/hhEmpleadoId",
-            );
+          if (empleadoId || hhEmpleadoId) {
+            throw new Error("Un detalle COMPRA no puede traer empleadoId/hhEmpleadoId");
+          }
 
           const manualPU = toNumberOrNull(costoUnitarioManual);
           const tieneCompraVinculada = !!compraItem;
@@ -821,7 +880,7 @@ export async function updateVenta(request, reply) {
 
           if (!tieneCompraVinculada && !tieneManual) {
             throw new Error(
-              "Detalle COMPRA requiere 'compraId' o 'costoUnitarioManual'",
+              "Detalle COMPRA requiere 'compraId' (vinculada) o 'costoUnitarioManual' (manual)",
             );
           }
         }
@@ -833,53 +892,55 @@ export async function updateVenta(request, reply) {
         let ventaUnitario = 0;
         let ventaTotal = 0;
 
-        const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
+        // ✅ Extra por ítem eliminado: extra SOLO por costeo
+        const extraFijo = 0;
 
-        // ✅ mismos cálculos que createVenta: costo incluye extra + alpha
+        // base con alpha
+        let costoConAlphaBase = 0;
+
         if (modo === "HH") {
-          if (hhEmpleado.costoHH == null)
-            throw new Error(`HHEmpleado ${hhEmpleadoId} no tiene costoHH`);
+          if (hhEmpleado.costoHH == null) {
+            throw new Error(
+              `El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`,
+            );
+          }
 
           costoHH = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
           const costoSinAlpha = costoHH * cantidad + cif;
-          const costoBase = costoSinAlpha + extraFijo;
-          const costoConAlpha = costoBase * alphaMult;
+          costoConAlphaBase = costoSinAlpha * alphaMult;
 
-          costoTotal = costoConAlpha;
+          costoTotal = costoConAlphaBase + extraFijo;
+          ventaTotal = costoConAlphaBase + extraFijo;
 
-          // venta base (antes del k) = costo
-          ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
         if (modo === "COMPRA") {
           if (compraItem) {
-            if (compraItem.precio_unit != null)
+            if (compraItem.precio_unit != null) {
               costoUnitario = Number(compraItem.precio_unit);
-            else {
+            } else {
               const cantCompra = Number(compraItem.cantidad) || 1;
               costoUnitario = (Number(compraItem.total) || 0) / cantCompra;
             }
           } else {
-            costoUnitario = toNumberOrNull(costoUnitarioManual) ?? 0;
+            const manualPU = toNumberOrNull(costoUnitarioManual);
+            costoUnitario = manualPU != null ? manualPU : 0;
           }
 
           const costoSinAlpha = costoUnitario * cantidad;
-          const costoBase = costoSinAlpha + extraFijo;
-          const costoConAlpha = costoBase * alphaMult;
+          costoConAlphaBase = costoSinAlpha * alphaMult;
 
-          costoTotal = costoConAlpha;
+          costoTotal = costoConAlphaBase + extraFijo;
+          ventaTotal = costoConAlphaBase + extraFijo;
 
-          // venta base (antes del k) = costo
-          ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
         const utilidad = ventaTotal - costoTotal;
-        const porcentajeUtilidad =
-          ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
+        const porcentajeUtilidad = ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
 
         detallesData.push({
           descripcion: descDetalle,
@@ -897,7 +958,7 @@ export async function updateVenta(request, reply) {
           hhEmpleadoId: modo === "HH" ? (hhEmpleadoId ?? null) : null,
           costoHH,
 
-          tipoDiaId: tipoDiaId ?? null,
+          tipoDiaId: tipoDiaId ?? null, // solo UI/histórico
           alpha: alphaPct,
 
           costoTotal,
@@ -909,6 +970,7 @@ export async function updateVenta(request, reply) {
         });
       }
 
+      // totales base (sin extra por costeo)
       const totalCosto = detallesData.reduce(
         (acc, d) => acc + (Number(d.costoTotal) || 0),
         0,
@@ -918,57 +980,62 @@ export async function updateVenta(request, reply) {
         0,
       );
 
+      // Bases para k (extraVenta NO participa del % objetivo)
+      const totalVentaActualBase = totalVentaActual;
+      const totalCostoBase = totalCosto;
+
       let k = 1;
 
-      // ✅ APLICAR MARGEN (sobre venta): venta = baseMonto / (1 - u)
+      // Margen sobre venta SOLO a base
       if (utilidadPct != null) {
         const u = utilidadPct / 100;
         const denom = 1 - u;
 
-        const baseMonto =
-          base === "VENTA_ACTUAL" ? totalVentaActual : totalCosto;
+        const baseMontoBase =
+          base === "VENTA_ACTUAL" ? totalVentaActualBase : totalCostoBase;
 
-        const ventaObjetivo = denom > 0 ? baseMonto / denom : null;
+        const ventaObjetivoBase = denom > 0 ? baseMontoBase / denom : null;
 
         if (
-          ventaObjetivo != null &&
-          Number.isFinite(ventaObjetivo) &&
-          ventaObjetivo > 0 &&
-          totalVentaActual > 0
+          ventaObjetivoBase != null &&
+          Number.isFinite(ventaObjetivoBase) &&
+          ventaObjetivoBase > 0 &&
+          totalVentaActualBase > 0
         ) {
-          k = ventaObjetivo / totalVentaActual;
+          k = ventaObjetivoBase / totalVentaActualBase;
         }
       }
 
-      // aplicar k a la venta
+      // aplicar k a la venta de cada línea
       if (k !== 1 && Number.isFinite(k)) {
         for (const d of detallesData) {
           d.ventaTotal = Number(d.ventaTotal || 0) * k;
           d.total = d.ventaTotal;
-          d.ventaUnitario =
-            d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
+          d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
 
           d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad =
-            d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       } else {
         for (const d of detallesData) {
           d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad =
-            d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       }
 
       // guardamos base: VENTA_ACTUAL se persiste como VENTA
       const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
 
-      // update cabecera
+      // update cabecera (incluye flags)
       await tx.venta.update({
         where: { id },
         data: {
           ordenVentaId,
           descripcion,
+
+          isFeriado: ventaIsFeriado,
+          isUrgencia: ventaIsUrgencia,
+
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
@@ -983,7 +1050,7 @@ export async function updateVenta(request, reply) {
       });
 
       // devolver venta completa
-      return tx.venta.findUnique({
+      const nuevaVenta = await tx.venta.findUnique({
         where: { id },
         include: {
           ordenVenta: { include: { proyecto: true, cliente: true } },
@@ -994,12 +1061,35 @@ export async function updateVenta(request, reply) {
               empleado: { include: { usuario: true } },
               hhEmpleado: { include: { cif: true } },
               compras: {
-                include: { producto: true, proveedor: true, compra: true },
+                include: { producto: true, proveedor: true, compra: true, tipoItem: true },
               },
             },
           },
         },
       });
+
+      // ✅ devolver totales finales (base + extra costeo)
+      const totalBase = (nuevaVenta?.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.ventaTotal ?? d.total) || 0),
+        0,
+      );
+      const costoBase = (nuevaVenta?.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.costoTotal) || 0),
+        0,
+      );
+
+      const extraVenta = Number(extraInfo?.extra || 0);
+
+      return {
+        ...nuevaVenta,
+        extraVenta,
+        extraFeriado: Number(extraInfo?.extraFeriado || 0),
+        extraUrgencia: Number(extraInfo?.extraUrgencia || 0),
+        totalBase,
+        costoBase,
+        totalFinal: totalBase + extraVenta,
+        costoFinal: costoBase + extraVenta,
+      };
     });
 
     return reply.send(updated);
