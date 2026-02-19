@@ -276,7 +276,7 @@ model ClienteResponsable {
 
   eliminado    Boolean   @default(false)
   eliminado_en DateTime?
-  
+
   cotizaciones Cotizacion[]
 
   @@index([cliente_id])
@@ -657,6 +657,10 @@ model Venta {
   utilidadObjetivoBase UtilidadBase? @default(COSTO)
   utilidadObjetivoPct  Float?
   factorKAplicado      Float?
+
+  // ✅ NUEVO: flags por costeo
+  isFeriado  Boolean @default(false)
+  isUrgencia Boolean @default(false)
 
   createdAt DateTime @default(now())
 

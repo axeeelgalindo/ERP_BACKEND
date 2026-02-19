@@ -5,8 +5,7 @@ const prisma = new PrismaClient();
 export const listVentas = async (request, reply) => {
   try {
     const empresaId = request.headers["x-empresa-id"];
-    if (!empresaId)
-      return reply.status(400).send({ error: "Falta x-empresa-id" });
+    if (!empresaId) return reply.status(400).send({ error: "Falta x-empresa-id" });
 
     const ventas = await prisma.venta.findMany({
       where: {
@@ -33,8 +32,7 @@ export const listVentas = async (request, reply) => {
             },
           },
 
-          // ✅ 4) Ventas “manuales / huérfanas”: sin OV y sin vínculos
-          // (si tu sistema es solo para tu empresa, esto es válido)
+          // 4) Ventas manuales/huérfanas
           {
             AND: [
               { ordenVentaId: null },
@@ -52,27 +50,77 @@ export const listVentas = async (request, reply) => {
             hhEmpleado: { include: { cif: true } },
             empleado: { include: { usuario: true } },
             tipoItem: { include: { unidadItem: true } },
-            compras: {
-              include: { producto: true, proveedor: true, compra: true },
-            },
+            compras: { include: { producto: true, proveedor: true, compra: true } },
           },
         },
         ordenVenta: { include: { proyecto: true, cliente: true } },
       },
     });
 
-    return reply.send(ventas);
+    // ✅ Buscar valores de feriado/urgencia 1 vez (y no por cada venta)
+    const findTipoDiaByNames = async (names = []) => {
+      const ors = names.map((n) => ({
+        nombre: { equals: n, mode: "insensitive" },
+      }));
+
+      return prisma.tipoDia.findFirst({
+        where: {
+          empresa_id: String(empresaId),
+          eliminado: false,
+          OR: ors,
+        },
+      });
+    };
+
+    const [tipoFeriado, tipoUrgencia] = await Promise.all([
+      findTipoDiaByNames(["feriado", "festivo"]),
+      findTipoDiaByNames(["urgencia", "urgente"]),
+    ]);
+
+    const vFeriado = tipoFeriado ? Number(tipoFeriado.valor || 0) : 0;
+    const vUrgencia = tipoUrgencia ? Number(tipoUrgencia.valor || 0) : 0;
+
+    const ventasConTotales = ventas.map((v) => {
+      const extraFeriado = v.isFeriado ? vFeriado : 0;
+      const extraUrgencia = v.isUrgencia ? vUrgencia : 0;
+      const extraVenta = extraFeriado + extraUrgencia;
+
+      const totalBase = (v.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.ventaTotal ?? d.total) || 0),
+        0,
+      );
+      const costoBase = (v.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.costoTotal) || 0),
+        0,
+      );
+
+      return {
+        ...v,
+        extraVenta,
+        extraFeriado,
+        extraUrgencia,
+        totalBase,
+        costoBase,
+        totalFinal: totalBase + extraVenta,
+        costoFinal: costoBase + extraVenta,
+      };
+    });
+
+    return reply.send(ventasConTotales);
   } catch (error) {
     console.error(error);
     return reply.status(500).send({ error: "Error al listar ventas" });
   }
 };
 
+
 export const getVenta = async (request, reply) => {
   try {
+    const empresaId = request.headers["x-empresa-id"];
+    if (!empresaId) return reply.status(400).send({ error: "Falta x-empresa-id" });
+
     const { id } = request.params;
-    if (!id)
-      return reply.status(400).send({ error: "ID de venta es requerido" });
+    if (!id) return reply.status(400).send({ error: "ID de venta es requerido" });
 
     const venta = await prisma.venta.findUnique({
       where: { id },
@@ -82,12 +130,8 @@ export const getVenta = async (request, reply) => {
             tipoDia: true,
             tipoItem: { include: { unidadItem: true } },
             empleado: { include: { usuario: true } },
-            hhEmpleado: {
-              include: { cif: true }, // <-- ajusta si tu relación se llama distinto
-            },
-            compras: {
-              include: { producto: true, proveedor: true, compra: true },
-            },
+            hhEmpleado: { include: { cif: true } },
+            compras: { include: { producto: true, proveedor: true, compra: true } },
           },
         },
         ordenVenta: { include: { proyecto: true, cliente: true } },
@@ -95,12 +139,59 @@ export const getVenta = async (request, reply) => {
     });
 
     if (!venta) return reply.status(404).send({ error: "Venta no encontrada" });
-    return reply.send(venta);
+
+    // ✅ helper local (mismo criterio que create)
+    const findTipoDiaByNames = async (names = []) => {
+      const ors = names.map((n) => ({
+        nombre: { equals: n, mode: "insensitive" },
+      }));
+
+      return prisma.tipoDia.findFirst({
+        where: {
+          empresa_id: String(empresaId),
+          eliminado: false,
+          OR: ors,
+        },
+      });
+    };
+
+    const [tipoFeriado, tipoUrgencia] = await Promise.all([
+      findTipoDiaByNames(["feriado", "festivo"]),
+      findTipoDiaByNames(["urgencia", "urgente"]),
+    ]);
+
+    const vFeriado = tipoFeriado ? Number(tipoFeriado.valor || 0) : 0;
+    const vUrgencia = tipoUrgencia ? Number(tipoUrgencia.valor || 0) : 0;
+
+    const extraFeriado = venta.isFeriado ? vFeriado : 0;
+    const extraUrgencia = venta.isUrgencia ? vUrgencia : 0;
+    const extraVenta = extraFeriado + extraUrgencia;
+
+    const totalBase = (venta.detalles || []).reduce(
+      (acc, d) => acc + (Number(d.ventaTotal ?? d.total) || 0),
+      0,
+    );
+    const costoBase = (venta.detalles || []).reduce(
+      (acc, d) => acc + (Number(d.costoTotal) || 0),
+      0,
+    );
+
+    return reply.send({
+      ...venta,
+      extraVenta,
+      extraFeriado,
+      extraUrgencia,
+      totalBase,
+      costoBase,
+      totalFinal: totalBase + extraVenta,
+      costoFinal: costoBase + extraVenta,
+    });
   } catch (error) {
     console.error(error);
     return reply.status(500).send({ error: "Error al obtener venta" });
   }
 };
+
 
 export const listOrdenesVenta = async (request, reply) => {
   try {
@@ -140,12 +231,21 @@ export const createVenta = async (request, reply) => {
       detalles = [],
       utilidadPctObjetivo,
       utilidadObjetivoBase, // COSTO | VENTA | VENTA_ACTUAL
+
+      // ✅ Extra por costeo (NO por ítem)
+      isFeriado = false,
+      isUrgencia = false,
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
       return reply
         .status(400)
         .send({ error: "Debe enviar al menos un detalle de venta" });
+    }
+
+    const empresaId = request.headers["x-empresa-id"];
+    if (!empresaId) {
+      return reply.status(400).send({ error: "Falta x-empresa-id" });
     }
 
     const utilidadPct =
@@ -195,6 +295,43 @@ export const createVenta = async (request, reply) => {
       return Number.isFinite(n) ? n : null;
     };
 
+    const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
+
+    // ✅ Obtiene valores extra (feriado/urgencia) desde catálogo TipoDia
+    async function getExtrasForVenta(prisma, { empresaId, isFeriado, isUrgencia }) {
+      if (!empresaId) {
+        return { extra: 0, extraFeriado: 0, extraUrgencia: 0 };
+      }
+
+      const findTipoDiaByNames = async (names = []) => {
+        const ors = names.map((n) => ({
+          nombre: { equals: n, mode: "insensitive" },
+        }));
+
+        return prisma.tipoDia.findFirst({
+          where: {
+            empresa_id: String(empresaId),
+            eliminado: false,
+            OR: ors,
+          },
+        });
+      };
+
+      const [tipoFeriado, tipoUrgencia] = await Promise.all([
+        findTipoDiaByNames(["feriado", "festivo"]),
+        findTipoDiaByNames(["urgencia", "urgente"]),
+      ]);
+
+      const vFeriado = tipoFeriado ? Number(tipoFeriado.valor || 0) : 0;
+      const vUrgencia = tipoUrgencia ? Number(tipoUrgencia.valor || 0) : 0;
+
+      return {
+        extra: (isFeriado ? vFeriado : 0) + (isUrgencia ? vUrgencia : 0),
+        extraFeriado: isFeriado ? vFeriado : 0,
+        extraUrgencia: isUrgencia ? vUrgencia : 0,
+      };
+    }
+
     const ventaCreada = await prisma.$transaction(async (tx) => {
       const tipoItemHH = await tx.tipoItem.findFirst({
         where: { codigo: "HH" },
@@ -206,6 +343,16 @@ export const createVenta = async (request, reply) => {
         );
       }
 
+      const ventaIsFeriado = toBool(isFeriado);
+      const ventaIsUrgencia = toBool(isUrgencia);
+
+      // ✅ Extra por costeo (cabecera)
+      const extraInfo = await getExtrasForVenta(tx, {
+        empresaId: String(empresaId),
+        isFeriado: ventaIsFeriado,
+        isUrgencia: ventaIsUrgencia,
+      });
+
       const detallesData = [];
 
       for (const det of detalles) {
@@ -216,25 +363,20 @@ export const createVenta = async (request, reply) => {
           modo: modoRaw,
           compraId,
           costoUnitarioManual,
-          tipoDiaId,
+          tipoDiaId, // 👈 solo UI/histórico
           alpha: alphaRaw,
           empleadoId,
           hhEmpleadoId,
         } = det;
 
-        if (!descDetalle)
-          throw new Error("Cada detalle debe tener 'descripcion'");
+        if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
 
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "")
-          .trim()
-          .toUpperCase();
+        const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
-          throw new Error(
-            "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
-          );
+          throw new Error("Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'");
         }
 
         const alphaPct = normalizeAlphaPct(alphaRaw);
@@ -243,27 +385,21 @@ export const createVenta = async (request, reply) => {
         let tipoItem = null;
         let compraItem = null;
         let hhEmpleado = null;
-        let tipoDia = null;
 
         // Tipo ítem
         if (modo === "HH") {
           tipoItem = tipoItemHH;
         } else {
           if (!tipoItemIdRaw) {
-            throw new Error(
-              "Cada detalle COMPRA debe seleccionar un Tipo ítem (tipoItemId)",
-            );
+            throw new Error("Cada detalle COMPRA debe seleccionar un Tipo ítem (tipoItemId)");
           }
-          tipoItem = await tx.tipoItem.findUnique({
-            where: { id: tipoItemIdRaw },
-          });
-          if (!tipoItem)
-            throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
+          tipoItem = await tx.tipoItem.findUnique({ where: { id: tipoItemIdRaw } });
+          if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
-        // Tipo día (extra fijo)
+        // Validar tipoDiaId si viene (solo para UI/histórico)
         if (tipoDiaId) {
-          tipoDia = await tx.tipoDia.findUnique({ where: { id: tipoDiaId } });
+          const tipoDia = await tx.tipoDia.findUnique({ where: { id: tipoDiaId } });
           if (!tipoDia) throw new Error(`tipoDiaId inválido: ${tipoDiaId}`);
         }
 
@@ -276,28 +412,23 @@ export const createVenta = async (request, reply) => {
             where: { id: hhEmpleadoId },
             include: { cif: true },
           });
-
-          if (!hhEmpleado)
-            throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
+          if (!hhEmpleado) throw new Error(`hhEmpleadoId inválido: ${hhEmpleadoId}`);
         }
 
         // CompraItem
         if (modo === "COMPRA" && compraId) {
-          compraItem = await tx.compraItem.findUnique({
-            where: { id: compraId },
-          });
+          compraItem = await tx.compraItem.findUnique({ where: { id: compraId } });
           if (!compraItem) throw new Error(`compraId inválido: ${compraId}`);
         }
 
-        if (modo === "HH" && compraId)
+        if (modo === "HH" && compraId) {
           throw new Error("Un detalle HH no puede traer compraId");
+        }
 
         // Validaciones COMPRA
         if (modo === "COMPRA") {
           if (empleadoId || hhEmpleadoId) {
-            throw new Error(
-              "Un detalle COMPRA no puede traer empleadoId/hhEmpleadoId",
-            );
+            throw new Error("Un detalle COMPRA no puede traer empleadoId/hhEmpleadoId");
           }
 
           const manualPU = toNumberOrNull(costoUnitarioManual);
@@ -318,32 +449,26 @@ export const createVenta = async (request, reply) => {
         let ventaUnitario = 0;
         let ventaTotal = 0;
 
-        const extraFijo = tipoDia ? Number(tipoDia.valor ?? 0) : 0;
+        // ✅ Extra por ítem eliminado (extra es solo por costeo)
+        const extraFijo = 0;
 
-        // ✅ alpha + tipoDia son COSTO (no utilidad)
+        // base con alpha
+        let costoConAlphaBase = 0;
+
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null) {
-            throw new Error(
-              `El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`,
-            );
+            throw new Error(`El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`);
           }
 
           costoHH = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          // 1) costo sin alpha
           const costoSinAlpha = costoHH * cantidad + cif;
+          costoConAlphaBase = costoSinAlpha * alphaMult;
 
-          // 2) costo base + extra fijo
-          const costoBase = costoSinAlpha + extraFijo;
+          costoTotal = costoConAlphaBase + extraFijo;
+          ventaTotal = costoConAlphaBase + extraFijo;
 
-          // 3) alpha ajusta costo
-          const costoConAlpha = costoBase * alphaMult;
-
-          costoTotal = costoConAlpha;
-
-          // ✅ antes del % objetivo: venta = costo
-          ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
@@ -360,31 +485,22 @@ export const createVenta = async (request, reply) => {
             costoUnitario = manualPU != null ? manualPU : 0;
           }
 
-          // 1) costo sin alpha
           const costoSinAlpha = costoUnitario * cantidad;
+          costoConAlphaBase = costoSinAlpha * alphaMult;
 
-          // 2) costo base + extra fijo
-          const costoBase = costoSinAlpha + extraFijo;
+          costoTotal = costoConAlphaBase + extraFijo;
+          ventaTotal = costoConAlphaBase + extraFijo;
 
-          // 3) alpha ajusta costo
-          const costoConAlpha = costoBase * alphaMult;
-
-          costoTotal = costoConAlpha;
-
-          // ✅ antes del % objetivo: venta = costo
-          ventaTotal = costoConAlpha;
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
         }
 
         const utilidad = ventaTotal - costoTotal;
-        const porcentajeUtilidad =
-          ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
+        const porcentajeUtilidad = ventaTotal > 0 ? (utilidad / ventaTotal) * 100 : 0;
 
         detallesData.push({
           descripcion: descDetalle,
           cantidad,
           modo,
-
           tipoItemId: tipoItem?.id ?? null,
 
           compraId: modo === "COMPRA" ? (compraId ?? null) : null,
@@ -397,7 +513,7 @@ export const createVenta = async (request, reply) => {
           hhEmpleadoId: modo === "HH" ? (hhEmpleadoId ?? null) : null,
           costoHH,
 
-          tipoDiaId: tipoDiaId ?? null,
+          tipoDiaId: tipoDiaId ?? null, // solo UI/histórico
           alpha: alphaPct,
 
           costoTotal,
@@ -409,72 +525,70 @@ export const createVenta = async (request, reply) => {
         });
       }
 
-      const totalCosto = detallesData.reduce(
-        (acc, d) => acc + (Number(d.costoTotal) || 0),
-        0,
-      );
+      // totales base (sin extra por costeo)
+      const totalCosto = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
       const totalVentaActual = detallesData.reduce(
         (acc, d) => acc + (Number(d.ventaTotal) || 0),
         0,
       );
 
+      // Bases para k (extraVenta NO participa del % objetivo)
+      const totalVentaActualBase = totalVentaActual;
+      const totalCostoBase = totalCosto;
+
       let k = 1;
 
-      // ✅ APLICAR MARGEN (sobre venta): venta = baseMonto / (1 - u)
+      // Margen sobre venta SOLO a base
       if (utilidadPct != null) {
         const u = utilidadPct / 100;
         const denom = 1 - u;
 
-        const baseMonto =
-          base === "VENTA_ACTUAL" ? totalVentaActual : totalCosto;
+        const baseMontoBase =
+          base === "VENTA_ACTUAL" ? totalVentaActualBase : totalCostoBase;
 
-        const ventaObjetivo = denom > 0 ? baseMonto / denom : null;
+        const ventaObjetivoBase = denom > 0 ? baseMontoBase / denom : null;
 
         if (
-          ventaObjetivo != null &&
-          Number.isFinite(ventaObjetivo) &&
-          ventaObjetivo > 0 &&
-          totalVentaActual > 0
+          ventaObjetivoBase != null &&
+          Number.isFinite(ventaObjetivoBase) &&
+          ventaObjetivoBase > 0 &&
+          totalVentaActualBase > 0
         ) {
-          k = ventaObjetivo / totalVentaActual;
+          k = ventaObjetivoBase / totalVentaActualBase;
         }
       }
 
-      // aplicar k a la venta
+      // aplicar k a la venta de cada línea
       if (k !== 1 && Number.isFinite(k)) {
         for (const d of detallesData) {
           d.ventaTotal = Number(d.ventaTotal || 0) * k;
           d.total = d.ventaTotal;
-          d.ventaUnitario =
-            d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
+          d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
 
           d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad =
-            d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       } else {
         for (const d of detallesData) {
           d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad =
-            d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
+          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       }
 
       if (ordenVentaId) {
-        const ov = await tx.cotizacion.findUnique({
-          where: { id: ordenVentaId },
-        });
-        if (!ov)
-          throw new Error("ordenVentaId inválido (cotización no existe)");
+        const ov = await tx.cotizacion.findUnique({ where: { id: ordenVentaId } });
+        if (!ov) throw new Error("ordenVentaId inválido (cotización no existe)");
       }
 
-      // guardamos base: VENTA_ACTUAL se persiste como VENTA (para no romper enums/back)
       const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
 
       const nuevaVenta = await tx.venta.create({
         data: {
           ordenVentaId: ordenVentaId ?? null,
           descripcion: descripcion ?? null,
+
+          isFeriado: ventaIsFeriado,
+          isUrgencia: ventaIsUrgencia,
 
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
@@ -503,7 +617,28 @@ export const createVenta = async (request, reply) => {
         },
       });
 
-      return nuevaVenta;
+      // ✅ devolver totales finales (base + extra costeo)
+      const totalBase = (nuevaVenta.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.ventaTotal ?? d.total) || 0),
+        0,
+      );
+      const costoBase = (nuevaVenta.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.costoTotal) || 0),
+        0,
+      );
+
+      const extraVenta = Number(extraInfo?.extra || 0);
+
+      return {
+        ...nuevaVenta,
+        extraVenta,
+        extraFeriado: Number(extraInfo?.extraFeriado || 0),
+        extraUrgencia: Number(extraInfo?.extraUrgencia || 0),
+        totalBase,
+        costoBase,
+        totalFinal: totalBase + extraVenta,
+        costoFinal: costoBase + extraVenta,
+      };
     });
 
     return reply.status(201).send(ventaCreada);
@@ -514,6 +649,7 @@ export const createVenta = async (request, reply) => {
       .send({ error: "Error al crear venta", detalle: error.message });
   }
 };
+
 
 export async function updateVenta(request, reply) {
   try {
@@ -617,7 +753,9 @@ export async function updateVenta(request, reply) {
         const cantidad = Number(cantidadRaw) || 1;
         if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
 
-        const modo = String(modoRaw || "").trim().toUpperCase();
+        const modo = String(modoRaw || "")
+          .trim()
+          .toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
           throw new Error(
             "Cada detalle debe incluir 'modo' válido: 'HH' o 'COMPRA'",
