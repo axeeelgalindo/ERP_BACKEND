@@ -17,7 +17,7 @@ import {
   getUnidadItems,
   listCompraItemsForVentas,
   listEmpleadosForVentas,
-  listHHEmpleadosForVentas,
+  listHHPeriodos
 } from "./complements/controllers.js";
 
 export default async function ventasRoutes(server) {
@@ -37,7 +37,7 @@ export default async function ventasRoutes(server) {
   server.get("/ventas/unidaditems", getUnidadItems);
 
   server.get("/ventas/empleados", listEmpleadosForVentas);
-  server.get("/ventas/hh-empleados", listHHEmpleadosForVentas);
+  server.get("/hh/periodos", listHHPeriodos);
   server.get("/ventas/compra-items", listCompraItemsForVentas);
 
 

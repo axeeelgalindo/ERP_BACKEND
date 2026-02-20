@@ -174,15 +174,15 @@ export const listEmpleadosForVentas = async (request, reply) => {
  * GET /ventas/hh-empleados?anio=YYYY&mes=MM
  * ✅ Ahora incluye CIF del periodo (relación cif)
  */
-export const listHHEmpleadosForVentas = async (request, reply) => {
+export const listHHPeriodos = async (request, reply) => {
   try {
     const empresaId =
       request.headers["x-empresa-id"] || request.query.empresa_id;
     const anioRaw = request.query.anio;
     const mesRaw = request.query.mes;
 
-    if (!empresaId)
-      return reply.code(400).send({ error: "Falta x-empresa-id" });
+    //if (!empresaId)
+     // return reply.code(400).send({ error: "Falta x-empresa-id" });
     if (!anioRaw || !mesRaw)
       return reply.code(400).send({ error: "Falta anio/mes" });
 
