@@ -9,6 +9,7 @@ import {
   approveProyecto,
   iniciarProyecto,
   finalizarProyecto,
+  reporteDevengadoProyecto,
 } from "./controllers.js";
 
 import { importJiraCSV } from "./proyectos.jira.controller.js";
@@ -30,49 +31,51 @@ export default async function proyectosRoutes(server) {
   server.get(
     "/proyectos/:id",
     { schema: { params: ProyectoIdParam } },
-    getProyecto
+    getProyecto,
   );
 
   server.post(
     "/proyectos/add",
     { schema: { body: ProyectoCreateRequestBody }, ...guard },
-    createProyecto
+    createProyecto,
   );
 
   server.patch(
     "/proyectos/update/:id",
     { schema: { params: ProyectoIdParam, body: ProyectoUpdateBody }, ...guard },
-    updateProyecto
+    updateProyecto,
   );
 
   server.delete(
     "/proyectos/delete/:id",
     { schema: { params: ProyectoIdParam }, ...guard },
-    deleteProyecto
+    deleteProyecto,
   );
 
   server.patch(
     "/proyectos/disable/:id",
     { schema: { params: ProyectoIdParam }, ...guard },
-    disableProyecto
+    disableProyecto,
   );
 
   server.patch(
     "/proyectos/restore/:id",
     { schema: { params: ProyectoIdParam }, ...guard },
-    restoreProyecto
+    restoreProyecto,
   );
 
   server.patch(
     "/proyectos/approve/:id",
     { schema: { params: ProyectoIdParam }, ...guard },
-    approveProyecto
+    approveProyecto,
   );
 
   // ✅ Import Jira
   server.post("/proyectos/:id/jira/import", { ...guard }, importJiraCSV);
 
-
   server.post("/proyectos/:id/iniciar", iniciarProyecto);
-server.post("/proyectos/:id/finalizar", finalizarProyecto);
+  server.post("/proyectos/:id/finalizar", finalizarProyecto);
+
+  //devengado
+  server.get("/proyectos/:id/reporte-devengado", reporteDevengadoProyecto);
 }

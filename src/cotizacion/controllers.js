@@ -42,66 +42,8 @@ function getScope(request) {
   };
 }
 
-const round0 = (n) => Math.round(Number(n || 0));
-
-function calcTotalVenta(v) {
-  return (v?.detalles || []).reduce(
-    (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
-    0,
-  );
-}
-
-function calcFromSubtotal(subtotalNeto, ivaRate = 0.19) {
-  const subtotal = round0(subtotalNeto);
-  const rate = Number(ivaRate);
-  const r = Number.isFinite(rate) ? rate : 0.19;
-  const iva = round0(subtotal * r);
-  const total = round0(subtotal + iva);
-  return { subtotal, iva, total, ivaRate: r };
-}
-
 function sumGlosas(glosas) {
   return (glosas || []).reduce((acc, g) => acc + round0(g?.monto || 0), 0);
-}
-
-function normalizeVigenciaDias(v) {
-  if (v === undefined || v === null || v === "") return 15; // default “lógico”
-  const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error("vigencia_dias inválido");
-  const i = Math.trunc(n);
-  if (i < 1 || i > 365)
-    throw new Error("vigencia_dias debe estar entre 1 y 365");
-  return i;
-}
-
-/**
- * Normaliza glosas:
- * - descripcion obligatoria
- * - monto entero >= 0
- * - manual boolean
- * - orden (default index)
- * NO distribuye aquí (tu UI ya distribuye). Solo validamos y ordenamos.
- */
-function normalizeGlosas(inputGlosas) {
-  const glosas = Array.isArray(inputGlosas) ? inputGlosas : [];
-  if (glosas.length === 0) return [];
-
-  return glosas.map((g, i) => {
-    const desc = String(g?.descripcion || "").trim();
-    if (!desc) throw new Error(`Glosa #${i + 1}: Falta descripción.`);
-
-    const montoRaw = Number(g?.monto ?? 0);
-    if (!Number.isFinite(montoRaw) || montoRaw < 0) {
-      throw new Error(`Glosa #${i + 1}: monto inválido.`);
-    }
-
-    return {
-      descripcion: desc,
-      monto: round0(montoRaw),
-      manual: !!g?.manual,
-      orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : i,
-    };
-  });
 }
 
 function normalizeText(s) {
@@ -181,6 +123,68 @@ function parseCotizacionText(text) {
     rawText: t,
   };
 }
+
+//////////////////////////////////
+const round0 = (n) => Math.round(Number(n || 0));
+
+function clampPct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(99.99, n));
+}
+
+function calcTotalVenta(v) {
+  // usa total o ventaTotal (según tu modelo)
+  return (v?.detalles || []).reduce(
+    (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
+    0
+  );
+}
+
+function normalizeVigenciaDias(v) {
+  if (v === undefined || v === null || v === "") return 15;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return NaN;
+  return Math.trunc(n);
+}
+
+function normalizeGlosas(glosas) {
+  const list = Array.isArray(glosas) ? glosas : [];
+  return list
+    .map((g, idx) => ({
+      descripcion: String(g?.descripcion || "").trim().slice(0, 250),
+      monto: round0(g?.monto || 0), // BRUTO
+      manual: !!g?.manual,
+      orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
+      descuento_pct: clampPct(g?.descuento_pct ?? 0),
+    }))
+    .filter((g) => g.descripcion);
+}
+
+function sumBrutoGlosas(glosas) {
+  return round0(glosas.reduce((acc, g) => acc + round0(g.monto || 0), 0));
+}
+
+function calcDescuentoGlosasMonto(glosas) {
+  // suma de (bruto * %)
+  return round0(
+    glosas.reduce((acc, g) => {
+      const bruto = round0(g.monto || 0);
+      const pct = clampPct(g.descuento_pct || 0);
+      const desc = bruto * (pct / 100);
+      return acc + desc;
+    }, 0)
+  );
+}
+
+function calcFromSubtotal(subtotalNeto, ivaRate) {
+  const sub = round0(subtotalNeto);
+  const iva = round0(sub * Number(ivaRate || 0));
+  const total = round0(sub + iva);
+  return { subtotal: sub, iva, total };
+}
+
+
 
 /**
  * POST /cotizaciones/import/pdf
@@ -1042,6 +1046,228 @@ export const listCotizaciones = async (request, reply) => {
   }
 };
 
+// =========================
+// CREATE
+// =========================
+export const createCotizacion = async (request, reply) => {
+  try {
+    const { empresaId, userId } = getScope(request);
+
+    const {
+      cliente_id,
+      cliente_responsable_id,
+
+      asunto,
+      terminos_condiciones,
+      acuerdo_pago,
+
+      ivaRate = 0.19,
+      vigencia_dias,
+
+      // ✅ descuento general (backend espera ESTE nombre)
+      descuento_pct = 0,
+
+      ventaIds = [],
+      glosas = [],
+    } = request.body || {};
+
+    if (!cliente_id) {
+      return reply.code(400).send({ error: "cliente_id es obligatorio" });
+    }
+
+    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
+    }
+
+    const ivaRateNum = Number(ivaRate);
+    if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
+      return reply.code(400).send({ error: "ivaRate inválido (ej: 0.19)" });
+    }
+
+    const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
+    if (!Number.isFinite(vigenciaDias) || vigenciaDias < 1 || vigenciaDias > 365) {
+      return reply.code(400).send({ error: "vigencia_dias inválido (1..365)" });
+    }
+
+    const descGeneralPct = clampPct(descuento_pct);
+
+    const created = await prisma.$transaction(async (tx) => {
+      // Validar cliente dentro de la empresa
+      const cliente = await tx.cliente.findFirst({
+        where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
+        select: { id: true },
+      });
+      if (!cliente) throw new Error("Cliente inválido");
+
+      // Validar responsable (si viene)
+      let responsable = null;
+      if (cliente_responsable_id) {
+        responsable = await tx.clienteResponsable.findFirst({
+          where: {
+            id: cliente_responsable_id,
+            cliente_id: cliente_id,
+            eliminado: false,
+          },
+          select: { id: true },
+        });
+        if (!responsable) {
+          throw new Error("cliente_responsable_id inválido para este cliente");
+        }
+      }
+
+      // Cargar ventas + detalles
+      const ventas = await tx.venta.findMany({
+        where: { id: { in: ventaIds } },
+        include: { detalles: true },
+      });
+
+      if (ventas.length !== ventaIds.length) {
+        throw new Error("Una o más ventas no existen");
+      }
+
+      // Subtotal base desde ventas (BRUTO)
+      const subtotalBase = round0(
+        ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0),
+      );
+      if (!subtotalBase || subtotalBase <= 0) {
+        throw new Error("El subtotal calculado desde ventas es 0");
+      }
+
+      // Normalizar glosas (BRUTO)
+      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+
+      if (glosasFinal.length === 0) {
+        glosasFinal = [
+          {
+            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
+            monto: subtotalBase,
+            manual: true,
+            orden: 0,
+            descuento_pct: 0,
+          },
+        ];
+      }
+
+      // ✅ VALIDACIÓN: glosas deben sumar subtotalBase (BRUTO)
+      const sumaBruto = sumBrutoGlosas(glosasFinal);
+      if (sumaBruto !== subtotalBase) {
+        throw new Error(
+          `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBase}`,
+        );
+      }
+
+      // =====================================================
+      // ✅ EXCLUSIVIDAD: NO permitir ambos tipos de descuento
+      // =====================================================
+      const hayDescGlosa = glosasFinal.some(
+        (g) => clampPct(g.descuento_pct || 0) > 0,
+      );
+
+      if (descGeneralPct > 0 && hayDescGlosa) {
+        throw new Error(
+          "No puedes usar descuento general y descuento por glosas al mismo tiempo. Deja uno en 0.",
+        );
+      }
+
+      // ✅ Cálculo descuentos
+      const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal) : 0;
+      const subtotalTrasGlosas = round0(subtotalBase - descGlosasMonto);
+
+      const descGeneralMonto =
+        descGeneralPct > 0
+          ? round0(subtotalTrasGlosas * (descGeneralPct / 100))
+          : 0;
+
+      const subtotalNeto = round0(subtotalTrasGlosas - descGeneralMonto);
+
+      if (subtotalNeto < 0) {
+        throw new Error("El subtotal neto quedó negativo (revisa descuentos).");
+      }
+
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalNeto, ivaRateNum);
+
+      // Fechas
+      const fechaDocumento = new Date();
+      const vencimientoDocumento = new Date(fechaDocumento);
+      vencimientoDocumento.setDate(vencimientoDocumento.getDate() + vigenciaDias);
+
+      // Crear cotización
+      const cot = await tx.cotizacion.create({
+        data: {
+          empresa_id: empresaId,
+          proyecto_id: null,
+          cliente_id,
+          cliente_responsable_id: responsable?.id ?? null,
+
+          vendedor_id: userId,
+          asunto: asunto || null,
+          terminos_condiciones: terminos_condiciones || null,
+          acuerdo_pago: acuerdo_pago || null,
+
+          vigencia_dias: vigenciaDias,
+          fecha_documento: fechaDocumento,
+          vencimiento_documento: vencimientoDocumento,
+
+          // ✅ totales netos (después de descuentos)
+          subtotal,
+          iva,
+          total,
+
+          // ✅ descuento general guardado
+          descuento_pct: descGeneralPct,
+          descuento_monto: descGeneralMonto,
+
+          estado: "COTIZACION",
+
+          glosas: {
+            create: glosasFinal.map((g, idx) => ({
+              descripcion: g.descripcion,
+              monto: round0(g.monto || 0), // BRUTO
+              manual: !!g.manual,
+              orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
+              // si hay general, esto igual debería venir 0, pero lo guardamos tal cual:
+              descuento_pct: clampPct(g.descuento_pct || 0),
+            })),
+          },
+
+          ventas: {
+            connect: ventaIds.map((id) => ({ id })),
+          },
+        },
+        include: {
+          cliente: true,
+          cliente_responsable: true,
+          proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+          ventas: { include: { detalles: true } },
+        },
+      });
+
+      // ✅ adjuntamos campos calculados útiles
+      return {
+        ...cot,
+        subtotal_bruto: subtotalBase,
+        descuento_glosas_monto: descGlosasMonto,
+        descuento_general_monto: descGeneralMonto,
+        subtotal_neto: subtotal,
+      };
+    });
+
+    return reply.code(201).send(created);
+  } catch (e) {
+    return reply.code(e.statusCode || 400).send({
+      error: "Error al crear cotización",
+      detalle: e.message,
+    });
+  }
+};
+
+// =========================
+// GET
+// =========================
 export const getCotizacion = async (request, reply) => {
   try {
     const { empresaId } = getScope(request);
@@ -1066,250 +1292,49 @@ export const getCotizacion = async (request, reply) => {
       return reply.code(404).send({ error: "Cotización no encontrada" });
     }
 
-    // ✅ Ventas relacionadas: OJO, NO es cot.ventas (eso sería M2M implícito)
+    // Ventas relacionadas (según tu lógica)
     const ventas = await prisma.venta.findMany({
       where: {
         ordenVentaId: id,
         eliminado: false,
-        // si quieres asegurar empresa por cliente:
-        // ...(cot.cliente_id ? { clienteId: cot.cliente_id } : {}),
       },
       select: {
         id: true,
         numero: true,
         descripcion: true,
         fecha: true,
-        detalles: { select: { total: true } }, // para subtotal preview
+        detalles: { select: { total: true } },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    // ✅ devolvemos cot con ventas “adjuntas”
+    // ✅ recalcular (por si el PDF/UI lo necesita “siempre”)
+    const glosas = Array.isArray(cot.glosas) ? cot.glosas : [];
+    const subtotalBruto = round0(glosas.reduce((a, g) => a + round0(g.monto || 0), 0));
+    const descGlosasMonto = round0(
+      glosas.reduce((a, g) => {
+        const bruto = round0(g.monto || 0);
+        const pct = clampPct(g.descuento_pct || 0);
+        return a + bruto * (pct / 100);
+      }, 0)
+    );
+    const subtotalTrasGlosas = round0(subtotalBruto - descGlosasMonto);
+    const descGeneralPct = clampPct(cot.descuento_pct || 0);
+    const descGeneralMonto = round0(subtotalTrasGlosas * (descGeneralPct / 100));
+    const subtotalNeto = round0(subtotalTrasGlosas - descGeneralMonto);
+
     return reply.send({
       ...cot,
       ventas,
+      subtotal_bruto: subtotalBruto,
+      descuento_glosas_monto: descGlosasMonto,
+      descuento_general_monto: descGeneralMonto,
+      subtotal_neto_calc: subtotalNeto,
     });
   } catch (e) {
     request.log?.error?.(e);
     return reply.code(e.statusCode || 500).send({
       error: "Error al obtener cotización",
-      detalle: e.message,
-    });
-  }
-};
-
-/* =========================
-   POST /cotizaciones/add
-   ✅ Crea cotización DESDE ventas seleccionadas (costeo):
-   - cliente obligatorio
-   - proyecto NO obligatorio (null al crear)
-   - vendedor_id desde JWT/session
-   - ventaIds obligatorio
-   - subtotal neto = suma de ventas (detalles.total / ventaTotal)
-   - iva/total calculados
-   - glosas deben sumar SUBTOTAL neto
-========================= */
-export const createCotizacion = async (request, reply) => {
-  try {
-    const { empresaId, userId } = getScope(request);
-
-    const {
-      cliente_id,
-      cliente_responsable_id, // ✅ NUEVO
-
-      asunto,
-      terminos_condiciones,
-      acuerdo_pago,
-      ivaRate = 0.19,
-      vigencia_dias,
-
-      ventaIds = [],
-      glosas = [],
-    } = request.body || {};
-
-    // =========================
-    // Validaciones base
-    // =========================
-    if (!cliente_id) {
-      return reply.code(400).send({ error: "cliente_id es obligatorio" });
-    }
-
-    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
-    }
-
-    const ivaRateNum = Number(ivaRate);
-    if (!Number.isFinite(ivaRateNum) || ivaRateNum < 0 || ivaRateNum > 1) {
-      return reply.code(400).send({ error: "ivaRate inválido (ej: 0.19)" });
-    }
-
-    const vigenciaDias = normalizeVigenciaDias(vigencia_dias);
-    if (
-      !Number.isFinite(vigenciaDias) ||
-      vigenciaDias < 1 ||
-      vigenciaDias > 365
-    ) {
-      return reply.code(400).send({ error: "vigencia_dias inválido (1..365)" });
-    }
-
-    const created = await prisma.$transaction(async (tx) => {
-      // =========================
-      // Validar cliente dentro de la empresa
-      // =========================
-      const cliente = await tx.cliente.findFirst({
-        where: { id: cliente_id, empresa_id: empresaId, eliminado: false },
-        select: { id: true },
-      });
-      if (!cliente) throw new Error("Cliente inválido");
-
-      // =========================
-      // ✅ Validar responsable (si viene)
-      // Debe pertenecer al cliente y no estar eliminado
-      // =========================
-      let responsable = null;
-
-      if (cliente_responsable_id) {
-        responsable = await tx.clienteResponsable.findFirst({
-          where: {
-            id: cliente_responsable_id,
-            cliente_id: cliente_id,
-            eliminado: false,
-          },
-          select: { id: true },
-        });
-
-        if (!responsable) {
-          throw new Error("cliente_responsable_id inválido para este cliente");
-        }
-      }
-
-      // =========================
-      // Cargar ventas + detalles
-      // =========================
-      const ventas = await tx.venta.findMany({
-        where: { id: { in: ventaIds } },
-        include: { detalles: true },
-      });
-
-      if (ventas.length !== ventaIds.length) {
-        throw new Error("Una o más ventas no existen");
-      }
-
-      // =========================
-      // Calcular subtotal neto desde ventas
-      // =========================
-      const subtotalBase = ventas.reduce(
-        (acc, v) => acc + calcTotalVenta(v),
-        0,
-      );
-
-      if (!subtotalBase || subtotalBase <= 0) {
-        throw new Error("El subtotal neto calculado desde ventas es 0");
-      }
-
-      const { subtotal, iva, total } = calcFromSubtotal(
-        subtotalBase,
-        ivaRateNum,
-      );
-
-      // =========================
-      // Normalizar glosas
-      // =========================
-      let glosasFinal = normalizeGlosas(glosas).sort(
-        (a, b) => a.orden - b.orden,
-      );
-
-      if (glosasFinal.length === 0) {
-        glosasFinal = [
-          {
-            descripcion: (String(asunto || "").trim() || "Servicios").slice(
-              0,
-              250,
-            ),
-            monto: subtotal,
-            manual: true,
-            orden: 0,
-          },
-        ];
-      }
-
-      const suma = sumGlosas(glosasFinal);
-      if (suma !== subtotal) {
-        throw new Error(
-          `Las glosas deben sumar el subtotal neto. Suma glosas=${suma} vs subtotal=${subtotal}`,
-        );
-      }
-
-      // =========================
-      // Fechas
-      // =========================
-      const fechaDocumento = new Date();
-      const vencimientoDocumento = new Date(fechaDocumento);
-      vencimientoDocumento.setDate(
-        vencimientoDocumento.getDate() + vigenciaDias,
-      );
-
-      // =========================
-      // Crear cotización
-      // =========================
-      const cot = await tx.cotizacion.create({
-        data: {
-          empresa_id: empresaId,
-          proyecto_id: null,
-          cliente_id,
-
-          // ✅ NUEVO
-          cliente_responsable_id: responsable?.id ?? null,
-
-          vendedor_id: userId,
-          asunto: asunto || null,
-          terminos_condiciones: terminos_condiciones || null,
-          acuerdo_pago: acuerdo_pago || null,
-
-          vigencia_dias: vigenciaDias,
-          fecha_documento: fechaDocumento,
-          vencimiento_documento: vencimientoDocumento,
-
-          subtotal,
-          iva,
-          total,
-
-          estado: "COTIZACION",
-
-          glosas: {
-            create: glosasFinal.map((g, idx) => ({
-              descripcion: g.descripcion,
-              monto: g.monto,
-              manual: !!g.manual,
-              orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
-            })),
-          },
-
-          ventas: {
-            connect: ventaIds.map((id) => ({ id })),
-          },
-        },
-        include: {
-          cliente: true,
-          // ✅ traer responsable en response
-          cliente_responsable: true,
-
-          proyecto: true,
-          vendedor: { select: { id: true, nombre: true, correo: true } },
-          glosas: { orderBy: { orden: "asc" } },
-          ventas: { include: { detalles: true } },
-        },
-      });
-
-      return cot;
-    });
-
-    return reply.code(201).send(created);
-  } catch (e) {
-    return reply.code(e.statusCode || 400).send({
-      error: "Error al crear cotización",
       detalle: e.message,
     });
   }
@@ -1609,7 +1634,6 @@ export const updateCotizacion = async (request, reply) => {
     });
   }
 };
-
 
 /* =========================
    POST /cotizaciones/:id/estado

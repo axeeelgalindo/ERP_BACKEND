@@ -235,6 +235,9 @@ export const createVenta = async (request, reply) => {
       // ✅ Extra por costeo (NO por ítem)
       isFeriado = false,
       isUrgencia = false,
+
+      // ✅ NUEVO: descuento general (0-100)
+      descuentoPct: descuentoPctGeneralRaw,
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
@@ -280,14 +283,17 @@ export const createVenta = async (request, reply) => {
       }
     }
 
-    const normalizeAlphaPct = (v) => {
-      if (v == null || v === "") return 10;
+    const normalizePct = (v, def = 0) => {
+      if (v == null || v === "") return def;
       const n = Number(v);
-      if (!Number.isFinite(n)) return 10;
+      if (!Number.isFinite(n)) return def;
+      // si viene 0.1 => 10%
       if (n > 0 && n <= 1) return n * 100;
       if (n < 0) return 0;
       return n;
     };
+
+    const normalizeAlphaPct = (v) => normalizePct(v, 10);
 
     const toNumberOrNull = (v) => {
       if (v == null || v === "") return null;
@@ -296,6 +302,15 @@ export const createVenta = async (request, reply) => {
     };
 
     const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
+
+    // ✅ Descuento general normalizado
+    const descuentoPctGeneral = normalizePct(descuentoPctGeneralRaw, 0);
+    if (descuentoPctGeneral < 0 || descuentoPctGeneral >= 100) {
+      return reply.status(400).send({
+        error: "descuentoPct (general) inválido. Debe ser 0 <= x < 100",
+      });
+    }
+    const descuentoGeneralMult = 1 - descuentoPctGeneral / 100;
 
     // ✅ Obtiene valores extra (feriado/urgencia) desde catálogo TipoDia
     async function getExtrasForVenta(prisma, { empresaId, isFeriado, isUrgencia }) {
@@ -363,10 +378,13 @@ export const createVenta = async (request, reply) => {
           modo: modoRaw,
           compraId,
           costoUnitarioManual,
-          tipoDiaId, // 👈 solo UI/histórico
+          tipoDiaId, // UI/histórico
           alpha: alphaRaw,
           empleadoId,
           hhEmpleadoId,
+
+          // ✅ NUEVO: descuento por ítem
+          descuentoPct: descuentoPctItemRaw,
         } = det;
 
         if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
@@ -381,6 +399,15 @@ export const createVenta = async (request, reply) => {
 
         const alphaPct = normalizeAlphaPct(alphaRaw);
         const alphaMult = 1 + alphaPct / 100;
+
+        // ✅ descuento por ítem
+        const descuentoPctItem = normalizePct(descuentoPctItemRaw, 0);
+        if (descuentoPctItem < 0 || descuentoPctItem >= 100) {
+          throw new Error(
+            `descuentoPct inválido en detalle '${descDetalle}'. Debe ser 0 <= x < 100`,
+          );
+        }
+        const descuentoItemMult = 1 - descuentoPctItem / 100;
 
         let tipoItem = null;
         let compraItem = null;
@@ -397,7 +424,7 @@ export const createVenta = async (request, reply) => {
           if (!tipoItem) throw new Error(`tipoItemId inválido: ${tipoItemIdRaw}`);
         }
 
-        // Validar tipoDiaId si viene (solo para UI/histórico)
+        // Validar tipoDiaId si viene (solo UI/histórico)
         if (tipoDiaId) {
           const tipoDia = await tx.tipoDia.findUnique({ where: { id: tipoDiaId } });
           if (!tipoDia) throw new Error(`tipoDiaId inválido: ${tipoDiaId}`);
@@ -513,16 +540,24 @@ export const createVenta = async (request, reply) => {
           hhEmpleadoId: modo === "HH" ? (hhEmpleadoId ?? null) : null,
           costoHH,
 
-          tipoDiaId: tipoDiaId ?? null, // solo UI/histórico
+          tipoDiaId: tipoDiaId ?? null, // UI/histórico
           alpha: alphaPct,
+
+          // ✅ NUEVO
+          descuentoPct: descuentoPctItem,
 
           costoTotal,
           ventaUnitario,
           ventaTotal,
+          ventaTotalBruto: null, // se setea después (post-k)
+
           utilidad,
           porcentajeUtilidad,
           total: ventaTotal,
         });
+
+        // guardamos mult para usar post-k (sin ensuciar schema)
+        detallesData[detallesData.length - 1]._descuentoItemMult = descuentoItemMult;
       }
 
       // totales base (sin extra por costeo)
@@ -532,7 +567,6 @@ export const createVenta = async (request, reply) => {
         0,
       );
 
-      // Bases para k (extraVenta NO participa del % objetivo)
       const totalVentaActualBase = totalVentaActual;
       const totalCostoBase = totalCosto;
 
@@ -558,21 +592,34 @@ export const createVenta = async (request, reply) => {
         }
       }
 
-      // aplicar k a la venta de cada línea
+      // ✅ 1) aplicar k a la venta bruta de cada línea
       if (k !== 1 && Number.isFinite(k)) {
         for (const d of detallesData) {
           d.ventaTotal = Number(d.ventaTotal || 0) * k;
           d.total = d.ventaTotal;
           d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
-
-          d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
         }
       } else {
-        for (const d of detallesData) {
-          d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
-        }
+        // nada
+      }
+
+      // ✅ 2) guardar BRUTO post-k y aplicar descuentos (ítem y general) sobre venta
+      for (const d of detallesData) {
+        const bruto = Number(d.ventaTotal || 0);
+        d.ventaTotalBruto = bruto;
+
+        const itemMult = d._descuentoItemMult ?? 1;
+        const neto = bruto * itemMult * descuentoGeneralMult;
+
+        d.ventaTotal = neto;
+        d.total = neto;
+        d.ventaUnitario = d.cantidad > 0 ? neto / d.cantidad : neto;
+
+        d.utilidad = neto - Number(d.costoTotal || 0);
+        d.porcentajeUtilidad = neto > 0 ? (d.utilidad / neto) * 100 : 0;
+
+        // limpiar campo interno
+        delete d._descuentoItemMult;
       }
 
       if (ordenVentaId) {
@@ -593,6 +640,9 @@ export const createVenta = async (request, reply) => {
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
+
+          // ✅ NUEVO: descuento general guardado
+          descuentoPct: descuentoPctGeneral,
 
           detalles: { create: detallesData },
         },
@@ -617,9 +667,13 @@ export const createVenta = async (request, reply) => {
         },
       });
 
-      // ✅ devolver totales finales (base + extra costeo)
+      // ✅ devolver totales finales
       const totalBase = (nuevaVenta.detalles || []).reduce(
         (acc, d) => acc + (Number(d.ventaTotal ?? d.total) || 0),
+        0,
+      );
+      const totalBaseBruto = (nuevaVenta.detalles || []).reduce(
+        (acc, d) => acc + (Number(d.ventaTotalBruto) || 0),
         0,
       );
       const costoBase = (nuevaVenta.detalles || []).reduce(
@@ -627,16 +681,27 @@ export const createVenta = async (request, reply) => {
         0,
       );
 
-      const extraVenta = Number(extraInfo?.extra || 0);
+      const extraVentaBruto = Number(extraInfo?.extra || 0);
+      // ✅ si quieres que el descuento general afecte el extra, aplica el mismo mult:
+      const extraVenta = extraVentaBruto * descuentoGeneralMult;
 
       return {
         ...nuevaVenta,
+
+        // extras
         extraVenta,
+        extraVentaBruto,
         extraFeriado: Number(extraInfo?.extraFeriado || 0),
         extraUrgencia: Number(extraInfo?.extraUrgencia || 0),
+
+        // totales
         totalBase,
+        totalBaseBruto,
         costoBase,
+
         totalFinal: totalBase + extraVenta,
+        // ⚠️ tu código antes sumaba extra al costo. Lo dejo igual que tu retorno,
+        // pero ojo: extraVenta es "venta", no necesariamente costo real.
         costoFinal: costoBase + extraVenta,
       };
     });

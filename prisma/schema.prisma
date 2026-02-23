@@ -542,10 +542,8 @@ model Cotizacion {
   cliente_id String
   cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Restrict)
 
-   cliente_responsable_id String?
+  cliente_responsable_id String?
   cliente_responsable    ClienteResponsable? @relation(fields: [cliente_responsable_id], references: [id], onDelete: SetNull)
-
-
 
   // ✅ temporalmente opcional
   vendedor_id String?
@@ -570,6 +568,10 @@ model Cotizacion {
   vencimiento_documento DateTime?
 
   motivo_rechazo String?
+
+  // ✅ NUEVO: descuento general de la cotización (porcentaje 0..99.99)
+  descuento_pct  Float @default(0)
+  descuento_monto Float @default(0) // monto descontado calculado (opcional pero útil)
 
   estado EstadoCotizacion @default(COTIZACION)
 
@@ -601,6 +603,8 @@ model CotizacionGlosa {
   monto       Float   @default(0)
   manual      Boolean @default(false)
   orden       Int     @default(0)
+  
+  descuento_pct  Float @default(0)
 
   @@index([cotizacion_id])
 }
@@ -653,6 +657,8 @@ model Venta {
   detalles            detalleVenta[]
   asignaciones_costeo CompraCosteo[]
 
+  descuentoPct Float? @default(0) // ✅ descuento general (0-100)
+
   // ✅ NUEVO (opcional, no rompe)
   utilidadObjetivoBase UtilidadBase? @default(COSTO)
   utilidadObjetivoPct  Float?
@@ -679,6 +685,9 @@ model detalleVenta {
   cantidad    Int
   total       Float
   fecha       DateTime @default(now())
+
+  descuentoPct    Float? @default(0) // ✅ descuento por ítem (0-100)
+  ventaTotalBruto Float? // ✅ opcional: venta antes de descuentos (post-k)
 
   modo DetalleVentaModo @default(HH)
 
