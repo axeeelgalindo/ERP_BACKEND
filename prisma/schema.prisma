@@ -366,6 +366,7 @@ model Proyecto {
 
   tareas   Tarea[]
   miembros ProyectoMiembro[]
+  epicas   Epica[]
 
   @@index([empresa_id])
 }
@@ -386,9 +387,46 @@ model ProyectoMiembro {
 
 /**
  * =========================
- * TAREAS (Planificación/Gantt)
+ * TAREAS CON ÉPICAS
  * =========================
  */
+model Epica {
+  id          String   @id @default(cuid())
+  proyecto_id String
+  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  nombre      String
+  descripcion String?
+
+  estado String @default("pendiente")
+  avance Int    @default(0)
+  orden  Int?
+
+  fecha_inicio_plan DateTime?
+  fecha_fin_plan    DateTime?
+  dias_plan         Int?
+
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+
+  source           String  @default("MANUAL")
+  jira_key         String?
+  jira_estado      String?
+  jira_sprint      String?
+  jira_issue_color String?
+
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+
+  tareas Tarea[]
+
+  @@unique([proyecto_id, jira_key])
+  @@index([proyecto_id])
+}
+
 model Tarea {
   id          String   @id @default(cuid())
   proyecto_id String
@@ -398,6 +436,9 @@ model Tarea {
   descripcion    String?
   responsable_id String?
   responsable    Empleado? @relation(fields: [responsable_id], references: [id], onDelete: SetNull)
+
+  epica_id String?
+  epica    Epica?  @relation(fields: [epica_id], references: [id], onDelete: SetNull)
 
   prioridad Int?
   estado    String  @default("pendiente")
@@ -445,6 +486,7 @@ model Tarea {
   dias_desviacion Int?
 
   @@unique([proyecto_id, jira_key])
+  @@index([epica_id])
   @@index([proyecto_id])
   @@index([responsable_id])
   @@index([estado])
@@ -570,7 +612,7 @@ model Cotizacion {
   motivo_rechazo String?
 
   // ✅ NUEVO: descuento general de la cotización (porcentaje 0..99.99)
-  descuento_pct  Float @default(0)
+  descuento_pct   Float @default(0)
   descuento_monto Float @default(0) // monto descontado calculado (opcional pero útil)
 
   estado EstadoCotizacion @default(COTIZACION)
@@ -603,8 +645,8 @@ model CotizacionGlosa {
   monto       Float   @default(0)
   manual      Boolean @default(false)
   orden       Int     @default(0)
-  
-  descuento_pct  Float @default(0)
+
+  descuento_pct Float @default(0)
 
   @@index([cotizacion_id])
 }

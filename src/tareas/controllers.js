@@ -2,6 +2,7 @@
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
+import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
 
 const prisma = new PrismaClient();
 const PAGE = 1,
@@ -37,7 +38,7 @@ async function assertEmpleadoInEmpresa(tx, empleadoId, empresaId) {
 
   if (!emp) {
     const err = new Error(
-      "Responsable de subtarea no es empleado de tu empresa o está deshabilitado"
+      "Responsable de subtarea no es empleado de tu empresa o está deshabilitado",
     );
     err.statusCode = 403;
     throw err;
@@ -58,7 +59,7 @@ async function assertProyectoInEmpresa(tx, proyectoId, empresaId) {
   });
   if (!p) {
     const err = new Error(
-      "Proyecto no pertenece a tu empresa o está deshabilitado"
+      "Proyecto no pertenece a tu empresa o está deshabilitado",
     );
     err.statusCode = 403;
     throw err;
@@ -122,9 +123,26 @@ export async function listTareas(request, reply) {
       skip: (page - 1) * pageSize,
       take: pageSize,
       include: {
+        // ✅ PARA MOSTRAR NOMBRE DE ÉPICA EN FRONTEND
+        epica: {
+          select: { id: true, nombre: true },
+        },
+
+        // ✅ PARA PODER DESPLEGAR SUBTAREAS SIN LLAMADAS EXTRA
+        detalles: {
+          where: includeDeleted ? {} : { eliminado: false },
+          include: {
+            responsable: {
+              include: { usuario: { select: { nombre: true, correo: true } } },
+            },
+          },
+          orderBy: [{ fecha_inicio_plan: "asc" }],
+        },
+
         responsable: {
           include: { usuario: { select: { nombre: true, correo: true } } },
         },
+
         dependencias: { select: { predecesora_id: true, tipo: true } },
       },
     }),
@@ -132,10 +150,58 @@ export async function listTareas(request, reply) {
 
   const rowsMapped = rows.map((t) => ({
     ...t,
-    dependencies: t.dependencias.map((d) => d.predecesora_id),
+    dependencies: (t.dependencias || []).map((d) => d.predecesora_id),
   }));
 
   return reply.send({ ok: true, total, page, pageSize, rows: rowsMapped });
+}
+
+export async function listTareasByEpica(request, reply) {
+  const scope = resolveScope(request);
+  const { proyecto_id, epica_id } = request.query || {};
+
+  if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
+  if (!epica_id) return httpError(reply, 400, "Falta epica_id");
+
+  const rows = await prisma.$transaction(async (tx) => {
+    await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
+
+    const ep = await tx.epica.findFirst({
+      where: {
+        id: epica_id,
+        proyecto_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!ep) {
+      const err = new Error("Épica inválida para este proyecto");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    return tx.tarea.findMany({
+      where: { proyecto_id, epica_id, eliminado: false },
+      orderBy: [{ orden: "asc" }, { fecha_inicio_plan: "asc" }],
+      select: {
+        id: true,
+        nombre: true,
+        responsable_id: true,
+        fecha_inicio_plan: true,
+        dias_plan: true,
+        estado: true,
+        avance: true,
+      },
+    });
+  });
+
+  return reply.send({ ok: true, rows });
 }
 
 /* ========== DETALLE ========== */
@@ -163,8 +229,6 @@ export async function getTarea(request, reply) {
   return reply.send({ ok: true, row });
 }
 
-/* ========== CREAR (responsable debe ser miembro del proyecto) ========== */
-/* ========== CREAR (responsable debe ser miembro del proyecto) ========== */
 export async function createTarea(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
@@ -174,20 +238,24 @@ export async function createTarea(request, reply) {
     descripcion,
     responsable_id,
     prioridad,
-    // INPUTS DE FECHA / DÍAS
+    epica_id,
     fecha_inicio_plan,
     dias_plan,
     fecha_inicio_real,
     dias_reales,
-    detalles, // array opcional de subtareas
+    detalles,
   } = body;
+
+  if (!epica_id) return httpError(reply, 400, "Debes indicar epica_id");
 
   let fip = parseDate(fecha_inicio_plan);
   let diasPlan = toIntOrNull(dias_plan);
 
-  // Si NO vienen fechas plan válidas en la tarea,
-  // pero SÍ vienen subtareas, calculamos rango plan desde ellas
-  if ((!fip || !diasPlan || diasPlan <= 0) && Array.isArray(detalles) && detalles.length > 0) {
+  if (
+    (!fip || !diasPlan || diasPlan <= 0) &&
+    Array.isArray(detalles) &&
+    detalles.length > 0
+  ) {
     let minInicioPlan = null;
     let maxFinPlan = null;
 
@@ -199,7 +267,7 @@ export async function createTarea(request, reply) {
         return httpError(
           reply,
           400,
-          `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`
+          `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`,
         );
       }
 
@@ -213,7 +281,7 @@ export async function createTarea(request, reply) {
       fip = minInicioPlan;
       const MS_PER_DAY = 24 * 60 * 60 * 1000;
       const diffDays = Math.round(
-        (maxFinPlan.getTime() - minInicioPlan.getTime()) / MS_PER_DAY
+        (maxFinPlan.getTime() - minInicioPlan.getTime()) / MS_PER_DAY,
       );
       diasPlan = Math.max(1, diffDays + 1);
     }
@@ -223,7 +291,7 @@ export async function createTarea(request, reply) {
     return httpError(
       reply,
       400,
-      "Debes indicar fecha de inicio plan y días plan mayor a 0 (o definir subtareas con fechas válidas)"
+      "Debes indicar fecha de inicio plan y días plan mayor a 0 (o definir subtareas con fechas válidas)",
     );
   }
 
@@ -240,10 +308,27 @@ export async function createTarea(request, reply) {
     diasPlan != null && diasReales != null ? diasReales - diasPlan : null;
 
   const row = await prisma.$transaction(async (tx) => {
-    // 1) seguridad: proyecto pertenece a la empresa
     await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
 
-    // 2) validar responsable principal (si viene) como miembro del proyecto
+    const epica = await tx.epica.findFirst({
+      where: {
+        id: epica_id,
+        proyecto_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true },
+    });
+    if (!epica) {
+      const err = new Error("Épica inválida para este proyecto");
+      err.statusCode = 400;
+      throw err;
+    }
+
     if (responsable_id) {
       const miembro = await tx.proyectoMiembro.findFirst({
         where: {
@@ -270,10 +355,10 @@ export async function createTarea(request, reply) {
       }
     }
 
-    // 3) crear TAREA base
     const tarea = await tx.tarea.create({
       data: {
         proyecto_id,
+        epica_id,
         nombre,
         descripcion,
         responsable_id: responsable_id || null,
@@ -286,11 +371,10 @@ export async function createTarea(request, reply) {
         fecha_inicio_real: fir,
         fecha_fin_real: ffr,
         dias_reales: diasReales || null,
-        dias_desviacion: diasDesviacion,
+        dias_desviacion: diasDesviacion, // ✅ esto es de Tarea (sí existe)
       },
     });
 
-    // 4) si vienen subtareas en el body, crearlas acá
     if (Array.isArray(detalles) && detalles.length > 0) {
       for (const d of detalles) {
         const dfip = parseDate(d.fecha_inicio_plan);
@@ -298,7 +382,7 @@ export async function createTarea(request, reply) {
 
         if (!dfip || !ddiasPlan || ddiasPlan <= 0) {
           const err = new Error(
-            `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`
+            `Debes indicar fecha inicio y días plan (>0) en subtarea "${d.titulo}"`,
           );
           err.statusCode = 400;
           throw err;
@@ -315,13 +399,8 @@ export async function createTarea(request, reply) {
             ? addDaysInclusive(dfir, ddiasReales)
             : null;
 
-        // validar responsable de la subtarea (si viene)
         if (d.responsable_id) {
-          await assertEmpleadoInEmpresa(
-            tx,
-            d.responsable_id,
-            scope.empresaId
-          );
+          await assertEmpleadoInEmpresa(tx, d.responsable_id, scope.empresaId);
         }
 
         const diasDesviacionDet =
@@ -349,12 +428,14 @@ export async function createTarea(request, reply) {
       }
     }
 
+    // ✅ ahora sí: recompute NO toca campos inexistentes en Epica
+    await recomputeEpicaFromTareas(tx, epica_id);
+
     return tarea;
   });
 
   return reply.code(201).send({ ok: true, row });
 }
-
 
 /* ========== ACTUALIZAR ========== */
 export async function updateTarea(request, reply) {
@@ -402,9 +483,9 @@ export async function updateTarea(request, reply) {
       if (!miembro) {
         throw Object.assign(
           new Error(
-            "Responsable no es miembro de este proyecto o está deshabilitado"
+            "Responsable no es miembro de este proyecto o está deshabilitado",
           ),
-          { statusCode: 403 }
+          { statusCode: 403 },
         );
       }
     }
@@ -423,26 +504,20 @@ export async function updateTarea(request, reply) {
     if (!fip || !diasPlan || diasPlan <= 0) {
       throw Object.assign(
         new Error(
-          "Debes indicar fecha de inicio plan y días plan mayor a 0 para la tarea"
+          "Debes indicar fecha de inicio plan y días plan mayor a 0 para la tarea",
         ),
-        { statusCode: 400 }
+        { statusCode: 400 },
       );
     }
 
     const ffp = addDaysInclusive(fip, diasPlan);
 
     // REAL: fecha inicio + días => fecha fin (opcional)
-    const fir = Object.prototype.hasOwnProperty.call(
-      data,
-      "fecha_inicio_real"
-    )
+    const fir = Object.prototype.hasOwnProperty.call(data, "fecha_inicio_real")
       ? parseDate(data.fecha_inicio_real)
       : tarea.fecha_inicio_real;
 
-    const diasReales = Object.prototype.hasOwnProperty.call(
-      data,
-      "dias_reales"
-    )
+    const diasReales = Object.prototype.hasOwnProperty.call(data, "dias_reales")
       ? toIntOrNull(data.dias_reales)
       : tarea.dias_reales;
 
@@ -491,7 +566,6 @@ export async function updateTarea(request, reply) {
 
   return reply.send({ ok: true, row });
 }
-
 
 /* ========== HARD DELETE ========== */
 export async function deleteTarea(request, reply) {
@@ -635,7 +709,7 @@ export async function addDependencia(request, reply) {
     if (!t1 || !t2)
       throw Object.assign(
         new Error("Tarea o predecesora inexistente/deshabilitada"),
-        { statusCode: 404 }
+        { statusCode: 404 },
       );
     if (t1.proyecto_id !== t2.proyecto_id)
       throw Object.assign(new Error("Deben ser del mismo proyecto"), {
@@ -679,4 +753,318 @@ export async function removeDependencia(request, reply) {
 
   await prisma.tareaDependencia.delete({ where: { id } });
   return reply.send({ ok: true, msg: "Dependencia eliminada" });
+}
+
+//modal para asignar épica a tarea, tarea a epica, subtareas a tareas.
+
+// ✅ 1) Asignar épica a tarea existente (para "Sin épica")
+export async function assignEpicaToTarea(request, reply) {
+  const scope = resolveScope(request);
+  const { tarea_id } = request.params || {};
+  const { epica_id } = request.body || {};
+
+  if (!tarea_id) return httpError(reply, 400, "Falta tarea_id");
+  if (!epica_id) return httpError(reply, 400, "Falta epica_id");
+
+  const row = await prisma.$transaction(async (tx) => {
+    const tarea = await tx.tarea.findFirst({
+      where: {
+        id: tarea_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true, proyecto_id: true, epica_id: true },
+    });
+
+    if (!tarea) {
+      const err = new Error("Tarea no encontrada o no pertenece a tu empresa");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const epica = await tx.epica.findFirst({
+      where: {
+        id: epica_id,
+        proyecto_id: tarea.proyecto_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!epica) {
+      const err = new Error("Épica inválida para este proyecto");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const updated = await tx.tarea.update({
+      where: { id: tarea_id },
+      data: { epica_id },
+    });
+
+    await recomputeEpicaFromTareas(tx, epica_id);
+    if (tarea.epica_id && tarea.epica_id !== epica_id) {
+      await recomputeEpicaFromTareas(tx, tarea.epica_id);
+    }
+
+    return updated;
+  });
+
+  return reply.code(200).send({ ok: true, row });
+}
+
+// ✅ 2) Crear varias tareas en una épica (modo ítems)
+export async function createTareasBatch(request, reply) {
+  const scope = resolveScope(request);
+  const { proyecto_id, epica_id, tareas } = request.body || {};
+
+  if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
+  if (!epica_id) return httpError(reply, 400, "Falta epica_id");
+  if (!Array.isArray(tareas) || tareas.length === 0) {
+    return httpError(reply, 400, "Debes enviar tareas[]");
+  }
+
+  const rows = await prisma.$transaction(async (tx) => {
+    await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
+
+    const epica = await tx.epica.findFirst({
+      where: {
+        id: epica_id,
+        proyecto_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!epica) {
+      const err = new Error("Épica inválida para este proyecto");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const created = [];
+
+    for (const t of tareas) {
+      const nombre = String(t?.nombre || "").trim();
+      if (!nombre) continue;
+
+      let responsable_id = t?.responsable_id;
+      responsable_id =
+        responsable_id == null ? null : String(responsable_id).trim();
+      if (!responsable_id) responsable_id = null;
+
+      if (responsable_id) {
+        // ✅ valida que exista como EMPLEADO (no como miembro)
+        const emp = await tx.empleado.findFirst({
+          where: {
+            id: responsable_id,
+            eliminado: false,
+            usuario: {
+              empresa_id: scope.empresaId,
+              empresa: { eliminado: false },
+            },
+          },
+          select: { id: true },
+        });
+
+        if (!emp) {
+          // si no quieres que rompa, nulifica
+          responsable_id = null;
+        }
+      }
+
+      // en batch, por simplicidad exigimos fecha_inicio_plan + dias_plan
+      const fip = parseDate(t.fecha_inicio_plan);
+      const diasPlan = toIntOrNull(t.dias_plan);
+
+      if (!fip || !diasPlan || diasPlan <= 0) {
+        const err = new Error(
+          `Debes indicar fecha_inicio_plan y dias_plan (>0) en tarea "${nombre}"`,
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const ffp = addDaysInclusive(fip, diasPlan);
+
+      const tarea = await tx.tarea.create({
+        data: {
+          proyecto_id,
+          epica_id,
+          nombre,
+          descripcion: t.descripcion?.trim() || null,
+          responsable_id,
+          prioridad: t.prioridad || null,
+          estado: "pendiente",
+          avance: 0,
+          fecha_inicio_plan: fip,
+          fecha_fin_plan: ffp,
+          dias_plan: diasPlan,
+          fecha_inicio_real: null,
+          fecha_fin_real: null,
+          dias_reales: null,
+          dias_desviacion: null,
+        },
+      });
+
+      created.push(tarea);
+    }
+
+    await recomputeEpicaFromTareas(tx, epica_id);
+    return created;
+  });
+
+  return reply.code(201).send({ ok: true, rows });
+}
+
+// ✅ (opcional) Quitar épica a una tarea -> vuelve a "Sin épica"
+export async function unassignEpicaFromTarea(request, reply) {
+  const scope = resolveScope(request);
+  const { tarea_id } = request.params || {};
+
+  if (!tarea_id) return httpError(reply, 400, "Falta tarea_id");
+
+  const row = await prisma.$transaction(async (tx) => {
+    const tarea = await tx.tarea.findFirst({
+      where: {
+        id: tarea_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true, epica_id: true },
+    });
+
+    if (!tarea) {
+      const err = new Error("Tarea no encontrada o no pertenece a tu empresa");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const updated = await tx.tarea.update({
+      where: { id: tarea_id },
+      data: { epica_id: null },
+    });
+
+    if (tarea.epica_id) {
+      await recomputeEpicaFromTareas(tx, tarea.epica_id);
+    }
+
+    return updated;
+  });
+
+  return reply.code(200).send({ ok: true, row });
+}
+
+// ✅ 3) Agregar varias subtareas a una tarea existente
+export async function addDetallesToTarea(request, reply) {
+  const scope = resolveScope(request);
+  const { tarea_id, detalles } = request.body || {};
+
+  if (!tarea_id) return httpError(reply, 400, "Falta tarea_id");
+  if (!Array.isArray(detalles) || detalles.length === 0) {
+    return httpError(reply, 400, "Debes enviar detalles[]");
+  }
+
+  const rows = await prisma.$transaction(async (tx) => {
+    const tarea = await tx.tarea.findFirst({
+      where: {
+        id: tarea_id,
+        eliminado: false,
+        proyecto: {
+          empresa_id: scope.empresaId,
+          eliminado: false,
+          empresa: { eliminado: false },
+        },
+      },
+      select: { id: true, epica_id: true },
+    });
+
+    if (!tarea) {
+      const err = new Error("Tarea no encontrada o no pertenece a tu empresa");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const created = [];
+
+    for (const d of detalles) {
+      const titulo = String(d?.titulo || "").trim();
+      if (!titulo) continue;
+
+      const dfip = parseDate(d.fecha_inicio_plan);
+      const ddiasPlan = toIntOrNull(d.dias_plan);
+
+      if (!dfip || !ddiasPlan || ddiasPlan <= 0) {
+        const err = new Error(
+          `Debes indicar fecha inicio y días plan (>0) en subtarea "${titulo}"`,
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const dffp = addDaysInclusive(dfip, ddiasPlan);
+
+      const dfir = d.fecha_inicio_real ? parseDate(d.fecha_inicio_real) : null;
+      const ddiasReales = toIntOrNull(d.dias_reales);
+      const dffr =
+        dfir && ddiasReales && ddiasReales > 0
+          ? addDaysInclusive(dfir, ddiasReales)
+          : null;
+
+      if (d.responsable_id) {
+        await assertEmpleadoInEmpresa(tx, d.responsable_id, scope.empresaId);
+      }
+
+      const diasDesviacionDet =
+        ddiasPlan != null && ddiasReales != null
+          ? ddiasReales - ddiasPlan
+          : null;
+
+      const det = await tx.tareaDetalle.create({
+        data: {
+          tarea_id,
+          titulo,
+          descripcion: d.descripcion ?? null,
+          responsable_id: d.responsable_id || null,
+          estado: "pendiente",
+          avance: 0,
+          fecha_inicio_plan: dfip,
+          fecha_fin_plan: dffp,
+          dias_plan: ddiasPlan,
+          fecha_inicio_real: dfir,
+          fecha_fin_real: dffr,
+          dias_reales: ddiasReales || null,
+          dias_desviacion: diasDesviacionDet,
+        },
+      });
+
+      created.push(det);
+    }
+
+    if (tarea.epica_id) {
+      await recomputeEpicaFromTareas(tx, tarea.epica_id);
+    }
+
+    return created;
+  });
+
+  return reply.code(201).send({ ok: true, rows });
 }

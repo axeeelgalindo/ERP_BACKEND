@@ -5,9 +5,12 @@ import {
   createCotizacion,
   updateCotizacion,
   updateCotizacionEstado,
-  importCotizacionFromPdf,
-  importCotizacionesFromPdfBatch
 } from "./controllers.js";
+
+import {
+  importCotizacionFromPdf,
+  importCotizacionesFromPdfBatch,
+} from "./pdf.controllers.js";
 
 export default async function cotizacionesRoutes(server) {
   // ✅ Protege todas las rutas del módulo
@@ -31,5 +34,4 @@ export default async function cotizacionesRoutes(server) {
   server.post("/cotizaciones/:id/estado", updateCotizacionEstado);
   server.post("/cotizaciones/import/pdf", importCotizacionFromPdf);
   server.post("/cotizaciones/import/pdf/batch", importCotizacionesFromPdfBatch);
-
 }

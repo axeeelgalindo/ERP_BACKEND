@@ -50,7 +50,7 @@ async function assertTareaInEmpresa(tx, tareaId, empresaId) {
 
   if (!t) {
     const err = new Error(
-      "Tarea no pertenece a tu empresa o está deshabilitada"
+      "Tarea no pertenece a tu empresa o está deshabilitada",
     );
     err.statusCode = 403;
     throw err;
@@ -76,7 +76,7 @@ async function assertEmpleadoInEmpresa(tx, empleadoId, empresaId) {
 
   if (!emp) {
     const err = new Error(
-      "Responsable no es empleado de tu empresa o está deshabilitado"
+      "Responsable no es empleado de tu empresa o está deshabilitado",
     );
     err.statusCode = 403;
     throw err;
@@ -93,165 +93,68 @@ async function assertEmpleadoInEmpresa(tx, empleadoId, empresaId) {
  * - fechas plan y real de la tarea = rango mínimo/máximo de sus subtareas
  * - dias_desviacion = dias_reales (rango real) - dias_plan (rango plan)
  */
-async function recomputeTareaFromDetalles(tx, tareaId) {
+export async function recomputeTareaFromDetalles(tx, tareaId) {
   const detalles = await tx.tareaDetalle.findMany({
     where: { tarea_id: tareaId, eliminado: false },
-    select: {
-      estado: true,
-      dias_plan: true,
-      dias_reales: true,
-      horas_plan: true,
-      horas_real: true,
-      costo_plan: true,
-      costo_real: true,
-      responsable_id: true,
-      // para rango PLAN
-      fecha_inicio_plan: true,
-      fecha_fin_plan: true,
-      // para rango REAL
-      fecha_inicio_real: true,
-      fecha_fin_real: true,
-      // por si quieres usar la desviación individual
-      dias_desviacion: true,
-    },
+    select: { avance: true, estado: true },
   });
 
+  // Si no hay subtareas, deja avance tal cual (o pon 0 si prefieres)
   if (!detalles.length) {
-    await tx.tarea.update({
-      where: { id: tareaId },
-      data: {
-        avance: 0,
-        estado: "pendiente",
-        total_dias_plan: null,
-        total_dias_reales: null,
-        total_horas_plan: null,
-        total_horas_reales: null,
-        total_costo_plan: null,
-        total_costo_real: null,
-        total_responsables: 0,
-        // no tocamos fechas si no hay subtareas
-      },
+    return null;
+  }
+
+  const avances = detalles.map((d) => {
+    const a = Number(d.avance ?? 0);
+    if (!Number.isFinite(a)) return 0;
+    return Math.max(0, Math.min(100, a));
+  });
+
+  const avg = Math.round(avances.reduce((s, a) => s + a, 0) / avances.length);
+
+  let estado = "pendiente";
+  if (avg >= 100) estado = "completada";
+  else if (avg > 0) estado = "en_progreso";
+
+  const updated = await tx.tarea.update({
+    where: { id: tareaId },
+    data: { avance: avg, estado },
+    select: { id: true, epica_id: true, avance: true, estado: true },
+  });
+
+  return updated; // trae epica_id para seguir recompute épica
+}
+export async function recomputeEpicaFromTareas(tx, epicaId) {
+  const tareas = await tx.tarea.findMany({
+    where: { epica_id: epicaId, eliminado: false },
+    select: { avance: true, estado: true },
+  });
+
+  if (!tareas.length) {
+    await tx.epica.update({
+      where: { id: epicaId },
+      data: { avance: 0, estado: "pendiente" },
     });
     return;
   }
 
-  const total = detalles.length;
-  const completadas = detalles.filter((d) => d.estado === "completada").length;
-  const avance = Math.round((completadas / total) * 100);
+  const avances = tareas.map((t) => {
+    const a = Number(t.avance ?? 0);
+    if (!Number.isFinite(a)) return 0;
+    return Math.max(0, Math.min(100, a));
+  });
 
-  let estado;
-  if (avance >= 100) estado = "completada";
-  else if (avance > 0) estado = "en_progreso";
-  else estado = "pendiente";
+  const avg = Math.round(avances.reduce((s, a) => s + a, 0) / avances.length);
 
-  // ====== TOTALES ======
-  const total_dias_plan = detalles.reduce(
-    (sum, d) => sum + (d.dias_plan || 0),
-    0
-  );
-  const total_dias_reales = detalles.reduce(
-    (sum, d) => sum + (d.dias_reales || 0),
-    0
-  );
-  const total_horas_plan = detalles.reduce(
-    (sum, d) => sum + (d.horas_plan || 0),
-    0
-  );
-  const total_horas_reales = detalles.reduce(
-    (sum, d) => sum + (d.horas_real || 0),
-    0
-  );
-  const total_costo_plan = detalles.reduce(
-    (sum, d) => sum + (d.costo_plan || 0),
-    0
-  );
-  const total_costo_real = detalles.reduce(
-    (sum, d) => sum + (d.costo_real || 0),
-    0
-  );
+  let estado = "pendiente";
+  if (avg >= 100) estado = "completada";
+  else if (avg > 0) estado = "en_progreso";
 
-  const responsablesSet = new Set(
-    detalles
-      .map((d) => d.responsable_id)
-      .filter((id) => id && typeof id === "string")
-  );
-  const total_responsables = responsablesSet.size;
-
-  // ====== RANGO PLAN DEL PADRE ======
-  let minInicioPlan = null;
-  let maxFinPlan = null;
-
-  // ====== RANGO REAL DEL PADRE ======
-  let minInicioReal = null;
-  let maxFinReal = null;
-
-  for (const d of detalles) {
-    if (d.fecha_inicio_plan && d.fecha_fin_plan) {
-      const fi = d.fecha_inicio_plan;
-      const ff = d.fecha_fin_plan;
-
-      if (!minInicioPlan || fi < minInicioPlan) minInicioPlan = fi;
-      if (!maxFinPlan || ff > maxFinPlan) maxFinPlan = ff;
-    }
-
-    if (d.fecha_inicio_real && d.fecha_fin_real) {
-      const fir = d.fecha_inicio_real;
-      const ffr = d.fecha_fin_real;
-
-      if (!minInicioReal || fir < minInicioReal) minInicioReal = fir;
-      if (!maxFinReal || ffr > maxFinReal) maxFinReal = ffr;
-    }
-  }
-
-  let dias_plan = null;
-  if (minInicioPlan && maxFinPlan) {
-    dias_plan = daysBetweenInclusive(minInicioPlan, maxFinPlan);
-  }
-
-  let dias_reales = null;
-  if (minInicioReal && maxFinReal) {
-    dias_reales = daysBetweenInclusive(minInicioReal, maxFinReal);
-  }
-
-  let dias_desviacion = null;
-  if (dias_plan != null && dias_reales != null) {
-    dias_desviacion = dias_reales - dias_plan; // positivo = se atrasó
-  }
-
-  await tx.tarea.update({
-    where: { id: tareaId },
-    data: {
-      avance,
-      estado,
-      total_dias_plan,
-      total_dias_reales,
-      total_horas_plan,
-      total_horas_reales,
-      total_costo_plan,
-      total_costo_real,
-      total_responsables,
-
-      ...(minInicioPlan && maxFinPlan
-        ? {
-            fecha_inicio_plan: minInicioPlan,
-            fecha_fin_plan: maxFinPlan,
-            dias_plan,
-          }
-        : {}),
-
-      ...(minInicioReal && maxFinReal
-        ? {
-            fecha_inicio_real: minInicioReal,
-            fecha_fin_real: maxFinReal,
-            dias_reales,
-          }
-        : {}),
-
-      ...(dias_desviacion != null ? { dias_desviacion } : {}),
-    },
+  await tx.epica.update({
+    where: { id: epicaId },
+    data: { avance: avg, estado },
   });
 }
-
 
 /* ========== LISTAR DETALLES DE UNA TAREA ========== */
 export async function listTareaDetalles(request, reply) {
@@ -312,7 +215,7 @@ export async function createTareaDetalle(request, reply) {
     return httpError(
       reply,
       400,
-      "Debes indicar fecha inicio y días plan (>0) en el detalle"
+      "Debes indicar fecha inicio y días plan (>0) en el detalle",
     );
 
   const ffp = addDaysInclusive(fip, diasPlan);
@@ -338,7 +241,7 @@ export async function createTareaDetalle(request, reply) {
       const emp = await assertEmpleadoInEmpresa(
         tx,
         responsableIdFinal,
-        scope.empresaId
+        scope.empresaId,
       );
       valorHora = valorHoraFromEmpleado(emp);
     }
@@ -381,7 +284,10 @@ export async function createTareaDetalle(request, reply) {
       },
     });
 
-    await recomputeTareaFromDetalles(tx, tarea_id);
+    const tareaUpdated = await recomputeTareaFromDetalles(tx, tarea_id);
+    if (tareaUpdated?.epica_id) {
+      await recomputeEpicaFromTareas(tx, tareaUpdated.epica_id);
+    }
 
     return created;
   });
@@ -435,9 +341,9 @@ export async function updateTareaDetalle(request, reply) {
     if (!fip || !diasPlan || diasPlan <= 0)
       throw Object.assign(
         new Error(
-          "Debes indicar fecha inicio y días plan (>0) en el detalle de tarea"
+          "Debes indicar fecha inicio y días plan (>0) en el detalle de tarea",
         ),
-        { statusCode: 400 }
+        { statusCode: 400 },
       );
 
     const ffp = addDaysInclusive(fip, diasPlan);
@@ -509,7 +415,7 @@ export async function updateTareaDetalle(request, reply) {
     // ===== RESPONSABLE / COSTOS (igual que antes) =====
     const responsableIdFinal = Object.prototype.hasOwnProperty.call(
       data,
-      "responsable_id"
+      "responsable_id",
     )
       ? data.responsable_id
       : current.responsable_id;
@@ -519,7 +425,7 @@ export async function updateTareaDetalle(request, reply) {
       const emp = await assertEmpleadoInEmpresa(
         tx,
         responsableIdFinal,
-        scope.empresaId
+        scope.empresaId,
       );
       valorHora = valorHoraFromEmpleado(emp);
     }
@@ -561,7 +467,10 @@ export async function updateTareaDetalle(request, reply) {
       },
     });
 
-    await recomputeTareaFromDetalles(tx, tareaId);
+    const tareaUpdated = await recomputeTareaFromDetalles(tx, tareaId);
+    if (tareaUpdated?.epica_id) {
+      await recomputeEpicaFromTareas(tx, tareaUpdated.epica_id);
+    }
 
     return updated;
   });

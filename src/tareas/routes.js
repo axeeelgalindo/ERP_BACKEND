@@ -8,6 +8,12 @@ import {
   updateTarea,
   disableTarea,
   restoreTarea,
+  assignEpicaToTarea,
+  createTareasBatch,
+  unassignEpicaFromTarea,
+  addDetallesToTarea,
+  // ✅ NUEVO (debes exportarlo desde controllers.js)
+  listTareasByEpica,
 } from "./controllers.js";
 
 import {
@@ -19,7 +25,6 @@ import {
   TareaUpdateBody,
 } from "./validators.js";
 
-// 👇 nuevos imports
 import {
   listTareaDetalles,
   createTareaDetalle,
@@ -34,27 +39,31 @@ import {
   TareaDetalleListByTareaParam,
 } from "./detalles.validators.js";
 
+import {
+  createEpica,
+  disableEpica,
+  getEpica,
+  listEpicas,
+  restoreEpica,
+  updateEpica,
+} from "./epicas.controllers.js";
+
 export default async function tareasRoutes(server) {
-  // Si tu auth plugin decoró authenticate, úsalo
   const guard = server.authenticate ? { preHandler: [server.authenticate] } : {};
 
   // ===== TAREAS =====
-  server.get(
-    "/tareas",
-    { schema: { querystring: TareaQuery }, ...guard },
-    listTareas
-  );
-  server.get(
-    "/tareas/:id",
-    { schema: { params: TareaIdParam }, ...guard },
-    getTarea
-  );
 
-  server.post(
-    "/tareas/add",
-    { schema: { body: TareaCreateBody }, ...guard },
-    createTarea
-  );
+  // listado general (tu existente)
+  server.get("/tareas", { schema: { querystring: TareaQuery }, ...guard }, listTareas);
+
+  // ✅ listado por épica (para wizard)
+  // GET /tareas/by-epica?proyecto_id=...&epica_id=...
+  server.get("/tareas/by-epica", { ...guard }, listTareasByEpica);
+
+  server.get("/tareas/:id", { schema: { params: TareaIdParam }, ...guard }, getTarea);
+
+  server.post("/tareas/add", { schema: { body: TareaCreateBody }, ...guard }, createTarea);
+
   server.patch(
     "/tareas/update/:id",
     { schema: { params: TareaIdParam, body: TareaUpdateBody }, ...guard },
@@ -62,30 +71,15 @@ export default async function tareasRoutes(server) {
   );
 
   // soft delete / restore
-  server.patch(
-    "/tareas/disable/:id",
-    { schema: { params: TareaIdParam }, ...guard },
-    disableTarea
-  );
-  server.patch(
-    "/tareas/restore/:id",
-    { schema: { params: TareaIdParam }, ...guard },
-    restoreTarea
-  );
+  server.patch("/tareas/disable/:id", { schema: { params: TareaIdParam }, ...guard }, disableTarea);
+  server.patch("/tareas/restore/:id", { schema: { params: TareaIdParam }, ...guard }, restoreTarea);
 
   // hard delete
-  server.delete(
-    "/tareas/delete/:id",
-    { schema: { params: TareaIdParam }, ...guard },
-    deleteTarea
-  );
+  server.delete("/tareas/delete/:id", { schema: { params: TareaIdParam }, ...guard }, deleteTarea);
 
   // dependencias
-  server.post(
-    "/tareas/dependencias",
-    { schema: { body: TareaDepCreate }, ...guard },
-    addDependencia
-  );
+  server.post("/tareas/dependencias", { schema: { body: TareaDepCreate }, ...guard }, addDependencia);
+
   server.delete(
     "/tareas/dependencias/:id",
     { schema: { params: TareaDepIdParam }, ...guard },
@@ -94,34 +88,49 @@ export default async function tareasRoutes(server) {
 
   // ===== DETALLES DE TAREA (SUBTAREAS) =====
 
-  // listar detalles de una tarea
   server.get(
     "/tareas/:tareaId/detalles",
     { schema: { params: TareaDetalleListByTareaParam }, ...guard },
     listTareaDetalles
   );
 
-  // crear detalle
   server.post(
     "/tareas-detalle/add",
     { schema: { body: TareaDetalleCreateBody }, ...guard },
     createTareaDetalle
   );
 
-  // actualizar detalle
   server.patch(
     "/tareas-detalle/update/:id",
-    {
-      schema: { params: TareaDetalleIdParam, body: TareaDetalleUpdateBody },
-      ...guard,
-    },
+    { schema: { params: TareaDetalleIdParam, body: TareaDetalleUpdateBody }, ...guard },
     updateTareaDetalle
   );
 
-  // eliminar detalle
   server.delete(
     "/tareas-detalle/delete/:id",
     { schema: { params: TareaDetalleIdParam }, ...guard },
     deleteTareaDetalle
   );
+
+  // ✅ batch subtareas
+  server.post("/tareas-detalle/batch-add", { ...guard }, addDetallesToTarea);
+
+  // ===== EPICAS =====
+  server.get("/epicas", { ...guard }, listEpicas); // ?proyectoId=...
+  server.get("/epicas/:id", { ...guard }, getEpica);
+  server.post("/epicas/add", { ...guard }, createEpica);
+  server.put("/epicas/update/:id", { ...guard }, updateEpica);
+  server.patch("/epicas/disable/:id", { ...guard }, disableEpica);
+  server.post("/epicas/:id/restore", { ...guard }, restoreEpica);
+
+  // ===== FUNCIONES EXTRA =====
+
+  // ✅ asignar épica a tarea existente (sin épica)
+  server.patch("/tareas/assign-epica/:tarea_id", { ...guard }, assignEpicaToTarea);
+
+  // ✅ quitar épica (volver a "Sin épica")
+  server.patch("/tareas/unassign-epica/:tarea_id", { ...guard }, unassignEpicaFromTarea);
+
+  // ✅ crear varias tareas en una épica
+  server.post("/tareas/batch-add", { ...guard }, createTareasBatch);
 }
