@@ -194,12 +194,19 @@ function normStatusToEstado(s) {
 /* =========================
    POST /proyectos/:id/jira/import
    ========================= */
+/* =========================
+   POST /proyectos/:id/jira/import
+   Reglas nuevas:
+   - Epic => epica
+   - Historia => tarea
+   - Tarea => tarea
+   - Parent: usa "Principal" si viene; si no, cuelga del último Epic por orden.
+========================= */
 export async function importJiraCSV(request, reply) {
   const scope = resolveScope(request);
   const { id: proyectoId } = request.params;
 
   const overwrite = parseBool(request.query?.overwrite, true);
-  const hoursPerDay = Number(request.query?.hoursPerDay) || 8;
 
   let rows = null;
 
@@ -208,7 +215,10 @@ export async function importJiraCSV(request, reply) {
     for await (const part of parts) {
       if (part.type === "file") {
         const buffer = await part.toBuffer();
-        const text = buffer.toString("utf8");
+        let text = buffer.toString("utf8");
+        if (text.includes("Ã")) {
+          text = buffer.toString("latin1"); // fallback típico Jira/Excel
+        }
         const firstLine =
           text.split(/\r?\n/).find((l) => l.trim().length) || "";
         const delimiter = detectDelimiter(firstLine);
@@ -252,7 +262,7 @@ export async function importJiraCSV(request, reply) {
     .filter(Boolean);
 
   // -------------------------
-  // Normalizar filas según headers reales (tu CSV)
+  // Normalizar filas según headers reales (tu CSV Jira)
   // -------------------------
   const normalized = rows
     .map((r) => {
@@ -263,14 +273,18 @@ export async function importJiraCSV(request, reply) {
         "Título",
         "Title",
       ]);
+
       const issueType = getCol(r, [
         "Issue Type",
         "Tipo",
         "Tipo de incidencia",
         "Tipo de Incidencia",
         "Type",
+        "Tipo de Incidencia",
       ]);
+
       const status = getCol(r, ["Status", "Estado"]);
+
       const assignee = getCol(r, [
         "Assignee",
         "Persona asignada",
@@ -280,6 +294,7 @@ export async function importJiraCSV(request, reply) {
       ]);
 
       const sprint = getCol(r, ["Sprint", "Sprints"]);
+
       const issueColor = getCol(r, ["Issue color", "Color", "Color de issue"]);
 
       const start = getCol(r, [
@@ -331,280 +346,301 @@ export async function importJiraCSV(request, reply) {
         parentKey: parentKey ? String(parentKey).trim() : null,
       };
     })
-    .filter((x) => x.summary && x.key);
+    .filter((x) => x.key && x.summary);
 
   // -------------------------
-  // Indexar por key y agrupar hijos por Principal (parentKey)
+  // Helpers
   // -------------------------
-  const byKey = new Map(); // key -> issue row
-  const childrenByParent = new Map(); // parentKey -> [rows]
-
-  for (const it of normalized) {
-    byKey.set(it.key, it);
-
-    if (it.parentKey) {
-      if (!childrenByParent.has(it.parentKey))
-        childrenByParent.set(it.parentKey, []);
-      childrenByParent.get(it.parentKey).push(it);
-    }
+  function isEpicType(issueType) {
+    const t = normName(issueType);
+    return t === "epic" || t.includes("epic") || t.includes("epica");
   }
-
-  // Padres = (a) todos los que tienen hijos, (b) también los top-level sin parentKey
-  const parentKeys = new Set();
-  for (const pk of childrenByParent.keys()) parentKeys.add(pk);
-  for (const it of normalized) {
-    if (!it.parentKey) parentKeys.add(it.key);
-  }
-
-  const created = {
-    tareasCreated: 0,
-    tareasUpdated: 0,
-    detallesCreated: 0,
-    detallesUpdated: 0,
-    asignados: 0,
-    skippedDetalles: 0,
-  };
 
   function estadoToAvance(estado) {
     return estado === "completa" ? 100 : 0;
   }
 
-  function calcAvancePadreFromChildren(children) {
-    if (!children.length) return null;
-    const avances = children.map((c) =>
-      normStatusToEstado(c.status) === "completa" ? 100 : 0,
-    );
-    const avg = Math.round(avances.reduce((s, a) => s + a, 0) / avances.length);
-    return Math.max(0, Math.min(100, avg));
+  function daysBetweenInclusive(a, b) {
+    const A = new Date(a);
+    const B = new Date(b);
+    A.setHours(0, 0, 0, 0);
+    B.setHours(0, 0, 0, 0);
+    const ms = B.getTime() - A.getTime();
+    const days = Math.floor(ms / (1000 * 60 * 60 * 24)) + 1;
+    return Math.max(1, days);
   }
 
   // -------------------------
-  // Import por cada padre
+  // 1) Separar épicas y crear índice
   // -------------------------
-  for (const pKey of parentKeys) {
-    const parentRow = byKey.get(pKey) || null;
-    const children = childrenByParent.get(pKey) || [];
+  const epicRows = normalized.filter((r) => isEpicType(r.issueType));
+  const byEpicKey = new Map(); // epicKey -> epicRow
+  for (const er of epicRows) byEpicKey.set(er.key, er);
 
-    // Nombre del padre: "O2-2 Automatización ..." (key + summary)
-    const parentNombre = parentRow
-      ? `${parentRow.key} ${parentRow.summary}`.trim()
-      : `JIRA ${pKey}`.trim();
-    // Estado base desde Jira padre (si existe)
-    let parentEstado = parentRow
-      ? normStatusToEstado(parentRow.status)
-      : "pendiente";
+  const created = {
+    epicasCreated: 0,
+    epicasUpdated: 0,
+    tareasCreated: 0,
+    tareasUpdated: 0,
+    asignados: 0,
+    skippedTareas: 0,
+    sinEpic: 0,
+  };
 
-    // ✅ Rollup desde subtareas (si hay)
-    if (children.length > 0) {
-      const estadosHijos = children.map((c) => normStatusToEstado(c.status));
+  // -------------------------
+  // 2) Upsert de EPICAS (solo Jira Epic)
+  //    Estado/avance de épica se calculará luego con rollup.
+  // -------------------------
+  const epicIdByKey = new Map(); // epicKey -> epica.id
 
-      const allCompletas = estadosHijos.every((e) => e === "completa");
-      const anyEnProgreso = estadosHijos.some((e) => e === "en_progreso");
-      const allPendientes = estadosHijos.every((e) => e === "pendiente");
+  for (const er of epicRows) {
+    const epicaNombre = `${er.key} ${er.summary}`.trim();
 
-      if (allCompletas) parentEstado = "completa";
-      else if (anyEnProgreso) parentEstado = "en_progreso";
-      else if (allPendientes) parentEstado = "pendiente";
-      else parentEstado = "en_progreso"; // mixto (pendiente+completa)
-    }
-    
-    let parentAvance = estadoToAvance(parentEstado);
-    const avg = calcAvancePadreFromChildren(children);
-    if (avg != null) parentAvance = avg;
-
-    // Responsable padre
-    let responsablePadreId = null;
-    if (parentRow?.assignee) {
-      responsablePadreId = pickBestEmpleadoId(
-        parentRow.assignee,
-        empleadosMiembros,
-      );
-      if (responsablePadreId) created.asignados++;
-    }
-
-    // Fechas padre: prioriza las del padre, si no, min/max de hijos, si no, hoy
-    const starts = [];
-    const dues = [];
-
-    if (parentRow?.startDate) starts.push(parentRow.startDate);
-    if (parentRow?.dueDate) dues.push(parentRow.dueDate);
-
-    for (const ch of children) {
-      if (ch.startDate) starts.push(ch.startDate);
-      if (ch.dueDate) dues.push(ch.dueDate);
-    }
-
-    let padreInicio = starts.length
-      ? new Date(Math.min(...starts.map((d) => d.getTime())))
+    const responsableEpicaId = er.assignee
+      ? pickBestEmpleadoId(er.assignee, empleadosMiembros)
       : null;
-    let padreFin = dues.length
-      ? new Date(Math.max(...dues.map((d) => d.getTime())))
-      : null;
+    if (responsableEpicaId) created.asignados++;
 
+    // Fechas épica: usa las del epic si existen; si no, placeholders (las corregimos con rollup después)
     const hoy = new Date();
-    if (!padreInicio) padreInicio = hoy;
-    if (!padreFin) padreFin = padreInicio;
+    const ini = er.startDate || hoy;
+    const fin = er.dueDate || ini;
+    const diasPlan = daysBetweenInclusive(ini, fin);
 
-    const padreDiasPlan = daysBetweenInclusive(padreInicio, padreFin);
-
-    // Upsert por unique (proyecto_id, jira_key)
-    // Prisma suele generar: { proyecto_id_jira_key: { proyecto_id, jira_key } }
-    const tareaWhere = {
-      proyecto_id_jira_key: { proyecto_id: proyectoId, jira_key: pKey },
+    const where = {
+      proyecto_id_jira_key: { proyecto_id: proyectoId, jira_key: er.key },
     };
 
-    let tarea = null;
-
-    const existing = await prisma.tarea
-      .findUnique({ where: tareaWhere })
-      .catch(() => null);
+    const existing = await prisma.epica.findUnique({ where }).catch(() => null);
 
     if (!existing) {
-      tarea = await prisma.tarea.create({
+      const ep = await prisma.epica.create({
         data: {
           proyecto_id: proyectoId,
-          nombre: parentNombre,
+          nombre: epicaNombre,
           descripcion: null,
-          estado: parentEstado,
-          avance: parentAvance,
-          responsable_id: responsablePadreId,
-          fecha_inicio_plan: padreInicio,
-          fecha_fin_plan: padreFin,
-          dias_plan: padreDiasPlan,
+          estado: normStatusToEstado(er.status),
+          avance: estadoToAvance(normStatusToEstado(er.status)),
+
+          fecha_inicio_plan: ini,
+          fecha_fin_plan: fin,
+          dias_plan: diasPlan,
+
           source: "JIRA",
-          jira_key: pKey,
-          jira_tipo: parentRow?.issueType || null,
-          jira_estado: parentRow?.status || null,
-          jira_sprint: parentRow?.sprint || null,
-          jira_issue_color: parentRow?.issueColor || null,
+          jira_key: er.key,
+          jira_estado: er.status || null,
+          jira_sprint: er.sprint || null,
+          jira_issue_color: er.issueColor || null,
+        },
+      });
+      epicIdByKey.set(er.key, ep.id);
+      created.epicasCreated++;
+    } else {
+      epicIdByKey.set(er.key, existing.id);
+
+      if (overwrite) {
+        await prisma.epica.update({
+          where: { id: existing.id },
+          data: {
+            nombre: epicaNombre,
+            estado: normStatusToEstado(er.status),
+            avance: estadoToAvance(normStatusToEstado(er.status)),
+
+            fecha_inicio_plan: ini,
+            fecha_fin_plan: fin,
+            dias_plan: diasPlan,
+
+            source: "JIRA",
+            jira_key: er.key,
+            jira_estado: er.status || existing.jira_estado || null,
+            jira_sprint: er.sprint || existing.jira_sprint || null,
+            jira_issue_color:
+              er.issueColor || existing.jira_issue_color || null,
+          },
+        });
+        created.epicasUpdated++;
+      }
+    }
+  }
+
+  // -------------------------
+  // 3) Crear TAREAS desde Historia/Tarea
+  //    Parent epic:
+  //      - si trae parentKey => ese
+  //      - si no => último Epic visto por orden en el CSV
+  // -------------------------
+  let currentEpicKey = null;
+
+  // Guardamos tareas por épica para luego hacer rollup de estado/fechas
+  const tareasPorEpica = new Map(); // epicKey -> array de tareas (normalized row)
+
+  for (const row of normalized) {
+    const epicRow = isEpicType(row.issueType);
+
+    if (epicRow) {
+      currentEpicKey = row.key;
+      continue; // ya lo procesamos como epica arriba
+    }
+
+    // Historia/Tarea => tarea
+    const epicKey = row.parentKey || currentEpicKey || null;
+
+    if (!epicKey) {
+      created.sinEpic++;
+      continue;
+    }
+
+    // si el CSV trae parentKey pero no existe épica (raro), intentamos igual:
+    if (!epicIdByKey.has(epicKey)) {
+      // puedes decidir crear una épica "fantasma", pero por ahora lo contamos y saltamos
+      created.sinEpic++;
+      continue;
+    }
+
+    if (!tareasPorEpica.has(epicKey)) tareasPorEpica.set(epicKey, []);
+    tareasPorEpica.get(epicKey).push(row);
+
+    const tareaNombre = `${row.key} ${row.summary}`.trim();
+    const tareaEstado = normStatusToEstado(row.status);
+    const tareaAvance = estadoToAvance(tareaEstado);
+
+    const responsableTareaId = row.assignee
+      ? pickBestEmpleadoId(row.assignee, empleadosMiembros)
+      : null;
+    if (responsableTareaId) created.asignados++;
+
+    const ini = row.startDate || new Date();
+    const fin = row.dueDate || ini;
+    const diasPlan = daysBetweenInclusive(ini, fin);
+
+    const where = {
+      proyecto_id_jira_key: { proyecto_id: proyectoId, jira_key: row.key },
+    };
+
+    const existing = await prisma.tarea.findUnique({ where }).catch(() => null);
+
+    if (!existing) {
+      await prisma.tarea.create({
+        data: {
+          proyecto_id: proyectoId,
+          epica_id: epicIdByKey.get(epicKey), // 👈 si tu FK se llama distinto, cambia aquí
+          nombre: tareaNombre,
+          descripcion: null,
+          estado: tareaEstado,
+          avance: tareaAvance,
+          responsable_id: responsableTareaId,
+          fecha_inicio_plan: ini,
+          fecha_fin_plan: fin,
+          dias_plan: diasPlan,
+          source: "JIRA",
+          jira_key: row.key,
+          jira_tipo: row.issueType || null,
+          jira_estado: row.status || null,
+          jira_sprint: row.sprint || null,
+          jira_issue_color: row.issueColor || null,
         },
       });
       created.tareasCreated++;
     } else {
-      tarea = existing;
-
       if (overwrite) {
         await prisma.tarea.update({
-          where: { id: tarea.id },
+          where: { id: existing.id },
           data: {
-            nombre: parentNombre, // ✅ evita que te quede “Automatización...” sin key
-            estado: parentEstado, // ✅ respeta “Finalizada”
-            avance: parentAvance,
-            responsable_id: responsablePadreId || tarea.responsable_id || null,
-            fecha_inicio_plan: padreInicio,
-            fecha_fin_plan: padreFin,
-            dias_plan: padreDiasPlan,
+            epica_id: epicIdByKey.get(epicKey), // 👈 y aquí
+            nombre: tareaNombre,
+            estado: tareaEstado,
+            avance: tareaAvance,
+            responsable_id:
+              responsableTareaId || existing.responsable_id || null,
+            fecha_inicio_plan: ini,
+            fecha_fin_plan: fin,
+            dias_plan: diasPlan,
             source: "JIRA",
-            jira_key: pKey,
-            jira_tipo: parentRow?.issueType || tarea.jira_tipo || null,
-            jira_estado: parentRow?.status || tarea.jira_estado || null,
-            jira_sprint: parentRow?.sprint || tarea.jira_sprint || null,
+            jira_key: row.key,
+            jira_tipo: row.issueType || existing.jira_tipo || null,
+            jira_estado: row.status || existing.jira_estado || null,
+            jira_sprint: row.sprint || existing.jira_sprint || null,
             jira_issue_color:
-              parentRow?.issueColor || tarea.jira_issue_color || null,
+              row.issueColor || existing.jira_issue_color || null,
           },
         });
         created.tareasUpdated++;
-        tarea = await prisma.tarea.findUnique({ where: { id: tarea.id } });
+      } else {
+        created.skippedTareas++;
       }
     }
+  }
 
-    // -------------------------
-    // Hijos => TareaDetalle
-    // -------------------------
-    for (const ch of children) {
-      const detalleEstado = normStatusToEstado(ch.status);
-      const detalleAvance = estadoToAvance(detalleEstado);
+  // -------------------------
+  // 4) Rollup épica desde sus tareas:
+  //    - estado: todas completas => completa; alguna en progreso => en_progreso; si no => pendiente
+  //    - fechas: min inicio / max fin
+  //    - avance: promedio de avances (0/100)
+  // -------------------------
+  for (const [epicKey, tareas] of tareasPorEpica.entries()) {
+    if (!tareas.length) continue;
 
-      const responsableDetalleId = ch.assignee
-        ? pickBestEmpleadoId(ch.assignee, empleadosMiembros)
-        : null;
-      if (responsableDetalleId) created.asignados++;
+    const epicaId = epicIdByKey.get(epicKey);
+    if (!epicaId) continue;
 
-      const ini = ch.startDate || tarea.fecha_inicio_plan || new Date();
-      const fin = ch.dueDate || tarea.fecha_fin_plan || ini;
-      const diasPlan = daysBetweenInclusive(ini, fin);
+    const estados = tareas.map((t) => normStatusToEstado(t.status));
+    const avances = estados.map((e) => (e === "completa" ? 100 : 0));
 
-      // Mostrar subtarea con key también (más fiel a Jira)
-      const titulo = `${ch.key} ${ch.summary}`.trim();
+    const allCompletas = estados.every((e) => e === "completa");
+    const anyEnProgreso = estados.some((e) => e === "en_progreso");
+    const allPendientes = estados.every((e) => e === "pendiente");
 
-      // Si viene jira_key, úsalos como identity. Si no, cae a titulo.
-      let existingDetalle = null;
+    let estadoRollup = "pendiente";
+    if (allCompletas) estadoRollup = "completa";
+    else if (anyEnProgreso) estadoRollup = "en_progreso";
+    else if (allPendientes) estadoRollup = "pendiente";
+    else estadoRollup = "en_progreso";
 
-      if (ch.key) {
-        existingDetalle = await prisma.tareaDetalle
-          .findFirst({
-            where: { tarea_id: tarea.id, jira_key: ch.key, eliminado: false },
-            select: { id: true },
-          })
-          .catch(() => null);
-      }
+    const avgAvance = Math.round(
+      avances.reduce((s, a) => s + a, 0) / Math.max(1, avances.length),
+    );
 
-      if (!existingDetalle) {
-        existingDetalle = await prisma.tareaDetalle
-          .findFirst({
-            where: { tarea_id: tarea.id, titulo, eliminado: false },
-            select: { id: true },
-          })
-          .catch(() => null);
-      }
+    const starts = tareas.map((t) => t.startDate).filter(Boolean);
+    const dues = tareas.map((t) => t.dueDate).filter(Boolean);
 
-      if (existingDetalle) {
-        if (overwrite) {
-          await prisma.tareaDetalle.update({
-            where: { id: existingDetalle.id },
-            data: {
-              titulo,
-              descripcion: null,
-              estado: detalleEstado,
-              avance: detalleAvance,
-              fecha_inicio_plan: ini,
-              fecha_fin_plan: fin,
-              dias_plan: diasPlan,
-              responsable_id: responsableDetalleId,
-              source: "JIRA",
-              jira_key: ch.key || null,
-              jira_tipo: ch.issueType || null,
-              jira_estado: ch.status || null,
-              jira_sprint: ch.sprint || null,
-              jira_issue_color: ch.issueColor || null,
-            },
-          });
-          created.detallesUpdated++;
-        } else {
-          created.skippedDetalles++;
-        }
-        continue;
-      }
+    const ini = starts.length
+      ? new Date(Math.min(...starts.map((d) => d.getTime())))
+      : null;
 
-      await prisma.tareaDetalle.create({
+    const fin = dues.length
+      ? new Date(Math.max(...dues.map((d) => d.getTime())))
+      : ini;
+
+    if (overwrite && (ini || fin)) {
+      const i = ini || new Date();
+      const f = fin || i;
+      const diasPlan = daysBetweenInclusive(i, f);
+
+      await prisma.epica.update({
+        where: { id: epicaId },
         data: {
-          tarea_id: tarea.id,
-          titulo,
-          descripcion: null,
-          estado: detalleEstado,
-          avance: detalleAvance,
-          fecha_inicio_plan: ini,
-          fecha_fin_plan: fin,
+          estado: estadoRollup,
+          avance: Math.max(0, Math.min(100, avgAvance)),
+          fecha_inicio_plan: i,
+          fecha_fin_plan: f,
           dias_plan: diasPlan,
-          responsable_id: responsableDetalleId,
-          eliminado: false,
-          source: "JIRA",
-          jira_key: ch.key || null,
-          jira_tipo: ch.issueType || null,
-          jira_estado: ch.status || null,
-          jira_sprint: ch.sprint || null,
-          jira_issue_color: ch.issueColor || null,
         },
       });
-      created.detallesCreated++;
+    } else if (overwrite) {
+      await prisma.epica.update({
+        where: { id: epicaId },
+        data: {
+          estado: estadoRollup,
+          avance: Math.max(0, Math.min(100, avgAvance)),
+        },
+      });
     }
   }
 
   return reply.send({
     ok: true,
-    message: "Import Jira OK",
+    message: "Import Jira OK (Epic->Epica, Historia/Tarea->Tarea)",
     created,
     overwrite,
-    hoursPerDay,
   });
 }

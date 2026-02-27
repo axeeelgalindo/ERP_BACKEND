@@ -108,6 +108,9 @@ export async function getProyecto(request, reply) {
         where: { eliminado: false },
         orderBy: [{ orden: "asc" }, { fecha_inicio_plan: "asc" }],
         include: {
+          // ✅ PARA MOSTRAR NOMBRE DE ÉPICA EN FRONTEND (GANTT)
+          epica: { select: { id: true, nombre: true } },
+
           responsable: { include: { usuario: true } },
           detalles: {
             where: { eliminado: false },
@@ -125,9 +128,7 @@ export async function getProyecto(request, reply) {
       miembros: {
         include: {
           empleado: {
-            include: {
-              usuario: true,
-            },
+            include: { usuario: true },
           },
         },
       },
@@ -318,8 +319,6 @@ export async function createProyecto(req, reply) {
 }
 
 
-/* ========== ACTUALIZAR ========== */
-/* ========== ACTUALIZAR (con miembros) ========== */
 export async function updateProyecto(request, reply) {
   const scope = resolveScope(request);
   const id = request.params.id;
