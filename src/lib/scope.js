@@ -40,3 +40,5 @@ export function resolveScope(request) {
 
 export const isMaster = (s) => s.rolCodigo === "MASTER";
 export const isAdminOrAbove = (s) => s.rolCodigo === "MASTER" || s.rolCodigo === "ADMIN";
+
+

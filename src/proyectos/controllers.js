@@ -31,9 +31,7 @@ export async function listProyectos(request, reply) {
     order = "desc",
   } = request.query || {};
 
-  const empresa_id = scope.isMaster
-    ? empresaId || scope.empresaId
-    : scope.empresaId;
+  const empresa_id = scope.isMaster ? empresaId || scope.empresaId : scope.empresaId;
 
   const where = {
     empresa_id,
@@ -73,11 +71,36 @@ export async function listProyectos(request, reply) {
       where,
       orderBy: { [sortField]: sortDir },
       include: {
+        // Para cliente (vía cotizaciones -> ventas -> cliente)
         cotizaciones: {
           where: { eliminado: false },
           include: {
             cliente: true,
-            ventas: true,
+            ventas: {
+              where: { eliminado: false },
+              include: { Cliente: true }, // en tu schema Venta tiene Cliente (relación opcional)
+            },
+          },
+        },
+
+        // ✅ PROGRESO (por épicas)
+        epicas: {
+          where: { eliminado: false },
+          include: {
+            tareas: {
+              where: { eliminado: false },
+              include: {
+                detalles: { where: { eliminado: false } }, // ✅ real en tu schema
+              },
+            },
+          },
+        },
+
+        // ✅ PROGRESO (por tareas directas del proyecto)
+        tareas: {
+          where: { eliminado: false },
+          include: {
+            detalles: { where: { eliminado: false } }, // ✅ real en tu schema
           },
         },
       },
