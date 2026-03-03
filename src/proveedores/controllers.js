@@ -1,171 +1,186 @@
+// src/proveedor/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 
 const prisma = new PrismaClient();
-const PAGE = 1, SIZE = 20;
 
-/* LISTAR */
+const trimOrNull = (v) => {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === "" ? null : s;
+};
+
+const requiredTrim = (v) => {
+  const s = String(v ?? "").trim();
+  return s;
+};
+
+/**
+ * LISTAR (alfabético por nombre)
+ * query:
+ *  - q: busca por nombre/rut/correo
+ *  - includeDeleted: "true" | "false"
+ */
 export async function listProveedores(request, reply) {
   const scope = resolveScope(request);
-  const {
-    q, page = PAGE, pageSize = SIZE,
-    includeDeleted, empresaId
-  } = request.query || {};
+  const { q = "", includeDeleted = "false" } = request.query || {};
 
-  const empresa_id = scope.isMaster ? (empresaId || scope.empresaId) : scope.empresaId;
+  const includeDel = String(includeDeleted) === "true";
+  const search = String(q || "").trim();
 
   const where = {
-    empresa_id,
-    ...(q ? {
-      OR: [
-        { nombre:   { contains: q, mode: "insensitive" } },
-        { rut:      { contains: q, mode: "insensitive" } },
-        { correo:   { contains: q, mode: "insensitive" } },
-        { telefono: { contains: q, mode: "insensitive" } },
-        { notas:    { contains: q, mode: "insensitive" } },
-      ]
-    } : {}),
-    ...(includeDeleted ? {} : { eliminado: false }),
+    ...(includeDel ? {} : { eliminado: false }),
+    empresa_id: scope.empresaId,
+    ...(search
+      ? {
+          OR: [
+            { nombre: { contains: search, mode: "insensitive" } },
+            { rut: { contains: search, mode: "insensitive" } },
+            { correo: { contains: search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
   };
 
-  const [total, data] = await Promise.all([
-    prisma.proveedor.count({ where }),
-    prisma.proveedor.findMany({
-      where,
-      orderBy: [{ creado_en: "desc" }],
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-  ]);
+  const rows = await prisma.proveedor.findMany({
+    where,
+    orderBy: [{ nombre: "asc" }], // ✅ ALFABÉTICO
+  });
 
-  return reply.send({ total, page, pageSize, data });
+  return reply.send({ ok: true, rows });
 }
 
-/* OBTENER */
+/**
+ * OBTENER 1
+ */
 export async function getProveedor(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
 
   const row = await prisma.proveedor.findFirst({
-    where: { id, empresa_id: scope.isMaster ? undefined : scope.empresaId },
-    include: { compras: { select: { id: true, total: true, estado: true } } },
-  });
-  if (!row) return httpError(reply, 404, "Proveedor no encontrado");
-  return reply.send(row);
-}
-
-/* CREAR */
-export async function createProveedor(request, reply) {
-  const scope = resolveScope(request);
-  const body = request.body || {};
-  const empresa_id = scope.isMaster ? (body.empresa_id || scope.empresaId) : scope.empresaId;
-
-  // opcional: si trae correo, validamos que no exista activo en la empresa
-  if (body.correo) {
-    const exists = await prisma.proveedor.findFirst({
-      where: { empresa_id, correo: body.correo, eliminado: false },
-      select: { id: true },
-    });
-    if (exists) return httpError(reply, 409, "Correo ya registrado en la empresa");
-  }
-
-  const row = await prisma.proveedor.create({
-    data: {
-      empresa_id,
-      nombre: body.nombre,
-      rut: body.rut ?? null,
-      correo: body.correo ?? null,
-      telefono: body.telefono ?? null,
-      notas: body.notas ?? null,
+    where: {
+      id,
+      empresa_id: scope.empresaId,
+      eliminado: false,
     },
   });
 
-  return reply.code(201).send(row);
+  if (!row) throw httpError(404, "Proveedor no encontrado");
+
+  return reply.send({ ok: true, row });
 }
 
-/* ACTUALIZAR */
-export async function updateProveedor(request, reply) {
+/**
+ * CREAR
+ */
+export async function createProveedor(request, reply) {
   const scope = resolveScope(request);
-  const { id } = request.params;
-  const data = { ...request.body };
 
-  const prov = await prisma.proveedor.findUnique({ where: { id } });
-  if (!prov) return httpError(reply, 404, "Proveedor no encontrado");
-  if (!scope.isMaster && prov.empresa_id !== scope.empresaId)
-    return httpError(reply, 403, "Proveedor fuera de tu empresa");
+  const nombre = requiredTrim(request.body?.nombre);
+  const rut = trimOrNull(request.body?.rut);
+  const correo = trimOrNull(request.body?.correo);
+  const telefono = trimOrNull(request.body?.telefono);
+  const notas = trimOrNull(request.body?.notas);
 
-  if (!scope.isMaster && data.empresa_id) delete data.empresa_id;
+  if (!nombre) throw httpError(400, "nombre es obligatorio");
 
-  // si cambia correo, revalidar
-  if (data.correo && data.correo !== prov.correo) {
-    const clash = await prisma.proveedor.findFirst({
+  // Evitar choque del @@unique([correo, eliminado]) cuando correo viene informado
+  if (correo) {
+    const exists = await prisma.proveedor.findFirst({
       where: {
-        empresa_id: scope.isMaster ? (data.empresa_id || prov.empresa_id) : prov.empresa_id,
-        correo: data.correo,
+        empresa_id: scope.empresaId,
+        correo,
         eliminado: false,
       },
       select: { id: true },
     });
-    if (clash) return httpError(reply, 409, "Correo ya registrado en la empresa");
+    if (exists) throw httpError(409, "Ya existe un proveedor activo con ese correo");
   }
 
-  const row = await prisma.proveedor.update({ where: { id }, data });
-  return reply.send(row);
+  const row = await prisma.proveedor.create({
+    data: {
+      empresa_id: scope.empresaId,
+      nombre,
+      rut,
+      correo,
+      telefono,
+      notas,
+    },
+  });
+
+  return reply.code(201).send({ ok: true, row });
 }
 
-/* DELETE FÍSICO (protección salvo ?force=true) */
+/**
+ * ACTUALIZAR
+ */
+export async function updateProveedor(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params;
+
+  const current = await prisma.proveedor.findFirst({
+    where: { id, empresa_id: scope.empresaId, eliminado: false },
+    select: { id: true, correo: true },
+  });
+  if (!current) throw httpError(404, "Proveedor no encontrado");
+
+  const nombre = request.body?.nombre != null ? requiredTrim(request.body?.nombre) : undefined;
+  const rut = request.body?.rut != null ? trimOrNull(request.body?.rut) : undefined;
+  const correo = request.body?.correo != null ? trimOrNull(request.body?.correo) : undefined;
+  const telefono = request.body?.telefono != null ? trimOrNull(request.body?.telefono) : undefined;
+  const notas = request.body?.notas != null ? trimOrNull(request.body?.notas) : undefined;
+
+  if (nombre !== undefined && !nombre) throw httpError(400, "nombre no puede quedar vacío");
+
+  // Si cambia correo, validar duplicado (solo activos)
+  if (correo !== undefined && correo && correo !== current.correo) {
+    const exists = await prisma.proveedor.findFirst({
+      where: {
+        empresa_id: scope.empresaId,
+        correo,
+        eliminado: false,
+        NOT: { id },
+      },
+      select: { id: true },
+    });
+    if (exists) throw httpError(409, "Ya existe un proveedor activo con ese correo");
+  }
+
+  const row = await prisma.proveedor.update({
+    where: { id },
+    data: {
+      ...(nombre !== undefined ? { nombre } : {}),
+      ...(rut !== undefined ? { rut } : {}),
+      ...(correo !== undefined ? { correo } : {}),
+      ...(telefono !== undefined ? { telefono } : {}),
+      ...(notas !== undefined ? { notas } : {}),
+    },
+  });
+
+  return reply.send({ ok: true, row });
+}
+
+/**
+ * ELIMINAR (soft delete)
+ */
 export async function deleteProveedor(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params;
-  const { force } = request.query || {};
 
-  const prov = await prisma.proveedor.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-    include: { _count: { select: { compras: true } } },
+  const current = await prisma.proveedor.findFirst({
+    where: { id, empresa_id: scope.empresaId, eliminado: false },
+    select: { id: true },
   });
-  if (!prov) return httpError(reply, 404, "Proveedor no encontrado");
+  if (!current) throw httpError(404, "Proveedor no encontrado");
 
-  if (!force && prov._count.compras > 0) {
-    return httpError(reply, 409, "Proveedor con compras asociadas. Usa ?force=true para borrado definitivo.");
-  }
-
-  await prisma.proveedor.delete({ where: { id } });
-  return reply.send({ success: true });
-}
-
-/* SOFT-DELETE */
-export async function disableProveedor(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-
-  const prov = await prisma.proveedor.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-  });
-  if (!prov) return httpError(reply, 404, "Proveedor no encontrado");
-  if (prov.eliminado) return httpError(reply, 409, "Proveedor ya está eliminado");
-
-  const upd = await prisma.proveedor.update({
+  await prisma.proveedor.update({
     where: { id },
-    data: { eliminado: true, eliminado_en: new Date() },
+    data: {
+      eliminado: true,
+      eliminado_en: new Date(),
+    },
   });
-  return reply.send({ success: true, proveedor: upd });
-}
 
-/* RESTORE */
-export async function restoreProveedor(request, reply) {
-  const scope = resolveScope(request);
-  const { id } = request.params;
-
-  const prov = await prisma.proveedor.findFirst({
-    where: { id, ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }) },
-  });
-  if (!prov) return httpError(reply, 404, "Proveedor no encontrado");
-  if (!prov.eliminado) return httpError(reply, 409, "Proveedor no está eliminado");
-
-  const upd = await prisma.proveedor.update({
-    where: { id },
-    data: { eliminado: false, eliminado_en: null },
-  });
-  return reply.send({ success: true, proveedor: upd });
+  return reply.code(204).send();
 }
