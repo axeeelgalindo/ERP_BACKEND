@@ -11,6 +11,7 @@ import {
   finalizarProyecto,
   reporteDevengadoProyecto,
 } from "./controllers.js";
+import { reporteDevengadoProfesional } from "./devengado.js";
 
 import { importJiraCSV } from "./proyectos.jira.controller.js";
 
@@ -25,6 +26,8 @@ export default async function proyectosRoutes(server) {
   const guard = server.authenticate
     ? { preHandler: [server.authenticate] }
     : {};
+
+  server.get("/proyectos/:id/devengado", reporteDevengadoProfesional);
 
   server.get("/proyectos", listProyectos);
 

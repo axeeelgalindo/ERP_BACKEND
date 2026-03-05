@@ -483,6 +483,21 @@ export async function listCompras(request, reply) {
         proveedor: { select: { id: true, nombre: true, rut: true } },
         proyecto: { select: { id: true, nombre: true } },
         cotizacion: { select: { id: true, numero: true, estado: true } },
+
+        // ✅ NUEVO: para mostrar en tabla / modal
+        rendicion: {
+          select: {
+            id: true,
+            estado: true,
+            monto_total: true,
+            descripcion: true,
+            destino: true,
+            centro_costo: true,
+            creado_en: true,
+            empleado: { select: { id: true, rut: true, cargo: true } },
+          },
+        },
+
         items: {
           include: {
             producto: { select: { id: true, nombre: true, sku: true } },
@@ -544,6 +559,16 @@ export async function getCompra(request, reply) {
       proveedor: true,
       proyecto: true,
       cotizacion: true,
+
+      // ✅ NUEVO
+      rendicion: {
+        include: {
+          items: true,
+          empleado: { select: { id: true, rut: true, cargo: true } },
+          proyecto: { select: { id: true, nombre: true } },
+        },
+      },
+
       items: { include: { producto: true, proveedor: true } },
       asignaciones_costeo: {
         include: {
@@ -568,23 +593,87 @@ export async function createCompra(request, reply) {
 
   const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
+  // ✅ NUEVO
+  const destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
+  const centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
+  const rendicion_id = body.rendicion_id ?? null;
+
+  // normalizar items/total
   const items = Array.isArray(body.items) ? body.items : [];
   const total = body.total != null ? Number(body.total) : calcTotal(items);
 
+  // ✅ VALIDACIONES (imputación)
+  const isProyecto = destino === "PROYECTO";
+  const isAdminOTaller = destino === "ADMINISTRACION" || destino === "TALLER";
+
+  if (!isProyecto && !isAdminOTaller) {
+    return reply.code(400).send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
+  }
+
+  if (isProyecto) {
+    if (!body.proyecto_id) {
+      return reply.code(400).send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
+    }
+    if (centro_costo) {
+      return reply.code(400).send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
+    }
+  }
+
+  if (isAdminOTaller) {
+    if (!centro_costo || (centro_costo !== "PMC" && centro_costo !== "PUQ")) {
+      return reply.code(400).send({ error: "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER" });
+    }
+    if (body.proyecto_id) {
+      return reply.code(400).send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
+    }
+  }
+
   const created = await prisma.$transaction(async (tx) => {
-    await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
+    // ✅ Antes validabas siempre proyecto; ahora depende del destino
+    if (isProyecto) await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
+
     await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
     await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
 
+    // Validar productos/proveedores de items
     for (const it of items) {
       if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
       if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
     }
 
+    // ✅ Si viene rendicion_id, validamos consistencia
+    if (rendicion_id) {
+      const r = await tx.rendicion.findFirst({
+        where: { id: rendicion_id, eliminado: false, proyecto: { empresa_id, eliminado: false } },
+        select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
+      });
+      if (!r) throw httpError(404, "Rendición no existe o no pertenece a la empresa");
+
+      // destino debe coincidir
+      if (String(r.destino) !== destino) {
+        throw httpError(400, "La rendición tiene un destino distinto a la compra");
+      }
+      // centro debe coincidir
+      if ((r.centro_costo || null) !== (centro_costo || null)) {
+        throw httpError(400, "La rendición tiene un centro_costo distinto a la compra");
+      }
+      // si es proyecto, proyecto_id debe coincidir
+      if (destino === "PROYECTO" && r.proyecto_id !== body.proyecto_id) {
+        throw httpError(400, "La compra debe usar el mismo proyecto_id de la rendición");
+      }
+    }
+
     return tx.compra.create({
       data: {
         empresa_id,
-        proyecto_id: body.proyecto_id ?? null,
+
+        // ✅ NUEVO
+        destino,
+        centro_costo: centro_costo ?? null,
+        rendicion_id: rendicion_id ?? null,
+
+        proyecto_id: isProyecto ? body.proyecto_id : null,
+
         proveedorId: body.proveedorId ?? null,
         cotizacionId: body.cotizacionId ?? null,
 
@@ -623,6 +712,7 @@ export async function createCompra(request, reply) {
         proveedor: { select: { id: true, nombre: true } },
         proyecto: { select: { id: true, nombre: true } },
         cotizacion: { select: { id: true, numero: true } },
+        rendicion: { select: { id: true, destino: true, centro_costo: true, proyecto_id: true } },
         items: { include: { producto: true, proveedor: true, tipoItem: true } },
       },
     });
@@ -632,7 +722,98 @@ export async function createCompra(request, reply) {
 }
 
 /* =========================
-   UPDATE
+   PATCH /compras/:id/asignar-rendicion
+   Body: { rendicion_id: string | null }
+========================= */
+export async function asignarRendicionACompra(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params || {};
+  const body = request.body || {};
+  const rendicion_id = body.rendicion_id ? String(body.rendicion_id) : null;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // 1) validar compra (empresa)
+    const compra = await tx.compra.findFirst({
+      where: scope.isMaster ? { id } : { id, empresa_id: scope.empresaId },
+      include: {
+        proyecto: { select: { id: true, empresa_id: true } },
+      },
+    });
+    if (!compra) return null;
+
+    // 2) si viene rendicion_id, validar que exista y sea compatible
+    if (rendicion_id) {
+      const rend = await tx.rendicion.findFirst({
+        where: {
+          id: rendicion_id,
+          eliminado: false,
+          proyecto: {
+            empresa_id: compra.empresa_id, // misma empresa
+            eliminado: false,
+            empresa: { eliminado: false },
+          },
+        },
+        select: {
+          id: true,
+          destino: true,
+          centro_costo: true,
+          proyecto_id: true,
+          estado: true,
+        },
+      });
+      if (!rend) {
+        return reply.code(404).send({ error: "Rendición no encontrada" });
+      }
+
+      // ✅ Compatibilidad básica (ajusta si quieres reglas más estrictas):
+      // - Si compra es PROYECTO -> rendición debe ser PROYECTO y mismo proyecto_id
+      // - Si compra es ADMIN/TALLER -> rendición mismo destino y mismo centro_costo
+      const compraDestino = String(compra.destino || "PROYECTO").toUpperCase();
+      const compraCentro = compra.centro_costo ? String(compra.centro_costo).toUpperCase() : null;
+      const compraProyectoId = compra.proyecto_id || null;
+
+      const rendDestino = String(rend.destino || "PROYECTO").toUpperCase();
+      const rendCentro = rend.centro_costo ? String(rend.centro_costo).toUpperCase() : null;
+
+      if (compraDestino === "PROYECTO") {
+        if (rendDestino !== "PROYECTO") {
+          return reply.code(400).send({ error: "Rendición incompatible: destino distinto (compra PROYECTO)" });
+        }
+        if (String(rend.proyecto_id) !== String(compraProyectoId)) {
+          return reply.code(400).send({ error: "Rendición incompatible: proyecto distinto" });
+        }
+      } else {
+        if (rendDestino !== compraDestino) {
+          return reply.code(400).send({ error: "Rendición incompatible: destino distinto" });
+        }
+        if (!compraCentro || !rendCentro || rendCentro !== compraCentro) {
+          return reply.code(400).send({ error: "Rendición incompatible: centro_costo distinto" });
+        }
+      }
+    }
+
+    // 3) update compra
+    const row = await tx.compra.update({
+      where: { id: compra.id },
+      data: { rendicion_id },
+      include: {
+        rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
+      },
+    });
+
+    return row;
+  });
+
+  if (!updated) return httpError(reply, 404, "Compra no encontrada");
+  return reply.send({ ok: true, row: updated });
+}
+
+/* =========================
+   UPDATE (PUT /compras/:id)
+   - Respeta destino/centro/proyecto igual que CREATE
+   - Revalida rendicion_id si:
+      a) se envía rendicion_id, o
+      b) cambia destino/centro/proyecto y la compra ya tenía rendicion_id
 ========================= */
 export async function updateCompra(request, reply) {
   const scope = resolveScope(request);
@@ -648,25 +829,157 @@ export async function updateCompra(request, reply) {
     return httpError(reply, 403, "Compra fuera de tu empresa");
 
   const empresa_id = exists.empresa_id;
+
+  // ===== Normalizaciones / “next state”
   const estadoNorm = normalizeEstadoCompra(body.estado);
 
+  const nextDestino =
+    body.destino !== undefined
+      ? String(body.destino || "PROYECTO").toUpperCase()
+      : String(exists.destino || "PROYECTO").toUpperCase();
+
+  const nextCentroCosto =
+    body.centro_costo !== undefined
+      ? body.centro_costo
+        ? String(body.centro_costo).toUpperCase()
+        : null
+      : exists.centro_costo
+        ? String(exists.centro_costo).toUpperCase()
+        : null;
+
+  const nextProyectoId =
+    body.proyecto_id !== undefined ? body.proyecto_id || null : exists.proyecto_id || null;
+
+  // OJO: updateCompra (PUT) normalmente puede venir con rendicion_id o no.
+  // Si no viene, NO lo tocamos.
+  const wantsChangeRendicion = body.rendicion_id !== undefined;
+  const nextRendicionId = wantsChangeRendicion
+    ? body.rendicion_id
+      ? String(body.rendicion_id)
+      : null
+    : exists.rendicion_id
+      ? String(exists.rendicion_id)
+      : null;
+
+  // items
   const hasItems = Array.isArray(body.items);
   const nextItems = hasItems ? body.items : null;
 
-  const updated = await prisma.$transaction(async (tx) => {
-    if (body.proyecto_id && body.proyecto_id !== exists.proyecto_id) {
-      await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
+  // ===== Validaciones imputación (idénticas a CREATE)
+  const isProyecto = nextDestino === "PROYECTO";
+  const isAdminOTaller = nextDestino === "ADMINISTRACION" || nextDestino === "TALLER";
+
+  if (!isProyecto && !isAdminOTaller) {
+    return reply
+      .code(400)
+      .send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
+  }
+
+  if (isProyecto) {
+    if (!nextProyectoId) {
+      return reply
+        .code(400)
+        .send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
     }
-    if (body.proveedorId && body.proveedorId !== exists.proveedorId) {
+    if (nextCentroCosto) {
+      return reply
+        .code(400)
+        .send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
+    }
+  }
+
+  if (isAdminOTaller) {
+    if (!nextCentroCosto || (nextCentroCosto !== "PMC" && nextCentroCosto !== "PUQ")) {
+      return reply.code(400).send({
+        error:
+          "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER",
+      });
+    }
+    if (nextProyectoId) {
+      return reply
+        .code(400)
+        .send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
+    }
+  }
+
+  // ===== Transaction
+  const updated = await prisma.$transaction(async (tx) => {
+    // Validar entidades si cambiaron (y si aplican)
+    if (isProyecto && nextProyectoId && nextProyectoId !== exists.proyecto_id) {
+      await assertEntidadEmpresa(tx, "proyecto", nextProyectoId, empresa_id);
+    }
+
+    if (body.proveedorId !== undefined && body.proveedorId && body.proveedorId !== exists.proveedorId) {
       await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
     }
-    if (body.cotizacionId && body.cotizacionId !== exists.cotizacionId) {
+
+    if (body.cotizacionId !== undefined && body.cotizacionId && body.cotizacionId !== exists.cotizacionId) {
       await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
     }
 
+    // Validar productos/proveedores de items (si vienen)
+    if (hasItems) {
+      for (const it of nextItems) {
+        if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
+        if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
+      }
+    }
+
+    // ===== Validación rendición: si se cambia rendicion_id o si hay rendición y cambió imputación
+    const imputacionChanged =
+      (body.destino !== undefined && String(exists.destino || "").toUpperCase() !== nextDestino) ||
+      (body.centro_costo !== undefined &&
+        (exists.centro_costo ? String(exists.centro_costo).toUpperCase() : null) !== nextCentroCosto) ||
+      (body.proyecto_id !== undefined && (exists.proyecto_id || null) !== nextProyectoId);
+
+    const mustRevalidateRendicion =
+      // si viene rendicion_id en el body (cambio explícito)
+      wantsChangeRendicion ||
+      // o si cambió imputación y la compra ya tenía rendición
+      (imputacionChanged && !!exists.rendicion_id);
+
+    if (mustRevalidateRendicion && nextRendicionId) {
+      const r = await tx.rendicion.findFirst({
+        where: {
+          id: nextRendicionId,
+          eliminado: false,
+          proyecto: {
+            empresa_id,
+            eliminado: false,
+            empresa: { eliminado: false },
+          },
+        },
+        select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
+      });
+      if (!r) throw httpError(404, "Rendición no existe o no pertenece a la empresa");
+
+      if (String(r.destino || "PROYECTO").toUpperCase() !== nextDestino) {
+        throw httpError(400, "La rendición tiene un destino distinto a la compra");
+      }
+
+      const rCentro = r.centro_costo ? String(r.centro_costo).toUpperCase() : null;
+      if ((rCentro || null) !== (nextCentroCosto || null)) {
+        throw httpError(400, "La rendición tiene un centro_costo distinto a la compra");
+      }
+
+      if (nextDestino === "PROYECTO" && String(r.proyecto_id) !== String(nextProyectoId)) {
+        throw httpError(400, "La compra debe usar el mismo proyecto_id de la rendición");
+      }
+    }
+
+    // ===== Construir data update
     const data = {};
 
-    if (body.proyecto_id !== undefined) data.proyecto_id = body.proyecto_id || null;
+    // imputación (NUEVO)
+    data.destino = nextDestino;
+    data.centro_costo = isProyecto ? null : nextCentroCosto;
+    data.proyecto_id = isProyecto ? nextProyectoId : null;
+
+    // rendición (solo si vino en body, o si cambió imputación y quieres forzar que se mantenga compatible)
+    // Aquí lo dejamos: si NO vino rendicion_id, no lo tocamos.
+    if (wantsChangeRendicion) data.rendicion_id = nextRendicionId;
+
+    // resto campos existentes
     if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
     if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
     if (estadoNorm) data.estado = estadoNorm;
@@ -688,16 +1001,13 @@ export async function updateCompra(request, reply) {
     if (body.factura_monto !== undefined)
       data.factura_monto = body.factura_monto != null ? Number(body.factura_monto) : null;
 
+    // total + items
     if (hasItems) {
-      for (const it of nextItems) {
-        if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
-        if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
-      }
-
       const newTotal = body.total != null ? Number(body.total) : calcTotal(nextItems);
       data.total = Number(newTotal || 0);
 
       await tx.compraItem.deleteMany({ where: { compra_id: id } });
+
       if (nextItems.length) {
         await tx.compraItem.createMany({
           data: nextItems.map((it) => {
@@ -720,14 +1030,17 @@ export async function updateCompra(request, reply) {
       data.total = Number(body.total || 0);
     }
 
+    // Ejecutar update
     await tx.compra.update({ where: { id }, data });
 
+    // devolver compra con includes (agrega rendicion)
     const row = await tx.compra.findUnique({
       where: { id },
       include: {
         proveedor: true,
         proyecto: true,
         cotizacion: true,
+        rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
         items: { include: { producto: true, proveedor: true, tipoItem: true } },
       },
     });

@@ -5,17 +5,21 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 /**
- * Seed:
- * - Empresa
- * - Roles (ADMIN, USER)
- * - Usuario Admin
- * - Cliente Demo
- * - TipoDia (Normal/Feriado/Urgencia)
- * - TipoItem (HH/Material/...)
- * - CIF Default (90000) asociado a la empresa
+ * Seed alineado a tu lógica actual:
+ * - Empresa (1)
+ * - Roles: SUPERADMIN / ADMIN / USER (y deja todo idempotente)
+ * - Usuario superadmin + su Empleado (para rendiciones / tareas)
+ * - Cliente demo + Responsable + Cuenta bancaria (para cotizaciones/ventas)
+ * - Proveedor demo
+ * - Catálogos por empresa: UnidadItem, TipoItem, TipoDia
+ * - CIF default por empresa
+ *
+ * Nota: NO crea proyectos/cotizaciones/ventas/compras/rendiciones para no ensuciar dev,
+ * pero deja todo listo para usar la app.
  */
 
-const DO_RESET = false; // true solo si quieres limpiar TODO antes de sembrar
+const DO_RESET = false; // true SOLO si quieres borrar datos (dev local)
+const PASSWORD_DEFAULT = process.env.SEED_ADMIN_PASSWORD || "12345";
 
 function shouldIgnoreDeleteError(e) {
   return e?.code === "P2021" || e?.code === "P2022";
@@ -24,14 +28,10 @@ function shouldIgnoreDeleteError(e) {
 async function safeDeleteMany(delegateName, where = undefined) {
   const delegate = prisma[delegateName];
   if (!delegate?.deleteMany) return;
-
   try {
     await delegate.deleteMany(where ? { where } : undefined);
   } catch (e) {
-    if (shouldIgnoreDeleteError(e)) {
-      console.log(`⚠️ Skip deleteMany(${delegateName}) -> ${e.code}`);
-      return;
-    }
+    if (shouldIgnoreDeleteError(e)) return;
     throw e;
   }
 }
@@ -39,7 +39,10 @@ async function safeDeleteMany(delegateName, where = undefined) {
 async function resetAll() {
   console.log("🧨 Reset total (hard delete) ...");
 
-  // Ajusta/elimina lo que no exista en tu schema
+  // orden: hijos -> padres (según tus relaciones)
+  await safeDeleteMany("auditLog");
+
+  await safeDeleteMany("compraCosteo");
   await safeDeleteMany("detalleVenta");
   await safeDeleteMany("venta");
 
@@ -54,7 +57,9 @@ async function resetAll() {
 
   await safeDeleteMany("tareaDetalle");
   await safeDeleteMany("tareaDependencia");
+  await safeDeleteMany("tareaHistorial");
   await safeDeleteMany("tarea");
+  await safeDeleteMany("epica");
 
   await safeDeleteMany("proyectoMiembro");
   await safeDeleteMany("proyecto");
@@ -68,6 +73,9 @@ async function resetAll() {
 
   await safeDeleteMany("producto");
   await safeDeleteMany("proveedor");
+
+  await safeDeleteMany("clienteResponsable");
+  await safeDeleteMany("clienteCuentaBancaria");
   await safeDeleteMany("cliente");
 
   await safeDeleteMany("tipoItem");
@@ -76,12 +84,15 @@ async function resetAll() {
 
   await safeDeleteMany("aFPConfig");
   await safeDeleteMany("saludConfig");
-  await safeDeleteMany("auditLog");
 
   await safeDeleteMany("empresa");
 
   console.log("✅ Reset listo.");
 }
+
+/* =========================
+   Upserts base
+========================= */
 
 async function upsertEmpresa() {
   const nombre = "Blue Ingeniería SPA";
@@ -99,6 +110,8 @@ async function upsertEmpresa() {
         correo: "administracion@blueinge.com",
         telefono: "+56 9 1111 2222",
         activa: true,
+        eliminado: false,
+        eliminado_en: null,
       },
     });
   }
@@ -114,7 +127,7 @@ async function upsertEmpresa() {
   });
 }
 
-async function upsertRol({ nombre, codigo, descripcion }) {
+async function upsertRol({ nombre, codigo, descripcion, orden }) {
   const existing = await prisma.rolUsuario.findFirst({
     where: { codigo },
     select: { id: true },
@@ -127,6 +140,7 @@ async function upsertRol({ nombre, codigo, descripcion }) {
         nombre,
         codigo,
         descripcion,
+        orden: orden ?? null,
         activo: true,
         eliminado: false,
         eliminado_en: null,
@@ -135,46 +149,81 @@ async function upsertRol({ nombre, codigo, descripcion }) {
   }
 
   return prisma.rolUsuario.create({
-    data: { nombre, codigo, descripcion, activo: true },
+    data: {
+      nombre,
+      codigo,
+      descripcion,
+      orden: orden ?? null,
+      activo: true,
+    },
   });
 }
 
-async function upsertUsuarioAdmin({ empresaId, rolAdminId }) {
-  const correoAdmin = "admin@blueinge.com";
-  const passAdmin = "12345";
-  const hash = await bcrypt.hash(passAdmin, 10);
+async function upsertUsuarioConEmpleado({
+  empresaId,
+  rolId,
+  correo,
+  nombre,
+  password,
+  empleado, // { rut?, cargo?, telefono? }
+}) {
+  const hash = await bcrypt.hash(password, 10);
 
   const existing = await prisma.usuario.findFirst({
-    where: { correo: correoAdmin, eliminado: false },
+    where: { correo, eliminado: false },
     select: { id: true },
   });
 
-  let usuarioAdmin;
-  if (existing) {
-    usuarioAdmin = await prisma.usuario.update({
-      where: { id: existing.id },
-      data: {
-        empresa_id: empresaId,
-        rol_id: rolAdminId,
-        nombre: "Administrador",
-        contrasena: hash,
-        eliminado: false,
-        eliminado_en: null,
-      },
-    });
-  } else {
-    usuarioAdmin = await prisma.usuario.create({
-      data: {
-        empresa_id: empresaId,
-        rol_id: rolAdminId,
-        nombre: "Administrador",
-        correo: correoAdmin,
-        contrasena: hash,
-      },
-    });
-  }
+  const usuario = existing
+    ? await prisma.usuario.update({
+        where: { id: existing.id },
+        data: {
+          empresa_id: empresaId,
+          rol_id: rolId,
+          nombre,
+          contrasena: hash,
+          eliminado: false,
+          eliminado_en: null,
+        },
+      })
+    : await prisma.usuario.create({
+        data: {
+          empresa_id: empresaId,
+          rol_id: rolId,
+          nombre,
+          correo,
+          contrasena: hash,
+        },
+      });
 
-  return { usuarioAdmin, correoAdmin, passAdmin };
+  // Empleado asociado (opcional por schema, pero te conviene tenerlo para rendiciones/HH)
+  const empExisting = await prisma.empleado.findFirst({
+    where: { usuario_id: usuario.id },
+    select: { id: true },
+  });
+
+  const empData = {
+    rut: empleado?.rut ?? null,
+    cargo: empleado?.cargo ?? "Administrador",
+    telefono: empleado?.telefono ?? null,
+    activo: true,
+    eliminado: false,
+    eliminado_en: null,
+  };
+
+  const empleadoRow = empExisting
+    ? await prisma.empleado.update({
+        where: { id: empExisting.id },
+        data: empData,
+      })
+    : await prisma.empleado.create({
+        data: {
+          usuario_id: usuario.id,
+          ...empData,
+        },
+      });
+
+  return { usuario, empleado: empleadoRow };
 }
 
 async function upsertClienteDemo({ empresaId }) {
@@ -185,82 +234,191 @@ async function upsertClienteDemo({ empresaId }) {
     select: { id: true },
   });
 
+  const cliente = existing
+    ? await prisma.cliente.update({
+        where: { id: existing.id },
+        data: {
+          nombre: "Cliente Demo",
+          rut: "11.111.111-1",
+          telefono: "+56 9 2222 3333",
+          notas: "Cliente de prueba para desarrollo",
+          eliminado: false,
+          eliminado_en: null,
+        },
+      })
+    : await prisma.cliente.create({
+        data: {
+          empresa_id: empresaId,
+          nombre: "Cliente Demo",
+          rut: "11.111.111-1",
+          correo,
+          telefono: "+56 9 2222 3333",
+          notas: "Cliente de prueba para desarrollo",
+        },
+      });
+
+  // Responsable principal
+  const respCorreo = "contacto@demo.com";
+  const respExisting = await prisma.clienteResponsable.findFirst({
+    where: { cliente_id: cliente.id, correo: respCorreo, eliminado: false },
+    select: { id: true },
+  });
+
+  const responsable = respExisting
+    ? await prisma.clienteResponsable.update({
+        where: { id: respExisting.id },
+        data: {
+          nombre: "Contacto Demo",
+          telefono: "+56 9 3333 4444",
+          cargo: "Compras",
+          area: "Operaciones",
+          es_principal: true,
+          eliminado: false,
+          eliminado_en: null,
+        },
+      })
+    : await prisma.clienteResponsable.create({
+        data: {
+          cliente_id: cliente.id,
+          nombre: "Contacto Demo",
+          correo: respCorreo,
+          telefono: "+56 9 3333 4444",
+          cargo: "Compras",
+          area: "Operaciones",
+          es_principal: true,
+        },
+      });
+
+  // Cuenta bancaria (lista)
+  const cuentaExisting = await prisma.clienteCuentaBancaria.findFirst({
+    where: { cliente_id: cliente.id, numero: "12345678", eliminado: false },
+    select: { id: true },
+  });
+
+  const cuenta = cuentaExisting
+    ? await prisma.clienteCuentaBancaria.update({
+        where: { id: cuentaExisting.id },
+        data: {
+          banco: "Banco de Chile",
+          tipo_cuenta: "Cuenta Corriente",
+          titular: "Cliente Demo",
+          rut_titular: "11.111.111-1",
+          correo_pago: "pagos@demo.com",
+          eliminado: false,
+          eliminado_en: null,
+        },
+      })
+    : await prisma.clienteCuentaBancaria.create({
+        data: {
+          cliente_id: cliente.id,
+          banco: "Banco de Chile",
+          tipo_cuenta: "Cuenta Corriente",
+          numero: "12345678",
+          titular: "Cliente Demo",
+          rut_titular: "11.111.111-1",
+          correo_pago: "pagos@demo.com",
+        },
+      });
+
+  // set cuenta principal (si aún no está)
+  if (!cliente.cuenta_principal_id || cliente.cuenta_principal_id !== cuenta.id) {
+    await prisma.cliente.update({
+      where: { id: cliente.id },
+      data: { cuenta_principal_id: cuenta.id },
+    });
+  }
+
+  return { cliente, responsable, cuenta };
+}
+
+async function upsertProveedorDemo({ empresaId }) {
+  const correo = "proveedor@demo.com";
+
+  const existing = await prisma.proveedor.findFirst({
+    where: { empresa_id: empresaId, correo, eliminado: false },
+    select: { id: true },
+  });
+
   if (existing) {
-    return prisma.cliente.update({
+    return prisma.proveedor.update({
       where: { id: existing.id },
       data: {
-        nombre: "Cliente Demo",
+        nombre: "Proveedor Demo",
+        rut: "22.222.222-2",
+        telefono: "+56 9 4444 5555",
+        notas: "Proveedor de prueba para desarrollo",
         eliminado: false,
         eliminado_en: null,
       },
     });
   }
 
-  return prisma.cliente.create({
+  return prisma.proveedor.create({
     data: {
       empresa_id: empresaId,
-      nombre: "Cliente Demo",
+      nombre: "Proveedor Demo",
+      rut: "22.222.222-2",
       correo,
+      telefono: "+56 9 4444 5555",
+      notas: "Proveedor de prueba para desarrollo",
     },
   });
 }
 
-async function upsertTipoDias({ empresaId }) {
-  const tipos = [
-    { nombre: "Normal", valor: 0 },
-    { nombre: "Feriado", valor: 200000 },
-    { nombre: "Urgencia", valor: 400000 },
-  ];
+/* =========================
+   Catálogos (por empresa)
+========================= */
 
-  for (const tipo of tipos) {
-    const existing = await prisma.tipoDia.findFirst({
-      where: { empresa_id: empresaId, nombre: tipo.nombre, eliminado: false },
+async function upsertUnidadItems({ empresaId }) {
+  const unidades = ["Hora", "Unidad", "Servicio", "Viaje", "Día"];
+
+  const map = {};
+  for (const nombre of unidades) {
+    const existing = await prisma.unidadItem.findFirst({
+      where: { empresa_id: empresaId, nombre, eliminado: false },
       select: { id: true },
     });
 
-    if (existing) {
-      await prisma.tipoDia.update({
-        where: { id: existing.id },
-        data: {
-          valor: tipo.valor,
-          eliminado: false,
-          eliminado_en: null,
-        },
-      });
-    } else {
-      await prisma.tipoDia.create({
-        data: {
-          empresa_id: empresaId,
-          nombre: tipo.nombre,
-          valor: tipo.valor,
-        },
-      });
-    }
+    const row = existing
+      ? await prisma.unidadItem.update({
+          where: { id: existing.id },
+          data: { eliminado: false, eliminado_en: null },
+        })
+      : await prisma.unidadItem.create({
+          data: { empresa_id: empresaId, nombre },
+        });
+
+    map[nombre] = row.id;
   }
+  return map; // { "Hora": id, ... }
 }
 
-async function upsertTipoItems({ empresaId }) {
+async function upsertTipoItems({ empresaId, unidadIds }) {
+  // OJO: codigo debe ser único por empresa (cuando eliminado=false)
   const tipos = [
-    { nombre: "HH", codigo: "HH", porcentajeUtilidad: 410 },
-    { nombre: "Material", codigo: "material", porcentajeUtilidad: 30 },
-    { nombre: "Logística", codigo: "logistica", porcentajeUtilidad: 20 },
-    { nombre: "Transporte", codigo: "transporte", porcentajeUtilidad: 10 },
-    { nombre: "Alimentación", codigo: "alimentacion", porcentajeUtilidad: 10 },
-    { nombre: "Estadía", codigo: "estadia", porcentajeUtilidad: 10 },
+    { nombre: "HH", codigo: "HH", porcentajeUtilidad: 410, unidad: "Hora" },
+    { nombre: "Material", codigo: "MATERIAL", porcentajeUtilidad: 30, unidad: "Unidad" },
+    { nombre: "Logística", codigo: "LOGISTICA", porcentajeUtilidad: 20, unidad: "Servicio" },
+    { nombre: "Transporte", codigo: "TRANSPORTE", porcentajeUtilidad: 10, unidad: "Viaje" },
+    { nombre: "Alimentación", codigo: "ALIMENTACION", porcentajeUtilidad: 10, unidad: "Día" },
+    { nombre: "Estadía", codigo: "ESTADIA", porcentajeUtilidad: 10, unidad: "Día" },
   ];
 
-  for (const tipo of tipos) {
+  for (const t of tipos) {
     const existing = await prisma.tipoItem.findFirst({
-      where: { empresa_id: empresaId, codigo: tipo.codigo, eliminado: false },
+      where: { empresa_id: empresaId, codigo: t.codigo, eliminado: false },
       select: { id: true },
     });
+
+    const unidadItemId = unidadIds?.[t.unidad] ?? null;
 
     if (existing) {
       await prisma.tipoItem.update({
         where: { id: existing.id },
         data: {
-          nombre: tipo.nombre,
-          porcentajeUtilidad: tipo.porcentajeUtilidad,
+          nombre: t.nombre,
+          porcentajeUtilidad: t.porcentajeUtilidad,
+          unidadItemId,
           eliminado: false,
           eliminado_en: null,
         },
@@ -269,50 +427,67 @@ async function upsertTipoItems({ empresaId }) {
       await prisma.tipoItem.create({
         data: {
           empresa_id: empresaId,
-          nombre: tipo.nombre,
-          codigo: tipo.codigo,
-          porcentajeUtilidad: tipo.porcentajeUtilidad,
+          nombre: t.nombre,
+          codigo: t.codigo,
+          porcentajeUtilidad: t.porcentajeUtilidad,
+          unidadItemId,
         },
       });
     }
   }
 }
 
-/**
- * ✅ CIF default (90000) por empresa
- * Esto reemplaza el intento de guardar "cif" dentro de TipoItem (que no existe).
- */
+async function upsertTipoDias({ empresaId }) {
+  // valor: tu sistema lo usa como extra/recargo (según tu lógica actual)
+  const tipos = [
+    { nombre: "Normal", valor: 0 },
+    { nombre: "Feriado", valor: 200000 },
+    { nombre: "Urgencia", valor: 400000 },
+  ];
+
+  for (const t of tipos) {
+    const existing = await prisma.tipoDia.findFirst({
+      where: { empresa_id: empresaId, nombre: t.nombre, eliminado: false },
+      select: { id: true },
+    });
+
+    if (existing) {
+      await prisma.tipoDia.update({
+        where: { id: existing.id },
+        data: { valor: t.valor, eliminado: false, eliminado_en: null },
+      });
+    } else {
+      await prisma.tipoDia.create({
+        data: { empresa_id: empresaId, nombre: t.nombre, valor: t.valor },
+      });
+    }
+  }
+}
+
 async function upsertCIFDefault({ empresaId }) {
-  const CIF_DEFAULT = 120000;
+  const valor = 120000;
   const nota = "CIF Default";
 
   const existing = await prisma.cIF.findFirst({
-    where: {
-      empresa_id: empresaId,
-      anio: null,
-      mes: null,
-      nota,
-    },
+    where: { empresa_id: empresaId, anio: null, mes: null, nota },
     select: { id: true },
   });
 
   if (existing) {
     return prisma.cIF.update({
       where: { id: existing.id },
-      data: { valor: CIF_DEFAULT },
+      data: { valor },
     });
   }
 
   return prisma.cIF.create({
-    data: {
-      empresa_id: empresaId,
-      valor: CIF_DEFAULT,
-      nota,
-      anio: null,
-      mes: null,
-    },
+    data: { empresa_id: empresaId, valor, nota, anio: null, mes: null },
   });
 }
+
+/* =========================
+   Main
+========================= */
 
 async function main() {
   console.log("🌱 Seed...");
@@ -321,42 +496,68 @@ async function main() {
 
   const empresa = await upsertEmpresa();
 
-  await upsertTipoDias({ empresaId: empresa.id });
-  await upsertTipoItems({ empresaId: empresa.id });
-
-  // ✅ CIF default por empresa
-  const cifDefault = await upsertCIFDefault({ empresaId: empresa.id });
-
+  // roles
+  const rolSuper = await upsertRol({
+    nombre: "SUPERADMIN",
+    codigo: "SUPERADMIN",
+    descripcion: "Acceso total (multi-módulo)",
+    orden: 1,
+  });
   const rolAdmin = await upsertRol({
     nombre: "ADMIN",
     codigo: "ADMIN",
     descripcion: "Administrador",
+    orden: 2,
   });
-
   const rolUser = await upsertRol({
     nombre: "USER",
     codigo: "USER",
     descripcion: "Usuario estándar",
+    orden: 3,
   });
 
-  const { usuarioAdmin, correoAdmin, passAdmin } = await upsertUsuarioAdmin({
+  // usuario principal + empleado
+  const adminCorreo = "admin@blueinge.com";
+  const { usuario: usuarioAdmin, empleado: empleadoAdmin } =
+    await upsertUsuarioConEmpleado({
+      empresaId: empresa.id,
+      rolId: rolSuper.id, // ✅ por tu comentario de superadmin
+      correo: adminCorreo,
+      nombre: "Administrador",
+      password: PASSWORD_DEFAULT,
+      empleado: {
+        rut: "18.888.888-8",
+        cargo: "Gerencia / Admin",
+        telefono: "+56 9 1111 0000",
+      },
+    });
+
+  // catálogos por empresa
+  const unidadIds = await upsertUnidadItems({ empresaId: empresa.id });
+  await upsertTipoItems({ empresaId: empresa.id, unidadIds });
+  await upsertTipoDias({ empresaId: empresa.id });
+  const cifDefault = await upsertCIFDefault({ empresaId: empresa.id });
+
+  // demo data mínimo útil
+  const { cliente, responsable, cuenta } = await upsertClienteDemo({
     empresaId: empresa.id,
-    rolAdminId: rolAdmin.id,
   });
-
-  const cliente = await upsertClienteDemo({ empresaId: empresa.id });
+  const proveedor = await upsertProveedorDemo({ empresaId: empresa.id });
 
   console.log("✅ Seed listo.");
   console.log("====================================");
-  console.log("🔐 Credenciales Admin:");
-  console.log(`Correo: ${correoAdmin}`);
-  console.log(`Clave : ${passAdmin}`);
-  console.log("Empresa ID:", empresa.id);
-  console.log("CIF Default ID:", cifDefault?.id);
-  console.log("Rol ADMIN ID:", rolAdmin.id);
-  console.log("Rol USER ID:", rolUser.id);
-  console.log("Usuario Admin ID:", usuarioAdmin.id);
-  console.log("Cliente Demo ID:", cliente?.id);
+  console.log("🏢 Empresa:", empresa.nombre, "|", empresa.id);
+  console.log("🔐 Usuario Admin:", adminCorreo);
+  console.log("🔑 Clave:", PASSWORD_DEFAULT);
+  console.log("👷 Empleado Admin:", empleadoAdmin.id);
+  console.log("👤 Roles:", {
+    SUPERADMIN: rolSuper.id,
+    ADMIN: rolAdmin.id,
+    USER: rolUser.id,
+  });
+  console.log("💰 CIF Default:", cifDefault.id);
+  console.log("🤝 Cliente Demo:", cliente.id, "| Responsable:", responsable.id, "| Cuenta:", cuenta.id);
+  console.log("🏭 Proveedor Demo:", proveedor.id);
   console.log("====================================");
 }
 

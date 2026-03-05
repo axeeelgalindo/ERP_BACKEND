@@ -44,10 +44,11 @@ model Empresa {
   cifs CIF[] // ✅ lado inverso
 
   // 👇 catálogos admin (por empresa)
-  tipoItems     TipoItem[]
-  tipoDias      TipoDia[]
-  unidadItems   UnidadItem[]
-  compraCosteos CompraCosteo[]
+  tipoItems      TipoItem[]
+  tipoDias       TipoDia[]
+  unidadItems    UnidadItem[]
+  compraCosteos  CompraCosteo[]
+  TareaHistorial TareaHistorial[]
 }
 
 /**
@@ -95,14 +96,14 @@ model Usuario {
   // ✅ inversa de Empleado.usuario
   empleado Empleado?
 
-  // ✅ inversa de Rendicion.revisada_por
-  rendiciones_revisadas Rendicion[]
+  rendiciones_revisadas Rendicion[] @relation("RendicionRevisadaPor")
 
   // ✅ inversa de AuditLog.usuario
   auditLogs AuditLog[]
 
   // ✅ inversa de Cotizacion.vendedor
   cotizaciones_creadas Cotizacion[] @relation("CotizacionVendedor")
+  rendicions           Rendicion[]
 
   @@unique([correo, eliminado])
 }
@@ -354,15 +355,15 @@ model Proyecto {
   fecha_fin_real    DateTime?
   dias_reales       Int?
 
-  creada_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
+  creada_en      DateTime         @default(now())
+  actualizado_en DateTime         @updatedAt
   // soft delete
-  eliminado      Boolean   @default(false)
+  eliminado      Boolean          @default(false)
   eliminado_en   DateTime?
-
-  cotizaciones Cotizacion[]
-  compras      Compra[]
-  rendiciones  Rendicion[]
+  tareaHistorial TareaHistorial[]
+  cotizaciones   Cotizacion[]
+  compras        Compra[]
+  rendiciones    Rendicion[]
 
   tareas   Tarea[]
   miembros ProyectoMiembro[]
@@ -469,13 +470,13 @@ model Tarea {
   jira_sprint      String?
   jira_issue_color String?
 
-  parent_id String?
-  parent    Tarea?  @relation("TareaParent", fields: [parent_id], references: [id], onDelete: SetNull)
-  children  Tarea[] @relation("TareaParent")
-
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
+  parent_id      String?
+  parent         Tarea?           @relation("TareaParent", fields: [parent_id], references: [id], onDelete: SetNull)
+  children       Tarea[]          @relation("TareaParent")
+  historial      TareaHistorial[]
+  creado_en      DateTime         @default(now())
+  actualizado_en DateTime         @updatedAt
+  eliminado      Boolean          @default(false)
   eliminado_en   DateTime?
 
   dependencias TareaDependencia[] @relation("TareaDependencias")
@@ -549,6 +550,50 @@ model TareaDependencia {
 
   @@unique([tarea_id, predecesora_id])
   @@index([predecesora_id])
+}
+
+enum TareaHistorialTipo {
+  ESTADO
+  AVANCE
+  FECHA_REAL
+  COMENTARIO
+  IMPORT
+}
+
+model TareaHistorial {
+  id String @id @default(cuid())
+
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  proyecto_id String
+  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  tarea_id String
+  tarea    Tarea  @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
+
+  tipo TareaHistorialTipo
+
+  from_estado String?
+  to_estado   String?
+
+  from_avance Int?
+  to_avance   Int?
+
+  from_inicio_real DateTime?
+  to_inicio_real   DateTime?
+  from_fin_real    DateTime?
+  to_fin_real      DateTime?
+
+  source   String? // "JIRA" | "ERP" | "SYSTEM"
+  actor_id String? // usuario que cambió (opcional)
+  metadata Json?
+
+  occurred_at DateTime @default(now())
+
+  @@index([empresa_id, proyecto_id, occurred_at])
+  @@index([tarea_id, occurred_at])
+  @@index([proyecto_id, occurred_at])
 }
 
 /**
@@ -845,6 +890,18 @@ model TipoItem {
  * COMPRAS
  * =========================
  */
+
+enum CompraDestino {
+  PROYECTO
+  ADMINISTRACION
+  TALLER
+}
+
+enum CentroCosto {
+  PMC
+  PUQ
+}
+
 enum estadoCompra {
   ORDEN_COMPRA
   FACTURADA
@@ -852,12 +909,22 @@ enum estadoCompra {
 }
 
 model Compra {
-  id          String    @id @default(cuid())
-  numero      Int       @unique @default(autoincrement())
-  empresa_id  String
-  empresa     Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  numero Int    @unique @default(autoincrement())
+
+  empresa_id String
+  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  // ✅ NUEVO: imputación (no solo proyecto)
+  destino      CompraDestino @default(PROYECTO) // PROYECTO | ADMINISTRACION | TALLER
+  centro_costo CentroCosto? // PMC | PUQ (solo ADMINISTRACION/TALLER)
+
+  // ✅ Proyecto opcional (solo cuando destino = PROYECTO)
   proyecto_id String?
   proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+
+  rendicion_id String? // ✅
+  rendicion    Rendicion? @relation(fields: [rendicion_id], references: [id])
 
   estado         estadoCompra @default(ORDEN_COMPRA)
   total          Float
@@ -866,8 +933,9 @@ model Compra {
   eliminado      Boolean      @default(false)
   eliminado_en   DateTime?
 
-  cotizacionId        String?
-  cotizacion          Cotizacion?    @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  cotizacionId String?
+  cotizacion   Cotizacion? @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+
   items               CompraItem[]
   asignaciones_costeo CompraCosteo[]
 
@@ -882,7 +950,7 @@ model Compra {
   fecha_docto     DateTime?
   fecha_recepcion DateTime?
 
-  // ✅ NUEVO: factura PDF (guardar archivo en local storage y aquí solo la URL/path)
+  // ✅ factura PDF
   factura_url    String?
   factura_numero String?   @db.VarChar(50)
   factura_fecha  DateTime?
@@ -890,6 +958,8 @@ model Compra {
 
   @@index([empresa_id])
   @@index([proyecto_id])
+  @@index([rendicion_id])
+  @@index([destino, centro_costo])
 }
 
 model CompraItem {
@@ -944,32 +1014,31 @@ model CompraCosteo {
  * =========================
  */
 model Rendicion {
-  id          String   @id @default(cuid())
-  empleado_id String
-  empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  id           String  @id @default(cuid())
+  empresa_id   String
+  empleado_id  String
+  proyecto_id  String? // ✅ AHORA OPCIONAL
+  destino      String
+  centro_costo String?
+  descripcion  String?
+  monto_total  Float   @default(0)
+  estado       String  @default("pendiente")
 
-  proyecto_id String
-  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
 
-  descripcion    String
-  monto_total    Float    @default(0)
-  estado         String   @default("pendiente")
-  creada_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
+  revisada_por_id String?
+  revisada_por    Usuario? @relation("RendicionRevisadaPor", fields: [revisada_por_id], references: [id])
 
-  revisada_por_id     String?
-  revisada_por        Usuario?  @relation(fields: [revisada_por_id], references: [id], onDelete: SetNull)
-  fecha_revision      DateTime?
-  comentario_revision String?
+  proyecto Proyecto? @relation(fields: [proyecto_id], references: [id])
+  empleado Empleado  @relation(fields: [empleado_id], references: [id])
 
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  items RendicionItem[]
-
-  @@index([proyecto_id])
-  @@index([estado])
-  @@index([revisada_por_id])
+  items     RendicionItem[]
+  compras   Compra[] // ✅ 1 rendición -> muchas compras (relación por Compra.rendicion_id)
+  usuario   Usuario?        @relation(fields: [usuarioId], references: [id])
+  usuarioId String?
 }
 
 model RendicionItem {

@@ -13,6 +13,7 @@ import {
   uploadFacturaCompra,
   getCompraCosteos,
   setCompraCosteos,
+  asignarRendicionACompra,
 } from "./controllers.js";
 
 export default async function compraRoutes(server) {
@@ -34,6 +35,9 @@ export default async function compraRoutes(server) {
 
   // CREATE
   server.post("/compras", createCompra);
+
+  // ASIGNAR RENDICIÓN (vincular compra con rendición)
+  server.patch("/compras/:id/asignar-rendicion", asignarRendicionACompra);
 
   // UPDATE
   server.put("/compras/:id", updateCompra);
