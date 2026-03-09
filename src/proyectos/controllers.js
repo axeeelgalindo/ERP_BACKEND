@@ -1041,7 +1041,13 @@ export async function obtenerInfoProyecto(request, reply) {
           include: { detalles: true }
         },
         cotizaciones: {
-          include: { ventas: true }
+          include: {
+            ventas: {
+              include: {
+                detalles: true
+              }
+            }
+          }
         },
         miembros: {
           include: { empleado: true }

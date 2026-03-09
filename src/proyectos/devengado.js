@@ -162,10 +162,23 @@ export async function reporteDevengadoProfesional(request, reply) {
     const cotizacion = await prisma.cotizacion.findFirst({
       where: { proyecto_id: proyectoId, eliminado: false, estado: "ACEPTADA" },
       orderBy: { fecha_documento: "desc" },
-      select: { id: true, numero: true, subtotal: true, iva: true, total: true, estado: true, fecha_documento: true },
+      include: {
+        ventas: {
+          include: { detalles: true }
+        }
+      }
     });
 
-    const base = pickBaseMoney(cotizacion, baseParam);
+    let margenObjetivo = 0;
+    let costoPlan = 0;
+
+    if (cotizacion && cotizacion.ventas && cotizacion.ventas.length > 0) {
+      const v = cotizacion.ventas[0];
+      margenObjetivo = v.utilidadObjetivoPct || 0;
+      costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+    }
+
+    const base = { ...pickBaseMoney(cotizacion, baseParam), margenObjetivo, costoPlan };
 
     const tareasRaw = await prisma.tarea.findMany({
       where: { proyecto_id: proyectoId, eliminado: false },
