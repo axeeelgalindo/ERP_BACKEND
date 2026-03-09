@@ -1023,9 +1023,6 @@ export async function reporteDevengadoProyecto(request, reply) {
   });
 }
 
-
-
-
 //prueba obtener datos...
 export async function obtenerInfoProyecto(request, reply) {
   try {
@@ -1040,11 +1037,15 @@ export async function obtenerInfoProyecto(request, reply) {
       include: {
         compras: true,
         rendiciones: true,
-        tareas: true,
-        subtareas: true,
-        cotizaciones: true,
-        ventas: true,
-        empleados: true,
+        tareas: {
+          include: { detalles: true }
+        },
+        cotizaciones: {
+          include: { ventas: true }
+        },
+        miembros: {
+          include: { empleado: true }
+        }
       }
     });
 
