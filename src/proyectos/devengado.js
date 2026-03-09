@@ -212,12 +212,66 @@ export async function reporteDevengadoProfesional(request, reply) {
 
     const devengadoAcumulado = Math.round(base.valor * avanceActual01);
 
-    // Costos (por ahora 0 si no tienes fuentes ya conectadas)
+    // Compras
+    const comprasRaw = await prisma.compra.findMany({
+      where: { proyecto_id: proyectoId, eliminado: false },
+      include: { proveedor: { select: { nombre: true } } },
+      orderBy: { id: "desc" },
+    });
+
+    const comprasList = comprasRaw.map(c => ({
+      numero: c.numero,
+      fecha: c.fecha_docto || c.creada_en,
+      proveedor: c.proveedor?.nombre || "Sin proveedor",
+      estado: c.estado,
+      total: c.total,
+      factura_url: c.factura_url,
+    }));
+
+    // Equipo Asignado
+    const miembros = await prisma.proyectoMiembro.findMany({
+      where: { proyecto_id: proyectoId },
+      include: {
+        empleado: {
+          include: {
+            usuario: { select: { nombre: true } },
+            hhRegistros: {
+              orderBy: [{ anio: 'desc' }, { mes: 'desc' }],
+              take: 1,
+            }
+          }
+        }
+      }
+    });
+
+    const empleadosList = miembros.map(m => {
+      const e = m.empleado;
+      const u = e?.usuario;
+      const hh = e?.hhRegistros?.[0];
+      return {
+        nombre: u?.nombre || "Usuario",
+        cargo: e?.cargo || m.rol || "Miembro",
+        costoHH: hh?.costoHH || Math.round((e?.sueldo_base || 500000) / 180),
+      };
+    });
+
+    // Rendiciones aprobadas
+    const rendiciones = await prisma.rendicion.findMany({
+      where: { proyecto_id: proyectoId, eliminado: false, estado: { in: ["aprobada", "pagada", "revisada"] } },
+    });
+    const totalRendiciones = rendiciones.reduce((acc, r) => acc + r.monto_total, 0);
+
+    const totalCompras = comprasList.reduce((acc, c) => acc + c.total, 0);
+    const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + c.total, 0);
+    const hhCostoReal = tareasRaw.reduce((acc, t) => acc + (t.total_costo_real || 0), 0);
+    const costoAcumulado = totalCompras + totalRendiciones + hhCostoReal;
+
     const costos = {
-      totalCompras: 0,
-      totalRendiciones: 0,
-      valorHHReal: 0,
-      costoAcumulado: 0,
+      totalCompras,
+      totalRendiciones,
+      valorHHReal: hhCostoReal,
+      comprasFacturadas,
+      costoAcumulado,
     };
 
     const yaPasoCosto = devengadoAcumulado >= costos.costoAcumulado;
@@ -381,6 +435,8 @@ export async function reporteDevengadoProfesional(request, reply) {
         atrasadas,
         pendientesFuturas,
       },
+      compras: comprasList,
+      empleados: empleadosList,
       weekly,
       notas: [
         "REAL semanal se calcula con TareaHistorial (audit). Si no has guardado eventos aún, el delta puede salir 0.",
