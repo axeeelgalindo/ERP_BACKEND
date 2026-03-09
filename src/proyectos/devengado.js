@@ -244,6 +244,8 @@ export async function reporteDevengadoProfesional(request, reply) {
       }
     });
 
+    console.log("MIEMBROS RAW EN DEVENGADO:", JSON.stringify(miembros, null, 2));
+
     const empleadosList = miembros.map(m => {
       const e = m.empleado;
       const u = e?.usuario;
