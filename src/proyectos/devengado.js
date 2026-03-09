@@ -305,7 +305,11 @@ export async function reporteDevengadoProfesional(request, reply) {
       return sumTask + taskCosto;
     }, 0);
 
-    const costoAcumulado = totalCompras + totalRendiciones + hhCostoReal;
+    // REGLA DEL NEGOCIO (USER): El costo real NO puede ser cero si hay un costeo hecho. 
+    // Como mínimo, el proyecto ha "costado" lo que se planificó en sus detalles de venta sin la utilidad.
+    // Si los costos reales contabilizados superan al plan, usamos los reales contabilizados.
+    const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
+    const costoAcumulado = Math.max(costoPlan, costosRealesContabilizados);
 
     const costos = {
       totalCompras,
@@ -313,6 +317,7 @@ export async function reporteDevengadoProfesional(request, reply) {
       valorHHReal: hhCostoReal,
       comprasFacturadas,
       costoAcumulado,
+      costoPlan,
     };
 
     const yaPasoCosto = devengadoAcumulado >= costos.costoAcumulado;
