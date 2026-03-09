@@ -38,12 +38,12 @@ export async function listProyectos(request, reply) {
     ...(includeDeleted !== "true" ? { eliminado: false } : {}),
     ...(q
       ? {
-          OR: [
-            { nombre: { contains: q, mode: "insensitive" } },
-            { descripcion: { contains: q, mode: "insensitive" } },
-            { id: { contains: q, mode: "insensitive" } },
-          ],
-        }
+        OR: [
+          { nombre: { contains: q, mode: "insensitive" } },
+          { descripcion: { contains: q, mode: "insensitive" } },
+          { id: { contains: q, mode: "insensitive" } },
+        ],
+      }
       : {}),
     ...(estado ? { estado } : {}),
   };
@@ -286,8 +286,8 @@ export async function createProyecto(req, reply) {
     const miembrosIds = Array.isArray(payload?.miembrosIds)
       ? payload.miembrosIds
       : Array.isArray(payload?.miembros)
-      ? payload.miembros
-      : [];
+        ? payload.miembros
+        : [];
 
     if (!String(nombre || "").trim()) {
       return reply.code(400).send({
@@ -320,10 +320,10 @@ export async function createProyecto(req, reply) {
         // ✅ crea ProyectoMiembro
         ...(miembrosIds.length
           ? {
-              miembros: {
-                create: miembrosIds.map((empleado_id) => ({ empleado_id })),
-              },
-            }
+            miembros: {
+              create: miembrosIds.map((empleado_id) => ({ empleado_id })),
+            },
+          }
           : {}),
       },
       include: {
@@ -683,41 +683,41 @@ export async function reporteDevengadoProyecto(request, reply) {
   const itemsBase =
     subtareas.length > 0
       ? subtareas.map((d) => ({
-          tipo: "SUBTAREA",
-          id: d.id,
-          parentId: d.tarea_id,
-          nombre: d.titulo,
-          estado: d.estado,
-          avance: d.avance,
-          fecha_inicio_plan: d.fecha_inicio_plan,
-          fecha_fin_plan: d.fecha_fin_plan,
-          fecha_inicio_real: d.fecha_inicio_real,
-          fecha_fin_real: d.fecha_fin_real,
-          horas_plan: d.horas_plan,
-          horas_real: d.horas_real,
-          valor_hora: d.valor_hora,
-          costo_plan: d.costo_plan,
-          costo_real: d.costo_real,
-          responsable: d.responsable,
-        }))
+        tipo: "SUBTAREA",
+        id: d.id,
+        parentId: d.tarea_id,
+        nombre: d.titulo,
+        estado: d.estado,
+        avance: d.avance,
+        fecha_inicio_plan: d.fecha_inicio_plan,
+        fecha_fin_plan: d.fecha_fin_plan,
+        fecha_inicio_real: d.fecha_inicio_real,
+        fecha_fin_real: d.fecha_fin_real,
+        horas_plan: d.horas_plan,
+        horas_real: d.horas_real,
+        valor_hora: d.valor_hora,
+        costo_plan: d.costo_plan,
+        costo_real: d.costo_real,
+        responsable: d.responsable,
+      }))
       : tareas.map((t) => ({
-          tipo: "TAREA",
-          id: t.id,
-          parentId: null,
-          nombre: t.nombre,
-          estado: t.estado,
-          avance: t.avance,
-          fecha_inicio_plan: t.fecha_inicio_plan,
-          fecha_fin_plan: t.fecha_fin_plan,
-          fecha_inicio_real: t.fecha_inicio_real,
-          fecha_fin_real: t.fecha_fin_real,
-          horas_plan: t.total_horas_plan ?? null,
-          horas_real: t.total_horas_reales ?? null,
-          valor_hora: null,
-          costo_plan: t.total_costo_plan ?? null,
-          costo_real: t.total_costo_real ?? null,
-          responsable: t.responsable,
-        }));
+        tipo: "TAREA",
+        id: t.id,
+        parentId: null,
+        nombre: t.nombre,
+        estado: t.estado,
+        avance: t.avance,
+        fecha_inicio_plan: t.fecha_inicio_plan,
+        fecha_fin_plan: t.fecha_fin_plan,
+        fecha_inicio_real: t.fecha_inicio_real,
+        fecha_fin_real: t.fecha_fin_real,
+        horas_plan: t.total_horas_plan ?? null,
+        horas_real: t.total_horas_reales ?? null,
+        valor_hora: null,
+        costo_plan: t.total_costo_plan ?? null,
+        costo_real: t.total_costo_real ?? null,
+        responsable: t.responsable,
+      }));
 
   // -----------------------------
   // rangos semana pasada / esta semana
@@ -1023,3 +1023,38 @@ export async function reporteDevengadoProyecto(request, reply) {
   });
 }
 
+
+
+
+//prueba obtener datos...
+export async function obtenerInfoProyecto(request, reply) {
+  try {
+    const { id } = request.params;
+
+    if (!id) {
+      return reply.code(400).send({ ok: false, error: "Falta el id del proyecto" });
+    }
+
+    const proyecto = await prisma.proyecto.findUnique({
+      where: { id },
+      include: {
+        compras: true,
+        rendiciones: true,
+        tareas: true,
+        subtareas: true,
+        cotizaciones: true,
+        ventas: true,
+        empleados: true,
+      }
+    });
+
+    if (!proyecto) {
+      return reply.code(404).send({ ok: false, error: "Proyecto no encontrado" });
+    }
+
+    return reply.send({ ok: true, proyecto });
+  } catch (error) {
+    console.error("Error al obtener info del proyecto:", error);
+    return reply.code(500).send({ ok: false, error: "Error interno del servidor" });
+  }
+}
