@@ -183,6 +183,15 @@ export async function reporteDevengadoProfesional(request, reply) {
         dias_plan: true,
         total_horas_plan: true,
         total_costo_plan: true,
+        total_horas_reales: true,
+        total_costo_real: true,
+        detalles: {
+          select: {
+            costo_real: true,
+            horas_real: true,
+            valor_hora: true,
+          }
+        }
       },
       orderBy: [{ fecha_inicio_plan: "asc" }],
     });
@@ -265,7 +274,24 @@ export async function reporteDevengadoProfesional(request, reply) {
 
     const totalCompras = comprasList.reduce((acc, c) => acc + c.total, 0);
     const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + c.total, 0);
-    const hhCostoReal = tareasRaw.reduce((acc, t) => acc + (t.total_costo_real || 0), 0);
+
+    // Costo HH Real (sumando tareas + subtareas)
+    const hhCostoReal = tareasRaw.reduce((sumTask, t) => {
+      let taskCosto = t.total_costo_real || 0;
+
+      // Sumar detalles (subtareas)
+      if (t.detalles && t.detalles.length > 0) {
+        const detCost = t.detalles.reduce((sumDet, d) => {
+          const costoDirecto = d.costo_real ?? null;
+          const costoCalc = (d.horas_real != null && d.valor_hora != null) ? d.horas_real * d.valor_hora : 0;
+          return sumDet + (costoDirecto != null ? costoDirecto : costoCalc);
+        }, 0);
+        taskCosto += detCost;
+      }
+
+      return sumTask + taskCosto;
+    }, 0);
+
     const costoAcumulado = totalCompras + totalRendiciones + hhCostoReal;
 
     const costos = {
