@@ -556,12 +556,40 @@ export async function updateTarea(request, reply) {
       if (a >= 100) updateData.estado = "completada";
       else if (a > 0) updateData.estado = "en_progreso";
       else updateData.estado = "pendiente";
+    } else if (Object.prototype.hasOwnProperty.call(data, "estado")) {
+      // ✅ Si cambian el estado manualmente en el modal (sin tocar avance)
+      if (data.estado === "completada") {
+        updateData.avance = 100;
+      } else if (data.estado === "pendiente") {
+        updateData.avance = 0;
+      }
     }
 
-    return tx.tarea.update({
+    const updated = await tx.tarea.update({
       where: { id },
       data: updateData,
     });
+
+    // ✅ Si se completó la tarea, completar recursivamente todas las subtareas
+    if (updateData.estado === "completada") {
+      await tx.tareaDetalle.updateMany({
+        where: { tarea_id: id, eliminado: false },
+        data: {
+          estado: "completada",
+          avance: 100,
+          // opcional: setear fechas reales si no existen
+          fecha_inicio_real: fir || new Date(),
+          fecha_fin_real: ffr || new Date(),
+        },
+      });
+    }
+
+    // Recalcular épica
+    if (updated.epica_id) {
+      await recomputeEpicaFromTareas(tx, updated.epica_id);
+    }
+
+    return updated;
   });
 
   return reply.send({ ok: true, row });

@@ -3,6 +3,7 @@ import { valorHoraFromEmpleado } from "../lib/costos.js";
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
+import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
 
 const prisma = new PrismaClient();
 
@@ -123,37 +124,6 @@ export async function recomputeTareaFromDetalles(tx, tareaId) {
   });
 
   return updated; // trae epica_id para seguir recompute épica
-}
-export async function recomputeEpicaFromTareas(tx, epicaId) {
-  const tareas = await tx.tarea.findMany({
-    where: { epica_id: epicaId, eliminado: false },
-    select: { avance: true, estado: true },
-  });
-
-  if (!tareas.length) {
-    await tx.epica.update({
-      where: { id: epicaId },
-      data: { avance: 0, estado: "pendiente" },
-    });
-    return;
-  }
-
-  const avances = tareas.map((t) => {
-    const a = Number(t.avance ?? 0);
-    if (!Number.isFinite(a)) return 0;
-    return Math.max(0, Math.min(100, a));
-  });
-
-  const avg = Math.round(avances.reduce((s, a) => s + a, 0) / avances.length);
-
-  let estado = "pendiente";
-  if (avg >= 100) estado = "completada";
-  else if (avg > 0) estado = "en_progreso";
-
-  await tx.epica.update({
-    where: { id: epicaId },
-    data: { avance: avg, estado },
-  });
 }
 
 /* ========== LISTAR DETALLES DE UNA TAREA ========== */
@@ -410,6 +380,19 @@ export async function updateTareaDetalle(request, reply) {
       diasReales = null;
       data.estado = "pendiente";
       data.avance = 0;
+    } else {
+      // Si no hay acción pero se cambia el estado manualmente
+      if (data.estado === "completada") {
+        data.avance = 100;
+        if (!fir) fir = new Date();
+        if (!ffr) ffr = new Date();
+        diasReales = daysBetweenInclusive(fir, ffr);
+      } else if (data.estado === "pendiente") {
+        data.avance = 0;
+        fir = null;
+        ffr = null;
+        diasReales = null;
+      }
     }
 
     // ===== RESPONSABLE / COSTOS (igual que antes) =====

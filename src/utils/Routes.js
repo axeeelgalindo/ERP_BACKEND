@@ -7,8 +7,8 @@ const SKIP_DIRS = new Set(["lib", "utils", "migrations", "prisma", "node_modules
 
 export default async function Router(server) {
   const __filename = fileURLToPath(import.meta.url);
-  const __dirname  = path.dirname(__filename);
-  const srcDir     = path.resolve(__dirname, ".."); // => .../src
+  const __dirname = path.dirname(__filename);
+  const srcDir = path.resolve(__dirname, ".."); // => .../src
 
   const entries = fs.readdirSync(srcDir, { withFileTypes: true });
 

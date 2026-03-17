@@ -66,8 +66,17 @@ export async function recomputeEpicaFromTareas(tx, epicaId) {
     },
   });
 
-  // Si no hay tareas, reset básico
+  // Si no hay tareas, reset básico (pero respetar si ya está completada)
   if (!tareas.length) {
+    const epicaActual = await tx.epica.findUnique({
+      where: { id: epicaId },
+      select: { estado: true, avance: true },
+    });
+
+    if (epicaActual?.estado === "completada" && epicaActual?.avance === 100) {
+      return;
+    }
+
     await tx.epica.update({
       where: { id: epicaId },
       data: {
@@ -296,9 +305,8 @@ export async function updateEpica(request, reply) {
   });
   if (!current) return httpError(reply, 404, "Épica no encontrada");
 
-  const row = await prisma.epica.update({
-    where: { id },
-    data: {
+  const row = await prisma.$transaction(async (tx) => {
+    const updateData = {
       ...(data.nombre != null ? { nombre: String(data.nombre).trim() } : {}),
       ...(data.descripcion !== undefined
         ? {
@@ -307,7 +315,60 @@ export async function updateEpica(request, reply) {
               : null,
           }
         : {}),
-    },
+    };
+
+    // ✅ Sincronizar estado y avance
+    if (Object.prototype.hasOwnProperty.call(data, "avance")) {
+      let a = Number(data.avance);
+      if (Number.isNaN(a)) a = 0;
+      a = Math.max(0, Math.min(100, Math.round(a)));
+      updateData.avance = a;
+
+      if (a >= 100) updateData.estado = "completada";
+      else if (a > 0) updateData.estado = "en_progreso";
+      else updateData.estado = "pendiente";
+    } else if (Object.prototype.hasOwnProperty.call(data, "estado")) {
+      updateData.estado = data.estado;
+      if (data.estado === "completada") {
+        updateData.avance = 100;
+      } else if (data.estado === "pendiente") {
+        updateData.avance = 0;
+      }
+    }
+
+    const updated = await tx.epica.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // ✅ Si se completa la épica, completar todas sus tareas y subtareas
+    if (updateData.estado === "completada") {
+      // 1. Obtener todas las tareas de esta épica para poder actualizar subtareas por ID
+      const tareasActuales = await tx.tarea.findMany({
+        where: { epica_id: id, eliminado: false },
+        select: { id: true },
+      });
+      const tareaIds = tareasActuales.map((t) => t.id);
+
+      // 2. Actualizar las tareas
+      if (tareaIds.length > 0) {
+        await tx.tarea.updateMany({
+          where: { id: { in: tareaIds } },
+          data: { estado: "completada", avance: 100 },
+        });
+
+        // 3. Actualizar todas las subtareas de esas tareas
+        await tx.tareaDetalle.updateMany({
+          where: {
+            tarea_id: { in: tareaIds },
+            eliminado: false,
+          },
+          data: { estado: "completada", avance: 100 },
+        });
+      }
+    }
+
+    return updated;
   });
 
   return reply.send({ ok: true, row });

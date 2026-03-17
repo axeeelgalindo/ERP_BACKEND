@@ -103,6 +103,15 @@ export async function listProyectos(request, reply) {
             detalles: { where: { eliminado: false } }, // ✅ real en tu schema
           },
         },
+
+        // ✅ MIEMBROS: necesarios para pre-cargar en el modal de edición
+        miembros: {
+          include: {
+            empleado: {
+              include: { usuario: { select: { nombre: true, correo: true } } },
+            },
+          },
+        },
       },
       skip,
       take,
