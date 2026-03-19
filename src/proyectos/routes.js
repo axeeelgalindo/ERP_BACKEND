@@ -12,7 +12,7 @@ import {
   reporteDevengadoProyecto,
   obtenerInfoProyecto
 } from "./controllers.js";
-import { reporteDevengadoProfesional } from "./devengado.js";
+import { reporteDevengadoProfesional } from "./devengado_new.js";
 
 import { importJiraCSV } from "./proyectos.jira.controller.js";
 

@@ -1,12 +1,13 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
-console.log("!!! DEVENGADO.JS LOADED - NUCLEAR_STABLE !!!");
+
+console.log("!!! DEVENGADO_NEW.JS LOADED !!!");
 
 /** ===== Helpers fecha (Lun-Dom) ===== */
 function startOfWeekMonday(d) {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
-  const day = x.getDay(); // 0=Dom,1=Lun...
+  const day = x.getDay();
   const diff = (day === 0 ? -6 : 1 - day);
   x.setDate(x.getDate() + diff);
   return x;
@@ -43,21 +44,16 @@ function overlapDays(a1, a2, b1, b2) {
   return Math.floor((e.getTime() - s.getTime()) / (24 * 3600 * 1000)) + 1;
 }
 
-/** ===== Peso tarea (ponderación) ===== */
 function taskWeight(t) {
   const costo = Number(t.total_costo_plan);
   if (Number.isFinite(costo) && costo > 0) return costo;
-
   const horas = Number(t.total_horas_plan);
   if (Number.isFinite(horas) && horas > 0) return horas;
-
   const dias = Number(t.dias_plan);
   if (Number.isFinite(dias) && dias > 0) return dias;
-
   return 1;
 }
 
-/** ===== Base monetaria ===== */
 function pickBaseMoney(cot, base) {
   const vendido = Number(cot?.subtotal || 0);
   const cotizado = Number(cot?.total || 0);
@@ -66,13 +62,9 @@ function pickBaseMoney(cot, base) {
   return { fuente: b, valor: monto, valorVendido: vendido, valorCotizado: cotizado };
 }
 
-/**
- * Devuelve avance ponderado (0..1) usando los avances “as-of” una fecha:
- */
 async function getWeightedProgressAsOf({ proyectoId, asOf, tareas, weightsById }) {
   if (!tareas.length) return 0;
   const tareaIds = tareas.map((t) => t.id);
-
   const rows = await prisma.$queryRaw`
     SELECT DISTINCT ON (h.tarea_id)
       h.tarea_id, h.to_avance, h.occurred_at
@@ -83,27 +75,20 @@ async function getWeightedProgressAsOf({ proyectoId, asOf, tareas, weightsById }
       AND h.to_avance IS NOT NULL
     ORDER BY h.tarea_id, h.occurred_at DESC
   `;
-
   const map = new Map();
   for (const r of rows) {
     map.set(r.tarea_id, Number(r.to_avance));
   }
-
-  let sumW = 0;
-  let sumWA = 0;
+  let sumW = 0, sumWA = 0;
   for (const t of tareas) {
     const w = weightsById.get(t.id) || 1;
     const a100 = map.has(t.id) ? map.get(t.id) : Number(t.avance || 0);
     const a01 = pct01From100(a100);
-    sumW += w;
-    sumWA += w * a01;
+    sumW += w; sumWA += w * a01;
   }
   return sumW > 0 ? sumWA / sumW : 0;
 }
 
-/**
- * Tareas terminadas en la semana (REAL)
- */
 async function getCompletedTasksInRange({ proyectoId, start, end }) {
   const rows = await prisma.$queryRaw`
     SELECT DISTINCT ON (h.tarea_id)
@@ -121,9 +106,9 @@ async function getCompletedTasksInRange({ proyectoId, start, end }) {
   return rows;
 }
 
-/** ===== Controller ===== */
 export async function reporteDevengadoProfesional(request, reply) {
   try {
+    console.log("REPORTE_DEVENGADO_PROFESIONAL EXECUTED FROM NEW FILE");
     const proyectoId = request.params.id;
     const baseParam = (request.query.base || "VENTA").toUpperCase();
 
@@ -138,27 +123,20 @@ export async function reporteDevengadoProfesional(request, reply) {
         }
       },
     });
-
     if (!proyecto) return reply.code(404).send({ ok: false, error: "Proyecto no encontrado" });
 
     const cotizacion = await prisma.cotizacion.findFirst({
       where: { proyecto_id: proyectoId, eliminado: false, estado: "ACEPTADA" },
       orderBy: { fecha_documento: "desc" },
-      include: {
-        ventas: {
-          include: { detalles: true }
-        }
-      }
+      include: { ventas: { include: { detalles: true } } }
     });
 
-    let margenObjetivo = 0;
-    let costoPlan = 0;
+    let margenObjetivo = 0, costoPlan = 0;
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
       costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
     }
-
     const base = { ...pickBaseMoney(cotizacion, baseParam), margenObjetivo, costoPlan };
 
     const tareasRaw = await prisma.tarea.findMany({
@@ -178,17 +156,14 @@ export async function reporteDevengadoProfesional(request, reply) {
     });
 
     const tareas = tareasRaw.map((t) => ({
-      ...t,
-      tipo: t.jira_tipo || "Tarea",
+      ...t, tipo: t.jira_tipo || "Tarea",
       nombre: t.jira_key ? `${t.jira_key} ${t.nombre || ""}`.trim() : (t.nombre || "Sin nombre"),
     }));
 
     const weightsById = new Map();
     let sumW = 0;
     for (const t of tareas) {
-      const w = taskWeight(t);
-      weightsById.set(t.id, w);
-      sumW += w;
+      const w = taskWeight(t); weightsById.set(t.id, w); sumW += w;
     }
 
     let sumWA = 0;
@@ -204,26 +179,11 @@ export async function reporteDevengadoProfesional(request, reply) {
       include: { proveedor: { select: { nombre: true } } },
       orderBy: { id: "desc" },
     });
-
     const comprasList = comprasRaw.map(c => ({
       numero: c.numero, fecha: c.fecha_docto || c.creada_en,
       proveedor: c.proveedor?.nombre || "Sin proveedor",
       estado: c.estado, total: c.total, factura_url: c.factura_url, tipo_doc: c.tipo_doc
     }));
-
-    const pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
-      if (c.tipo_doc === 33 || c.tipo_doc === 34) return acc + (c.total || 0);
-      if (c.tipo_doc === 61) return acc - (c.total || 0);
-      return acc;
-    }, 0);
-
-    const rendiciones = await prisma.rendicion.findMany({
-      where: { proyecto_id: proyectoId, eliminado: false, estado: { in: ["aprobada", "pagada", "revisada"] } },
-    });
-    const totalRendiciones = rendiciones.reduce((acc, r) => acc + r.monto_total, 0);
-
-    const totalCompras = comprasList.reduce((acc, c) => acc + c.total, 0);
-    const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + c.total, 0);
 
     const hhCostoReal = tareasRaw.reduce((sumTask, t) => {
       let taskCosto = t.total_costo_real || 0;
@@ -237,99 +197,40 @@ export async function reporteDevengadoProfesional(request, reply) {
       return sumTask + taskCosto;
     }, 0);
 
-    const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
-    const costoAcumulado = Math.max(costoPlan, costosRealesContabilizados);
-
     const costos = {
-      totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
-      comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
+      totalCompras: comprasList.reduce((acc, c) => acc + c.total, 0),
+      valorHHReal: hhCostoReal,
+      costoAcumulado: Math.max(costoPlan, comprasList.reduce((acc, c) => acc + c.total, 0) + hhCostoReal),
+      costoPlan,
     };
 
-    const yaPasoCosto = devengadoAcumulado >= costos.costoAcumulado;
-    const faltanteParaEquilibrio = Math.max(0, costos.costoAcumulado - devengadoAcumulado);
-    const utilidadDevengada = Math.max(0, devengadoAcumulado - costos.costoAcumulado);
-
-    const now = new Date();
-    const semanaActual = { inicio: startOfWeekMonday(now), fin: endOfWeekSunday(now) };
-    const semanaPasada = { inicio: addDays(semanaActual.inicio, -7), fin: addDays(semanaActual.fin, -7) };
-    const semanaProxima = { inicio: addDays(semanaActual.inicio, 7), fin: addDays(semanaActual.fin, 7) };
-
-    const weeklyPlanned = (r) => {
-      let sumPlannedW = 0;
-      for (const t of tareas) {
-        if (!t.fecha_inicio_plan || !t.fecha_fin_plan) continue;
-        const w = weightsById.get(t.id) || 1;
-        const totalDays = Math.max(1, overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, t.fecha_inicio_plan, t.fecha_fin_plan));
-        const ov = overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, r.inicio, r.fin);
-        if (ov <= 0) continue;
-        sumPlannedW += (ov / totalDays) * w;
-      }
-      const pct = sumW > 0 ? sumPlannedW / sumW : 0;
-      return { pct: Math.round(pct * 10000) / 100, amount: Math.round(base.valor * pct) };
-    };
-
-    const weeklyReal = async (r) => {
-      const startMinus = new Date(r.inicio);
-      startMinus.setMilliseconds(startMinus.getMilliseconds() - 1);
-      const aStart = await getWeightedProgressAsOf({ proyectoId, asOf: startMinus, tareas, weightsById });
-      const aEnd = await getWeightedProgressAsOf({ proyectoId, asOf: r.fin, tareas, weightsById });
-      const delta = Math.max(0, aEnd - aStart);
-      const completedRows = await getCompletedTasksInRange({ proyectoId, start: r.inicio, end: r.fin });
-      const completedIds = [...new Set(completedRows.map((x) => x.tarea_id))];
-      const taskMap = new Map(tareas.map((t) => [t.id, t]));
-      const completedTasks = completedIds.map((id) => taskMap.get(id)).filter(Boolean);
-      return {
-        avanceSemanaPct: Math.round(delta * 10000) / 100,
-        devengadoSemana: Math.round(base.valor * delta),
-        tareasHechas: completedTasks,
-        tareasHechasCount: completedTasks.length,
-      };
-    };
-
-    let minTaskDate = proyecto.fecha_inicio_plan;
-    let maxTaskDate = proyecto.fecha_fin_plan;
-    for (const t of tareas) {
-      if (t.fecha_inicio_plan && (!minTaskDate || t.fecha_inicio_plan < minTaskDate)) minTaskDate = t.fecha_inicio_plan;
-      if (t.fecha_fin_plan && (!maxTaskDate || t.fecha_fin_plan > maxTaskDate)) maxTaskDate = t.fecha_fin_plan;
-    }
-    const projectStart = minTaskDate || new Date(now.getTime() - 30 * 24 * 3600 * 1000);
-    const historyEnd = new Date(Math.max(now.getTime(), (maxTaskDate || now).getTime()));
-    const plotStart = new Date(Math.min(now.getTime(), projectStart.getTime()));
-    
     const weeklyHistory = [];
-    let curr = startOfWeekMonday(plotStart);
-    let iter = 1;
-    while (curr <= historyEnd && iter <= 52) {
-      const sStart = new Date(curr);
-      const sEnd = endOfWeekSunday(curr);
-      const p = weeklyPlanned({ inicio: sStart, fin: sEnd });
-      const r = await weeklyReal({ inicio: sStart, fin: sEnd });
-      weeklyHistory.push({
-        num: iter, label: `W${iter}`, day: `W${iter}`,
-        inicio: sStart, fin: sEnd, plan: p, real: r,
-        ingreso: r.devengadoSemana,
-        costo: (costos.costoAcumulado / 8) * (0.8 + Math.random() * 0.4)
-      });
-      curr = addDays(curr, 7); iter++;
+    const now = new Date();
+    const historyEnd = new Date(Math.max(now.getTime(), (proyecto.fecha_fin_plan || now).getTime()));
+    let curr = startOfWeekMonday(now); // Start from now for simplicity in this debug step
+    for (let i = 1; i <= 8; i++) {
+        weeklyHistory.push({
+            num: i, label: `W${i}`, day: `W${i}`,
+            plan: { amount: Math.round(base.valor / 8) },
+            real: { devengadoSemana: 0 },
+            ingreso: 0, costo: costos.costoAcumulado / 8
+        });
     }
 
     return reply.send({
       ok: true, proyecto, financiero: {
         base, costos, devengado: {
           devengado: devengadoAcumulado, avancePct: Math.round(avanceActual01 * 10000) / 100,
-          utilidadDevengada, faltanteParaEquilibrio, yaPasoCosto
+          utilidadDevengada: Math.max(0, devengadoAcumulado - costos.costoAcumulado),
+          faltanteParaEquilibrio: Math.max(0, costos.costoAcumulado - devengadoAcumulado),
+          yaPasoCosto: devengadoAcumulado >= costos.costoAcumulado
         },
       },
-      tareas: {
-        conteo: {
-          enSemanaActual: tareas.filter(t => t.fecha_inicio_plan && t.fecha_fin_plan && overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, semanaActual.inicio, semanaActual.fin) > 0).length,
-        },
-        completadasSemanaPasada: [], // Simplified for now to avoid logic bloat
-      },
+      tareas: { conteo: { enSemanaActual: 0 } },
       compras: comprasList, weekly: { history: weeklyHistory }
     });
   } catch (err) {
-    request.log.error(err);
-    return reply.code(500).send({ ok: false, error: err.message || "Error interno", debug_id: "NUCLEAR_STABLE" });
+    console.error("ERROR IN NEW CONTROLLER:", err);
+    return reply.code(500).send({ ok: false, error: err.message, debug_id: "NEW_FILE_V1" });
   }
 }
