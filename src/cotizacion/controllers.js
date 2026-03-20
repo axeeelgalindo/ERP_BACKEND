@@ -915,11 +915,22 @@ export const updateCotizacionEstado = async (request, reply) => {
 
       // ✅ si ya existía proyecto y se vuelve a setear plan (por si acaso)
       if (toAceptada && proyectoIdFinal) {
+        // Calcular presupuesto (suma de costoTotal de las ventas vinculadas)
+        const ventasParaPresupuesto = await tx.venta.findMany({
+          where: { ordenVentaId: id, eliminado: false },
+          include: { detalles: true },
+        });
+
+        const presupuestoTotal = ventasParaPresupuesto.reduce((accV, v) => {
+          return accV + (v.detalles || []).reduce((accD, d) => accD + (Number(d.costoTotal) || 0), 0);
+        }, 0);
+
         await tx.proyecto.update({
           where: { id: proyectoIdFinal },
           data: {
             fecha_inicio_plan: inicioPlan,
             fecha_fin_plan: finPlan,
+            presupuesto: presupuestoTotal > 0 ? presupuestoTotal : undefined,
           },
         });
       }

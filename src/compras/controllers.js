@@ -1274,6 +1274,22 @@ export async function setCompraCosteos(req, reply) {
 
     if (!items.length) return 0;
 
+    // 4.1) Identificar proyecto_id de las ventas vinculadas
+    // Tomamos la primera venta que tenga proyecto (vía Cotización)
+    const ventasConProyecto = await tx.venta.findMany({
+      where: { id: { in: items.map(it => String(it?.venta_id ?? it?.ventaId ?? it?.venta?.id)) } },
+      include: { ordenVenta: { select: { proyecto_id: true } } }
+    });
+    
+    const linkedProyectoId = ventasConProyecto.find(v => v.ordenVenta?.proyecto_id)?.ordenVenta?.proyecto_id;
+
+    if (linkedProyectoId && (!compra.proyecto_id || compra.proyecto_id !== linkedProyectoId)) {
+      await tx.compra.update({
+        where: { id: compraId },
+        data: { proyecto_id: linkedProyectoId, destino: "PROYECTO" }
+      });
+    }
+
     const res = await tx.compraCosteo.createMany({
       data: items.map((it) => ({
         empresa_id,
