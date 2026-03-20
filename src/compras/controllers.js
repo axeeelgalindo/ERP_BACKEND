@@ -435,6 +435,7 @@ export async function listCompras(request, reply) {
   const {
     q,
     estado,
+    periodo, // ✅ NUEVO: YYYY-MM
     proveedorId,
     proyectoId,
     cotizacionId,
@@ -458,19 +459,30 @@ export async function listCompras(request, reply) {
     ...(proyectoId ? { proyecto_id: String(proyectoId) } : {}),
     ...(cotizacionId ? { cotizacionId: String(cotizacionId) } : {}),
     ...(toBool(includeDeleted) ? {} : { eliminado: false }),
-    ...(q
-      ? {
-          OR: [
-            ...(Number.isFinite(Number(q)) ? [{ numero: Number(q) }] : []),
-            { proveedor: { nombre: { contains: String(q), mode: "insensitive" } } },
-            { proyecto: { nombre: { contains: String(q), mode: "insensitive" } } },
-            { folio: { contains: String(q), mode: "insensitive" } },
-            { razon_social: { contains: String(q), mode: "insensitive" } },
-            { rut_proveedor: { contains: String(q), mode: "insensitive" } },
-          ],
-        }
-      : {}),
   };
+
+  // ✅ Filtro por Periodo (fecha_docto)
+  if (periodo && /^\d{4}-\d{2}$/.test(periodo)) {
+    const [year, month] = periodo.split("-").map(Number);
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+    where.fecha_docto = {
+      gte: startDate,
+      lte: endDate,
+    };
+  }
+
+  // ✅ Filtro por Búsqueda (q)
+  if (q) {
+    where.OR = [
+      ...(Number.isFinite(Number(q)) ? [{ numero: Number(q) }] : []),
+      { proveedor: { nombre: { contains: String(q), mode: "insensitive" } } },
+      { proyecto: { nombre: { contains: String(q), mode: "insensitive" } } },
+      { folio: { contains: String(q), mode: "insensitive" } },
+      { razon_social: { contains: String(q), mode: "insensitive" } },
+      { rut_proveedor: { contains: String(q), mode: "insensitive" } },
+    ];
+  }
 
   const [total, dataRaw] = await Promise.all([
     prisma.compra.count({ where }),
