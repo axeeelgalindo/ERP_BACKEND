@@ -101,16 +101,31 @@ export const getDashboardData = async (request, reply) => {
       return true;
     };
 
-    // 1. Ventas Mes
-    const ventasMes = ventas.reduce((acc, v) => {
-      // Nota: Asumo que en Venta existe Venta.total como en el frontend, 
-      // o se calcula iterando detalles
+    // 1. Facturado Mes (Facturación Real = Ventas / Costeos)
+    const facturadoMes = ventas.reduce((acc, v) => {
       let totalVenta = v.total || 0; 
       if (!v.total && v.detalles) {
-          totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.total) || 0), 0)
+          totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
       }
-      
       if (isThisMonth(v.fecha || v.createdAt)) return acc + Number(totalVenta);
+      return acc;
+    }, 0);
+
+    // 1a. Ventas Mes (Solo Ordenes de Venta / Cotizaciones Aprobadas)
+    const ventasMes = cotizaciones.reduce((acc, c) => {
+      const estado = (c.estado || '').toLowerCase();
+      const isAprobada = estado.includes('aprob') || estado.includes('ganad') || estado.includes('acept');
+      if (isAprobada && isThisMonth(c.creada_en || c.fecha)) {
+        return acc + (Number(c.total) || 0);
+      }
+      return acc;
+    }, 0);
+
+    // 1b. Cotizado Mes (Todas las cotizaciones, incluyendo las aprobadas)
+    const cotizadoMes = cotizaciones.reduce((acc, c) => {
+      if (isThisMonth(c.creada_en || c.fecha)) {
+        return acc + (Number(c.total) || 0);
+      }
       return acc;
     }, 0);
 
@@ -299,6 +314,8 @@ export const getDashboardData = async (request, reply) => {
       success: true,
       kpis: {
         ventasMes,
+        facturadoMes,
+        cotizadoMes,
         comprasSemana,
         devengadoSemana,
         flujoCajaMes,
