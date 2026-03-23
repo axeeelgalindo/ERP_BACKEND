@@ -153,10 +153,12 @@ export async function reporteDevengadoProfesional(request, reply) {
 
     let margenObjetivo = 0;
     let costoPlan = 0;
+    let costoPlanHH = 0;
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
       costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      costoPlanHH = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH').reduce((acc, d) => acc + (d.costoTotal || 0), 0);
     }
 
     const base = { ...pickBaseMoney(cotizacion, baseParam), margenObjetivo, costoPlan };
@@ -212,6 +214,9 @@ export async function reporteDevengadoProfesional(request, reply) {
     }));
 
     const pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
+      const est = (c.estado || "").toUpperCase();
+      if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
+
       if (c.tipo_doc === 33 || c.tipo_doc === 34) return acc + (c.total || 0);
       if (c.tipo_doc === 61) return acc - (c.total || 0);
       return acc;
@@ -238,11 +243,13 @@ export async function reporteDevengadoProfesional(request, reply) {
     }, 0);
 
     const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
-    const costoAcumulado = Math.max(costoPlan, costosRealesContabilizados);
+    const costoAcumulado = costosRealesContabilizados;
 
     const costos = {
       totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
       comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
+      costoReales: costosRealesContabilizados,
+      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH)
     };
 
     const yaPasoCosto = devengadoAcumulado >= costos.costoAcumulado;

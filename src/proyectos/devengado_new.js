@@ -64,10 +64,14 @@ export async function reporteDevengadoProfesional(request, reply) {
     // Margen objetivo desde la venta
     let margenObjetivo = 0;
     let costoPlan = Number(proyecto?.presupuesto || 0);
+    let costoPlanHH = 0;
 
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
+      
+      costoPlanHH = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH').reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      
       // Si el proyecto no tiene presupuesto seteado, calculamos desde el costeo de la venta
       if (costoPlan === 0) {
         costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
@@ -113,6 +117,9 @@ export async function reporteDevengadoProfesional(request, reply) {
     // FAC: 33 (Electrónica), 34 (Exenta), 39 (Boleta), 41 (Boleta Exenta), 46 (Factura de Compra), 56 (Nota de Débito), 69 (Otras)
     // NC: 61 (Nota de Crédito)
     let pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
+      const est = (c.estado || "").toUpperCase();
+      if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
+
       const td = Number(c.tipo_doc);
       if ([33, 34, 39, 41, 46, 56, 69].includes(td)) return acc + (c.total || 0);
       if (td === 61) return acc - (c.total || 0);
@@ -120,7 +127,13 @@ export async function reporteDevengadoProfesional(request, reply) {
     }, 0);
     // Fallback: si las compras son manuales (sin tipo_doc), usar el total de compras como ppto utilizado
     if (pptoUtilizadoReal === 0 && comprasRaw.length > 0) {
-      pptoUtilizadoReal = comprasRaw.reduce((acc, c) => acc + (c.total || 0), 0);
+      pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
+        const est = (c.estado || "").toUpperCase();
+        if (est === "FACTURADA" || est === "PAGADA" || est === "PAGADO") {
+          return acc + (c.total || 0);
+        }
+        return acc;
+      }, 0);
     }
 
     // ===== Costo real HH (subtareas) =====
@@ -140,11 +153,13 @@ export async function reporteDevengadoProfesional(request, reply) {
     const totalRendiciones = rendiciones.reduce((acc, r) => acc + (r.monto_total || 0), 0);
     const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + (c.total || 0), 0);
     const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
-    const costoAcumulado = Math.max(costoPlan, costosRealesContabilizados);
+    const costoAcumulado = costosRealesContabilizados;
 
     const costos = {
       totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
       comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
+      costoReales: costosRealesContabilizados,
+      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH)
     };
 
     // ===== Equipo =====
