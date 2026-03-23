@@ -389,8 +389,8 @@ export const createVenta = async (request, reply) => {
 
         if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
 
-        const cantidad = Number(cantidadRaw) || 1;
-        if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
+        const cantidad = (cantidadRaw !== null && cantidadRaw !== undefined && cantidadRaw !== "") ? Number(cantidadRaw) : 1;
+        if (cantidad < 0) throw new Error("La cantidad no puede ser negativa");
 
         const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
@@ -490,7 +490,7 @@ export const createVenta = async (request, reply) => {
           costoHH = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          const costoSinAlpha = costoHH * cantidad + cif;
+          const costoSinAlpha = cantidad > 0 ? costoHH * cantidad + cif : 0;
           costoConAlphaBase = costoSinAlpha * alphaMult;
 
           costoTotal = costoConAlphaBase + extraFijo;
@@ -879,8 +879,8 @@ export async function updateVenta(request, reply) {
 
         if (!descDetalle) throw new Error("Cada detalle debe tener 'descripcion'");
 
-        const cantidad = Number(cantidadRaw) || 1;
-        if (cantidad <= 0) throw new Error("La cantidad debe ser mayor a 0");
+        const cantidad = (cantidadRaw !== null && cantidadRaw !== undefined && cantidadRaw !== "") ? Number(cantidadRaw) : 1;
+        if (cantidad < 0) throw new Error("La cantidad no puede ser negativa");
 
         const modo = String(modoRaw || "").trim().toUpperCase();
         if (modo !== "HH" && modo !== "COMPRA") {
@@ -973,7 +973,7 @@ export async function updateVenta(request, reply) {
           costoHH = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          const costoSinAlpha = costoHH * cantidad + cif;
+          const costoSinAlpha = cantidad > 0 ? costoHH * cantidad + cif : 0;
           costoConAlphaBase = costoSinAlpha * alphaMult;
 
           costoTotal = costoConAlphaBase + extraFijo;
