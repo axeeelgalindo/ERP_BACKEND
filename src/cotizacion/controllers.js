@@ -73,6 +73,8 @@ function normalizeGlosas(glosas) {
     .map((g, idx) => ({
       descripcion: String(g?.descripcion || "").trim().slice(0, 250),
       monto: round0(g?.monto || 0), // BRUTO
+      cantidad: Number(g?.cantidad || 1),
+      precio_unitario: Number(g?.precio_unitario || g?.monto || 0),
       manual: !!g?.manual,
       orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
       descuento_pct: clampPct(g?.descuento_pct ?? 0),
@@ -458,6 +460,10 @@ export const updateCotizacion = async (request, reply) => {
 
       // ✅ mismo nombre que create
       descuento_pct,
+      
+      fecha_documento,
+      vencimiento_documento,
+      vendedor_id,
 
       ventaIds, // puede ser [] o undefined
       glosas, // puede venir [] o undefined
@@ -683,14 +689,17 @@ export const updateCotizacion = async (request, reply) => {
       // =========================
       // Fechas (igual create)
       // =========================
-      const fechaDocumento = existing.fecha_documento
-        ? new Date(existing.fecha_documento)
-        : new Date();
+      const fechaDocumento = fecha_documento && String(fecha_documento).length >= 10
+        ? new Date(fecha_documento)
+        : (existing.fecha_documento ? new Date(existing.fecha_documento) : new Date());
 
-      const vencimientoDocumento = new Date(fechaDocumento);
-      vencimientoDocumento.setDate(
-        vencimientoDocumento.getDate() + finalVigenciaDias
-      );
+      const vencimientoDocumento = vencimiento_documento && String(vencimiento_documento).length >= 10
+        ? new Date(vencimiento_documento)
+        : new Date(fechaDocumento);
+
+      if (!vencimiento_documento || String(vencimiento_documento).length < 10) {
+        vencimientoDocumento.setDate(vencimientoDocumento.getDate() + finalVigenciaDias);
+      }
 
       // =========================
       // Reemplazar glosas (delete + createMany)
@@ -703,6 +712,8 @@ export const updateCotizacion = async (request, reply) => {
           cotizacion_id: id,
           descripcion: g.descripcion,
           monto: round0(g.monto || 0), // ✅ BRUTO
+          cantidad: Number(g.cantidad || 1),
+          precio_unitario: Number(g.precio_unitario || g.monto || 0),
           manual: !!g.manual,
           orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
           descuento_pct: clampPct(g.descuento_pct || 0),
@@ -720,7 +731,7 @@ export const updateCotizacion = async (request, reply) => {
 
           ...(proyecto_id !== undefined ? { proyecto_id: proyecto_id || null } : {}),
 
-          vendedor_id: userId, // opcional; si NO quieres cambiar vendedor en update, elimina esta línea
+          vendedor_id: vendedor_id || existing.vendedor_id || userId,
 
           asunto: asunto !== undefined ? asunto || null : undefined,
           terminos_condiciones:

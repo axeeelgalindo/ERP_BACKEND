@@ -74,14 +74,60 @@ function parseCotizacionText(text) {
   ).trim();
 
   const toNumber = (x) => {
-    // soporta "1.234.567" o "1,234,567" o "1234567"
-    const v = String(x || "").replace(/[^\d]/g, "");
+    let s = String(x || "").trim();
+    const dots = (s.match(/\./g) || []).length;
+    const commas = (s.match(/,/g) || []).length;
+
+    if (dots > 0 && commas > 0) {
+      const lastDot = s.lastIndexOf(".");
+      const lastComma = s.lastIndexOf(",");
+      if (lastComma > lastDot) {
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        s = s.replace(/,/g, "");
+      }
+    } else if (commas > 0 && dots === 0) {
+      const parts = s.split(",");
+      if (parts[parts.length - 1].length === 3 && commas === 1) {
+        s = s.replace(/,/g, "");
+      } else {
+        s = s.replace(/\./g, "").replace(/,/g, ".");
+      }
+    } else if (dots > 1 && commas === 0) {
+      s = s.replace(/\./g, "");
+    } else if (dots === 1 && commas === 0) {
+      const parts = s.split(".");
+      if (parts[1].length === 3) {
+        s = s.replace(/\./g, "");
+      }
+    }
+
+    const v = s.replace(/[^\d\.\-]/g, "");
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   };
 
   const total = toNumber(totalStr);
   const subtotal = toNumber(subtotalStr);
+
+  const linesAll = t.split("\n").map(x => x.trim()).filter(Boolean);
+
+  let vendedorNombre = "";
+
+  let terminos_condiciones = "";
+  const idxTotal = linesAll.findIndex(l => /^Total\s*\$?\s*[\d\.\,]+/i.test(l.trim()));
+  const idxTerminos = linesAll.findIndex(l => /^(?:condiciones comerciales|t[eé]rminos y condiciones|notas?:?|condiciones de pago|observaciones)/i.test(l));
+  const startIdx = idxTotal >= 0 ? idxTotal : idxTerminos;
+
+  if (startIdx >= 0) {
+    const terminosLines = [];
+    for (let i = startIdx + 1; i < linesAll.length; i++) {
+      if (/^(?:subtotal|iva|total)/i.test(linesAll[i])) continue;
+      if (/^(?:Tecnolog[íi]a que impulsa|Punta Arenas|Puerto Montt|RUT\s*781159|RUT\s*\d|administracion@blueinge|P[áa]gina)/i.test(linesAll[i])) break;
+      terminosLines.push(linesAll[i]);
+    }
+    terminos_condiciones = terminosLines.join("\n").trim().slice(0, 1000);
+  }
 
   // si viene solo total, aproximamos subtotal con iva 19% (esto es “fallback”)
   let subtotalFinal = subtotal;
@@ -96,21 +142,22 @@ function parseCotizacionText(text) {
     totalFinal = subtotalFinal + ivaFinal;
   }
 
-  // Ejemplo de items (si en tu pdf hay líneas tipo: "2 x Servicio ... $ 120000")
-  // Esto es MUY dependiente del formato.
   const items = [];
-  const lines = t
-    .split("\n")
-    .map((x) => x.trim())
-    .filter(Boolean);
-  for (const ln of lines) {
+  for (const ln of linesAll) {
     const m = ln.match(/^(\d+)\s*x\s*(.+?)\s+\$?\s*([\d\.\,]+)$/i);
+    const m2 = ln.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(?:unidades?|unidad|ud|uds?|kg|l|m|cm|h|hr|horas?)\b\s*([\d\.\,]+)\s*(?:.+?)\s*\$\s*([\d\.\,]+)$/i);
+    
     if (m) {
       items.push({
-        cantidad: Number(m[1]),
+        cantidad: toNumber(m[1]),
         descripcion: m[2].trim(),
         total: toNumber(m[3]),
       });
+    } else if (m2) {
+      const q = toNumber(m2[2]);
+      const p = toNumber(m2[3]);
+      const t = toNumber(m2[4]);
+      items.push({ cantidad: q, descripcion: m2[1].trim(), precioUnitario: p, total: t });
     }
   }
 
@@ -120,6 +167,8 @@ function parseCotizacionText(text) {
     iva: ivaFinal || 0,
     total: totalFinal || 0,
     items,
+    vendedorNombre,
+    terminos_condiciones,
     rawText: t,
   };
 }
@@ -298,14 +347,28 @@ export const importCotizacionFromPdf = async (request, reply) => {
         /^blue\b/i.test(l) ||
         /ingenier/i.test(l) ||
         /tecnolog/i.test(l) ||
-        /capit[aá]n|av\.|puerto|punta arenas|chile/i.test(l) ||
+        /capit[aá]n juan/i.test(l) ||
+        /av\.\s*san agust[íi]n/i.test(l) ||
         /^rut\b/i.test(l) ||
         /^cotizaci[oó]n\b/i.test(l) ||
         /^n[uú]mero\b/i.test(l);
 
       let nombre = "";
 
-      if (rut) {
+      // 1) First try explicit labels to avoid mistakenly picking the executor
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const match = line.match(/^(?:señor(?:es)?|cliente|empresa|atenci[oó]n a|raz[oó]n social)\s*[:\-]?\s*(.+)/i);
+        if (match && match[1].trim().length > 3) {
+          const potName = match[1].trim();
+          if (!isBad(potName) && !/^atenci[oó]n$/i.test(potName)) {
+            nombre = potName;
+            break;
+          }
+        }
+      }
+
+      if (rut && !nombre) {
         const idxRutLine = lines.findIndex(
           (l) => /\brut\b/i.test(l) && l.includes(rut.replace(/\./g, "")),
         );
@@ -324,12 +387,25 @@ export const importCotizacionFromPdf = async (request, reply) => {
       }
 
       if (!nombre) {
-        for (let i = searchLimitFrom; i < searchLimitTo; i++) {
+        // Fallback: pick the first word-like line that is not our company
+        for (let i = searchLimitFrom; i < lines.length && i < 20; i++) {
           const cand = lines[i];
           if (!cand) continue;
           if (isBad(cand)) continue;
           if (cand.length < 3) continue;
-          if (/\bS\d{3,}\b/.test(cand)) continue;
+          if (/\bS\d{3,}\b/.test(cand)) continue; // quote code
+          // ignore blueinge headers
+          if (/Tecnolog[íi]a que impulsa/i.test(cand)) continue;
+          if (/Juan Guillermo/i.test(cand)) continue;
+          if (/Punta Arenas|Puerto Montt/i.test(cand) && cand.length < 15) continue;
+          if (/Av\. San Agustín/i.test(cand)) continue;
+          if (/RUT\s*781159/i.test(cand)) continue;
+          if (/blueinge\.com/i.test(cand)) continue;
+          if (/Fecha/i.test(cand)) continue;
+          if (/vencimiento/i.test(cand)) continue;
+          if (/Vendedor/i.test(cand)) continue;
+          if (/P[áa]gina/i.test(cand)) continue;
+          
           if (/[a-záéíóúñ]/i.test(cand)) {
             nombre = cand.trim();
             break;
@@ -587,7 +663,7 @@ export const importCotizacionFromPdf = async (request, reply) => {
       asunto: descripcionTabla || extractedBase.asunto,
       numeroPdf: numeroPdf || null,
 
-      cliente_pdf: clientePdf, // { nombre, rut }
+      cliente_pdf: clientePdf.nombre || clientePdf.rut ? clientePdf : { nombre: "Cliente a Importar", rut: "" },
 
       fecha_documento_sugerida,
       fecha_documento: fecha_documento_final,
@@ -677,6 +753,42 @@ export const importCotizacionFromPdf = async (request, reply) => {
         );
       }
 
+      let vendedorIdFinal = userId;
+      
+      const usuarios = await tx.usuario.findMany({
+        where: { empresa_id: empresaId, eliminado: false },
+        select: { id: true, nombre: true }
+      });
+      
+      const normalizeStr = (s) => (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const fullTextNorm = normalizeStr(text); // Scan the entire PDF text seamlessly
+      
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const u of usuarios) {
+         const uName = normalizeStr(u.nombre);
+         const parts = uName.split(",").map(p => p.trim());
+         let score = 0;
+         
+         if (parts[0] && fullTextNorm.includes(parts[0])) score += 2;
+         if (parts[1] && fullTextNorm.includes(parts[1])) score += 2;
+         
+         if (score === 0) {
+            const words = uName.split(" ").filter(w => w.length > 3);
+            for (const w of words) {
+               if (fullTextNorm.includes(w)) score += 1;
+            }
+         }
+         
+         if (score > bestScore && score >= 2) {
+            bestScore = score;
+            bestMatch = u;
+         }
+      }
+      
+      if (bestMatch) vendedorIdFinal = bestMatch.id;
+
       const subtotal = Math.round(Number(extracted.subtotal || 0));
       const iva = Math.round(Number(extracted.iva || 0));
       const total = Math.round(Number(extracted.total || 0));
@@ -689,7 +801,7 @@ export const importCotizacionFromPdf = async (request, reply) => {
           empresa_id: empresaId,
           proyecto_id: null,
           cliente_id: cliente_id_final,
-          vendedor_id: userId,
+          vendedor_id: vendedorIdFinal,
 
           asunto: extracted.asunto?.slice(0, 250) || "Cotización importada",
           vigencia_dias: normalizeVigenciaDias(extracted.vigencia_dias ?? 15),
@@ -699,18 +811,20 @@ export const importCotizacionFromPdf = async (request, reply) => {
           total,
           estado: "COTIZACION",
 
+          terminos_condiciones: extracted.terminos_condiciones || null,
+
           fecha_documento: extracted.fecha_documento || null,
           vencimiento_documento: extracted.vencimiento_documento || null,
 
           glosas: {
-            create: [
-              {
-                descripcion: (extracted.asunto || "Servicios").slice(0, 250),
-                monto: subtotal,
-                manual: true,
-                orden: 0,
-              },
-            ],
+            create: extracted.items.map((it, idx) => ({
+              descripcion: it.descripcion.slice(0, 250),
+              monto: it.total,
+              cantidad: it.cantidad || 1,
+              precio_unitario: it.precioUnitario || it.total,
+              manual: true,
+              orden: idx,
+            })),
           },
         },
         include: {

@@ -691,6 +691,10 @@ model CotizacionGlosa {
   manual      Boolean @default(false)
   orden       Int     @default(0)
 
+  // Campos para soportar extracción de items exactos en Pdfs
+  cantidad        Int    @default(1)
+  precio_unitario Float?
+
   descuento_pct Float @default(0)
 
   @@index([cotizacion_id])
