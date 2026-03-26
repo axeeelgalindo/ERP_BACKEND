@@ -97,10 +97,10 @@ async function assertEmpleadoInEmpresa(tx, empleadoId, empresaId) {
 export async function recomputeTareaFromDetalles(tx, tareaId) {
   const detalles = await tx.tareaDetalle.findMany({
     where: { tarea_id: tareaId, eliminado: false },
-    select: { avance: true, estado: true },
+    select: { avance: true, estado: true, fecha_inicio_real: true, fecha_fin_real: true },
   });
 
-  // Si no hay subtareas, deja avance tal cual (o pon 0 si prefieres)
+  // Si no hay subtareas, no tocamos fechas reales (se dejan las manuales)
   if (!detalles.length) {
     return null;
   }
@@ -117,9 +117,29 @@ export async function recomputeTareaFromDetalles(tx, tareaId) {
   if (avg >= 100) estado = "completada";
   else if (avg > 0) estado = "en_progreso";
 
+  // Agregación de fechas reales
+  let minInicioReal = null;
+  let maxFinReal = null;
+
+  for (const d of detalles) {
+    if (d.fecha_inicio_real) {
+      if (!minInicioReal || new Date(d.fecha_inicio_real) < new Date(minInicioReal))
+        minInicioReal = d.fecha_inicio_real;
+    }
+    if (d.fecha_fin_real) {
+      if (!maxFinReal || new Date(d.fecha_fin_real) > new Date(maxFinReal))
+        maxFinReal = d.fecha_fin_real;
+    }
+  }
+
   const updated = await tx.tarea.update({
     where: { id: tareaId },
-    data: { avance: avg, estado },
+    data: { 
+      avance: avg, 
+      estado,
+      fecha_inicio_real: minInicioReal,
+      fecha_fin_real: maxFinReal
+    },
     select: { id: true, epica_id: true, avance: true, estado: true },
   });
 

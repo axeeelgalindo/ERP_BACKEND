@@ -40,11 +40,11 @@ function taskWeight(t) {
 }
 
 function pickBaseMoney(cotizacion, baseParam) {
-  const vendido = Number(cotizacion?.subtotal || 0);
-  const cotizado = Number(cotizacion?.total || 0);
+  const vendido = Number(cotizacion?.total || 0); // VENTA = TOTAL (PRECIO + IVA)
+  const subtotal = Number(cotizacion?.subtotal || 0);
   const b = String(baseParam || "VENTA").toUpperCase();
-  const monto = b === "COTIZADO" ? cotizado : vendido;
-  return { fuente: b, valor: monto, valorVendido: vendido, valorCotizado: cotizado };
+  const monto = b === "COTIZADO" ? vendido : vendido; // Por ahora ambos usan total si base es VENTA
+  return { fuente: b, valor: monto, valorVendido: vendido, valorSubtotal: subtotal };
 }
 
 export async function reporteDevengadoProfesional(request, reply) {
@@ -66,11 +66,14 @@ export async function reporteDevengadoProfesional(request, reply) {
     let costoPlan = Number(proyecto?.presupuesto || 0);
     let costoPlanHH = 0;
 
+    let totalHorasPlan = 0;
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
       
-      costoPlanHH = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH').reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      const hhDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH');
+      costoPlanHH = hhDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      totalHorasPlan = hhDetalles.reduce((acc, d) => acc + (d.cantidad || 0), 0);
       
       // Si el proyecto no tiene presupuesto seteado, calculamos desde el costeo de la venta
       if (costoPlan === 0) {
@@ -121,9 +124,10 @@ export async function reporteDevengadoProfesional(request, reply) {
       if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
 
       const td = Number(c.tipo_doc);
-      // Incluimos 61 (NC) como gasto si está asignado al proyecto, ya que en este contexto 
-      // el usuario lo considera consumo de presupuesto (o hay documentos 61 que son Facturas de Compra mal categorizadas).
-      if ([33, 34, 39, 41, 46, 56, 61, 69].includes(td)) return acc + (c.total || 0);
+      // FA: 33, 34, 39, 41, 46, 56, 69 (Suma)
+      // NC: 61 (Resta)
+      if (td === 61) return acc - (c.total || 0);
+      if ([33, 34, 39, 41, 46, 56, 69].includes(td)) return acc + (c.total || 0);
       return acc;
     }, 0);
     // Fallback: si las compras son manuales (sin tipo_doc), usar el total de compras como ppto utilizado
@@ -150,9 +154,19 @@ export async function reporteDevengadoProfesional(request, reply) {
       return sumTask + costo;
     }, 0);
 
-    const totalCompras = comprasList.reduce((acc, c) => acc + (c.total || 0), 0);
+    const totalCompras = comprasList.reduce((acc, c) => {
+      const td = Number(c.tipo_doc);
+      if (td === 61) return acc - (c.total || 0);
+      return acc + (c.total || 0);
+    }, 0);
     const totalRendiciones = rendiciones.reduce((acc, r) => acc + (r.monto_total || 0), 0);
-    const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + (c.total || 0), 0);
+    const comprasFacturadas = comprasList
+      .filter(c => c.estado === "FACTURADA" || c.factura_url)
+      .reduce((acc, c) => {
+        const td = Number(c.tipo_doc);
+        if (td === 61) return acc - (c.total || 0);
+        return acc + (c.total || 0);
+      }, 0);
     const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
     const costoAcumulado = costosRealesContabilizados;
 
@@ -160,20 +174,53 @@ export async function reporteDevengadoProfesional(request, reply) {
       totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
       comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
       costoReales: costosRealesContabilizados,
-      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH)
+      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH),
+      hhPlan: {
+        horas: totalHorasPlan,
+        costo: costoPlanHH
+      }
     };
 
     // ===== Equipo =====
     const empleadosList = miembros.map(m => {
       const e = m.empleado;
       const u = e?.usuario;
+      const nombre = u?.nombre || "Usuario";
+      const iniciales = nombre.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
       const hh = e?.hhRegistros?.[0];
       return {
-        nombre: u?.nombre || "Usuario",
+        id: e?.id,
+        nombre,
+        iniciales,
         cargo: e?.cargo || m.rol || "Miembro",
         costoHH: hh?.costoHH || Math.round((e?.sueldo_base || 500000) / 180),
       };
     });
+
+    // ===== Jerarquía: Épicas -> Tareas -> Detalles =====
+    const epicasMap = new Map();
+    proyecto.epicas.forEach(e => {
+      epicasMap.set(e.id, { ...e, tareas: [] });
+    });
+
+    const tareasSinEpica = [];
+    tareas.forEach(t => {
+      if (t.epica_id && epicasMap.has(t.epica_id)) {
+        epicasMap.get(t.epica_id).tareas.push(t);
+      } else {
+        tareasSinEpica.push(t);
+      }
+    });
+
+    const epicasJerarquia = Array.from(epicasMap.values());
+    if (tareasSinEpica.length > 0) {
+      epicasJerarquia.push({
+        id: "sin-epica",
+        nombre: "Sin Épica / Generales",
+        avance: Math.round(tareasSinEpica.reduce((acc, t) => acc + (t.avance || 0), 0) / tareasSinEpica.length),
+        tareas: tareasSinEpica
+      });
+    }
 
     // ===== Rango dinámico basado en tareas =====
     const now = new Date();
@@ -259,12 +306,16 @@ export async function reporteDevengadoProfesional(request, reply) {
       const plan = weeklyPlanned(sStart, sEnd);
       const real = await weeklyReal(sStart, sEnd);
       const costoSemana = sumW > 0 ? Math.round(costoAcumulado * (plan.pct / 100)) : 0;
+      
+      const mesNombre = sStart.toLocaleDateString("es-CL", { month: "short" }).toUpperCase().replace(".", "");
+      
       weeklyHistory.push({
         num: iter, label: `S${iter}`, day: `S${iter}`,
+        mes: mesNombre,
+        semana: iter,
         inicio: sStart, fin: sEnd, plan, real,
         ingreso: real.devengadoSemana,
         costo: costoSemana,
-        // Etiquetas para tooltips: si no hay venta (0), mostrar el costo proyectado
         planValue: plan.amount > 0 ? plan.amount : costoSemana,
         realValue: real.devengadoSemana,
       });
@@ -280,7 +331,10 @@ export async function reporteDevengadoProfesional(request, reply) {
 
     return reply.send({
       ok: true,
-      proyecto,
+      proyecto: {
+        ...proyecto,
+        epicas: epicasJerarquia
+      },
       financiero: {
         base, costos,
         devengado: {
@@ -290,6 +344,7 @@ export async function reporteDevengadoProfesional(request, reply) {
           faltanteParaEquilibrio: Math.max(0, costoAcumulado - devengadoAcumulado),
           yaPasoCosto: devengadoAcumulado >= costoAcumulado,
           breakevenPct: null,
+          saludPct: Math.round(avanceActual01 * 100),
         },
       },
       tareas: {
@@ -303,7 +358,6 @@ export async function reporteDevengadoProfesional(request, reply) {
             return !done && t.fecha_fin_plan && new Date(t.fecha_fin_plan) < semanaActual.inicio;
           }).length,
         },
-        // La página usa data.tareas_all para la tabla de tareas
       },
       compras: comprasList,
       empleados: empleadosList,
@@ -314,8 +368,7 @@ export async function reporteDevengadoProfesional(request, reply) {
         history: weeklyHistory,
         daily: weeklyHistory,
       },
-      // Campo que usa la tabla de tareas en el frontend
-      tareas_all: tareas,
+      tareas_all: tareas, // Se mantiene por compatibilidad si es necesario
       notas: [
         `Rango del proyecto: ${minDate.toLocaleDateString("es-CL")} → ${maxDate.toLocaleDateString("es-CL")}`,
         `Semanas generadas: ${weeklyHistory.length}`,

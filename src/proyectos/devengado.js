@@ -59,11 +59,11 @@ function taskWeight(t) {
 
 /** ===== Base monetaria ===== */
 function pickBaseMoney(cot, base) {
-  const vendido = Number(cot?.subtotal || 0);
-  const cotizado = Number(cot?.total || 0);
+  const vendido = Number(cot?.total || 0); // VENTA = TOTAL (PRECIO + IVA)
+  const subtotal = Number(cot?.subtotal || 0);
   const b = String(base || "VENTA").toUpperCase();
-  const monto = b === "COTIZADO" ? cotizado : vendido;
-  return { fuente: b, valor: monto, valorVendido: vendido, valorCotizado: cotizado };
+  const monto = b === "COTIZADO" ? vendido : vendido;
+  return { fuente: b, valor: monto, valorVendido: vendido, valorSubtotal: subtotal };
 }
 
 /**
@@ -134,7 +134,8 @@ export async function reporteDevengadoProfesional(request, reply) {
         fecha_inicio_plan: true, fecha_fin_plan: true,
         epicas: {
           where: { eliminado: false },
-          select: { id: true, nombre: true, avance: true, estado: true }
+          select: { id: true, nombre: true, avance: true, estado: true },
+          orderBy: { orden: 'asc' }
         }
       },
     });
@@ -154,11 +155,15 @@ export async function reporteDevengadoProfesional(request, reply) {
     let margenObjetivo = 0;
     let costoPlan = 0;
     let costoPlanHH = 0;
+    let totalHorasPlan = 0;
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
+      
+      const hhDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH');
       costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
-      costoPlanHH = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH').reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      costoPlanHH = hhDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      totalHorasPlan = hhDetalles.reduce((acc, d) => acc + (d.cantidad || 0), 0);
     }
 
     const base = { ...pickBaseMoney(cotizacion, baseParam), margenObjetivo, costoPlan };
@@ -217,17 +222,62 @@ export async function reporteDevengadoProfesional(request, reply) {
       const est = (c.estado || "").toUpperCase();
       if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
 
-      if (c.tipo_doc === 33 || c.tipo_doc === 34 || c.tipo_doc === 61) return acc + (c.total || 0);
+      const td = Number(c.tipo_doc);
+      if (td === 33 || td === 34) return acc + (c.total || 0);
+      if (td === 61) return acc - (c.total || 0);
       return acc;
     }, 0);
 
     const rendiciones = await prisma.rendicion.findMany({
       where: { proyecto_id: proyectoId, eliminado: false, estado: { in: ["aprobada", "pagada", "revisada"] } },
     });
-    const totalRendiciones = rendiciones.reduce((acc, r) => acc + r.monto_total, 0);
+    const totalRendiciones = rendiciones.reduce((acc, r) => acc + (r.monto_total || 0), 0);
 
-    const totalCompras = comprasList.reduce((acc, c) => acc + c.total, 0);
-    const comprasFacturadas = comprasList.filter(c => c.estado === "FACTURADA" || c.factura_url).reduce((acc, c) => acc + c.total, 0);
+    const miembros = await prisma.proyectoMiembro.findMany({
+      where: { proyecto_id: proyectoId },
+      select: {
+        rol: true,
+        empleado: {
+          select: {
+            id: true, cargo: true, sueldo_base: true,
+            usuario: { select: { nombre: true } },
+            hhRegistros: {
+              orderBy: [{ anio: "desc" }, { mes: "desc" }],
+              take: 1,
+              select: { costoHH: true, anio: true, mes: true }
+            }
+          }
+        }
+      }
+    });
+
+    const empleadosList = miembros.map(m => {
+      const e = m.empleado;
+      const u = e?.usuario;
+      const nombre = u?.nombre || "Usuario";
+      const iniciales = nombre.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+      const hh = e?.hhRegistros?.[0];
+      return {
+        id: e?.id,
+        nombre,
+        iniciales,
+        cargo: e?.cargo || m.rol || "Miembro",
+        costoHH: hh?.costoHH || Math.round((e?.sueldo_base || 500000) / 180),
+      };
+    });
+
+    const totalCompras = comprasList.reduce((acc, c) => {
+      const td = Number(c.tipo_doc);
+      if (td === 61) return acc - (c.total || 0);
+      return acc + (c.total || 0);
+    }, 0);
+    const comprasFacturadas = comprasList
+      .filter(c => c.estado === "FACTURADA" || c.factura_url)
+      .reduce((acc, c) => {
+        const td = Number(c.tipo_doc);
+        if (td === 61) return acc - (c.total || 0);
+        return acc + (c.total || 0);
+      }, 0);
 
     const hhCostoReal = tareasRaw.reduce((sumTask, t) => {
       let taskCosto = t.total_costo_real || 0;
@@ -248,7 +298,11 @@ export async function reporteDevengadoProfesional(request, reply) {
       totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
       comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
       costoReales: costosRealesContabilizados,
-      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH)
+      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH),
+      hhPlan: {
+        horas: totalHorasPlan,
+        costo: costoPlanHH
+      }
     };
 
     const yaPasoCosto = devengadoAcumulado >= costos.costoAcumulado;
@@ -319,20 +373,59 @@ export async function reporteDevengadoProfesional(request, reply) {
       curr = addDays(curr, 7); iter++;
     }
 
+    // ===== Jerarquía: Épicas -> Tareas -> Detalles =====
+    const epicasMap = new Map();
+    proyecto.epicas.forEach(e => {
+      epicasMap.set(e.id, { ...e, tareas: [] });
+    });
+
+    const tareasSinEpica = [];
+    tareas.forEach(t => {
+      if (t.epica_id && epicasMap.has(t.epica_id)) {
+        epicasMap.get(t.epica_id).tareas.push(t);
+      } else {
+        tareasSinEpica.push(t);
+      }
+    });
+
+    const epicasJerarquia = Array.from(epicasMap.values());
+    if (tareasSinEpica.length > 0) {
+      epicasJerarquia.push({
+        id: "sin-epica",
+        nombre: "Sin Épica / Generales",
+        avance: Math.round(tareasSinEpica.reduce((acc, t) => acc + (t.avance || 0), 0) / tareasSinEpica.length),
+        tareas: tareasSinEpica
+      });
+    }
+
     return reply.send({
-      ok: true, proyecto, financiero: {
-        base, costos, devengado: {
-          devengado: devengadoAcumulado, avancePct: Math.round(avanceActual01 * 10000) / 100,
-          utilidadDevengada, faltanteParaEquilibrio, yaPasoCosto
+      ok: true,
+      proyecto: {
+        ...proyecto,
+        epicas: epicasJerarquia
+      },
+      financiero: {
+        base, costos,
+        devengado: {
+          devengado: devengadoAcumulado,
+          avancePct: Math.round(avanceActual01 * 10000) / 100,
+          utilidadDevengada: Math.max(0, devengadoAcumulado - costoAcumulado),
+          faltanteParaEquilibrio: Math.max(0, costoAcumulado - devengadoAcumulado),
+          yaPasoCosto: devengadoAcumulado >= costoAcumulado,
+          breakevenPct: null,
+          saludPct: Math.round(avanceActual01 * 100),
         },
       },
       tareas: {
+        avancePct: Math.round(avanceActual01 * 10000) / 100,
         conteo: {
-          enSemanaActual: tareas.filter(t => t.fecha_inicio_plan && t.fecha_fin_plan && overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, semanaActual.inicio, semanaActual.fin) > 0).length,
+          total: tareas.length,
+          completadas: tareas.filter(t => String(t.id).toLowerCase() === "completa" || t.avance >= 100).length,
         },
-        completadasSemanaPasada: [], // Simplified for now to avoid logic bloat
       },
-      compras: comprasList, weekly: { history: weeklyHistory }
+      compras: comprasList,
+      empleados: empleadosList,
+      tareas_all: tareas
     });
   } catch (err) {
     request.log.error(err);

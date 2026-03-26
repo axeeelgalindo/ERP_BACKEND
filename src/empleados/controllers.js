@@ -112,7 +112,7 @@ export const listEmpleados = async (request, reply) => {
     }),
   ]);
 
-  return reply.send({ total, data });
+  return reply.send({ total, data, items: data });
 };
 
 /* ================= GET ================= */

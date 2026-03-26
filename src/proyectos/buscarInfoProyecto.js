@@ -29,6 +29,7 @@ export async function buscarInfoProyecto(proyectoId) {
         select: {
           id: true, nombre: true, avance: true, estado: true,
           fecha_inicio_plan: true, fecha_fin_plan: true,
+          fecha_inicio_real: true, fecha_fin_real: true,
         },
         orderBy: { orden: "asc" },
       },
@@ -78,6 +79,7 @@ export async function buscarInfoProyecto(proyectoId) {
         select: {
           id: true, titulo: true, estado: true, avance: true,
           fecha_inicio_plan: true, fecha_fin_plan: true,
+          fecha_inicio_real: true, fecha_fin_real: true,
           horas_plan: true, horas_real: true,
           valor_hora: true, costo_plan: true, costo_real: true,
         }

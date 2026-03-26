@@ -350,7 +350,6 @@ export async function importComprasCSV(request, reply) {
                 select: { id: true },
               });
             }
-
             // 2) dedupe: empresa + proveedor + tipo_doc + folio
             const exists = await tx.compra.findFirst({
               where: {
@@ -367,8 +366,8 @@ export async function importComprasCSV(request, reply) {
               skipped++;
               continue;
             }
-
-            // 3) crear compra
+            
+            // 4) crear compra
             await tx.compra.create({
               data: {
                 empresa_id,
