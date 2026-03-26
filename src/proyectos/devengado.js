@@ -217,8 +217,7 @@ export async function reporteDevengadoProfesional(request, reply) {
       const est = (c.estado || "").toUpperCase();
       if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
 
-      if (c.tipo_doc === 33 || c.tipo_doc === 34) return acc + (c.total || 0);
-      if (c.tipo_doc === 61) return acc - (c.total || 0);
+      if (c.tipo_doc === 33 || c.tipo_doc === 34 || c.tipo_doc === 61) return acc + (c.total || 0);
       return acc;
     }, 0);
 

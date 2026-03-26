@@ -5,6 +5,7 @@ import {
   createCotizacion,
   updateCotizacion,
   updateCotizacionEstado,
+  deleteCotizacion,
 } from "./controllers.js";
 
 import {
@@ -32,6 +33,7 @@ export default async function cotizacionesRoutes(server) {
   server.post("/cotizaciones/add", createCotizacion);
   server.put("/cotizaciones/update/:id", updateCotizacion);
   server.post("/cotizaciones/:id/estado", updateCotizacionEstado);
+  server.delete("/cotizaciones/:id", deleteCotizacion);
   server.post("/cotizaciones/import/pdf", importCotizacionFromPdf);
   server.post("/cotizaciones/import/pdf/batch", importCotizacionesFromPdfBatch);
 }

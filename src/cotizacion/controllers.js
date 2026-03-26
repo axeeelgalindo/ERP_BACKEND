@@ -976,3 +976,36 @@ export const updateCotizacionEstado = async (request, reply) => {
     });
   }
 };
+
+// =========================
+// DELETE (Soft Delete)
+// =========================
+export const deleteCotizacion = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id } = request.params;
+
+    const existing = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false },
+    });
+
+    if (!existing) {
+      return reply.code(404).send({ error: "Cotización no encontrada" });
+    }
+
+    await prisma.cotizacion.update({
+      where: { id },
+      data: {
+        eliminado: true,
+        eliminado_en: new Date(),
+      },
+    });
+
+    return reply.send({ ok: true });
+  } catch (e) {
+    return reply.code(e.statusCode || 500).send({
+      error: "Error al eliminar cotización",
+      detalle: e.message,
+    });
+  }
+};

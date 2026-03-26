@@ -121,8 +121,9 @@ export async function reporteDevengadoProfesional(request, reply) {
       if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
 
       const td = Number(c.tipo_doc);
-      if ([33, 34, 39, 41, 46, 56, 69].includes(td)) return acc + (c.total || 0);
-      if (td === 61) return acc - (c.total || 0);
+      // Incluimos 61 (NC) como gasto si está asignado al proyecto, ya que en este contexto 
+      // el usuario lo considera consumo de presupuesto (o hay documentos 61 que son Facturas de Compra mal categorizadas).
+      if ([33, 34, 39, 41, 46, 56, 61, 69].includes(td)) return acc + (c.total || 0);
       return acc;
     }, 0);
     // Fallback: si las compras son manuales (sin tipo_doc), usar el total de compras como ppto utilizado
