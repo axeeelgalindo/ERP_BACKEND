@@ -52,21 +52,18 @@ export async function reporteDevengadoProfesional(request, reply) {
     const proyectoId = request.params.id;
     const baseParam = (request.query.base || "VENTA").toUpperCase();
 
-    // Obtener TODOS los datos necesarios del proyecto de una vez
     const info = await buscarInfoProyecto(proyectoId);
     if (!info) return reply.code(404).send({ ok: false, error: "Proyecto no encontrado" });
 
     const { proyecto, cotizacion, tareas: tareasRaw, compras: comprasRaw, rendiciones, miembros } = info;
-
-    // ===== Base monetaria =====
     const moneyBase = pickBaseMoney(cotizacion, baseParam);
 
-    // Margen objetivo desde la venta
     let margenObjetivo = 0;
     let costoPlan = Number(proyecto?.presupuesto || 0);
     let costoPlanHH = 0;
-
+    let costoPlanCompras = 0;
     let totalHorasPlan = 0;
+
     if (cotizacion?.ventas?.[0]) {
       const v = cotizacion.ventas[0];
       margenObjetivo = v.utilidadObjetivoPct || 0;
@@ -75,73 +72,37 @@ export async function reporteDevengadoProfesional(request, reply) {
       costoPlanHH = hhDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
       totalHorasPlan = hhDetalles.reduce((acc, d) => acc + (d.cantidad || 0), 0);
       
+      const compraDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'COMPRA');
+      costoPlanCompras = compraDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+
       // Si el proyecto no tiene presupuesto seteado, calculamos desde el costeo de la venta
       if (costoPlan === 0) {
         costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
       }
     }
 
-    const base = { ...moneyBase, margenObjetivo, costoPlan };
+    const base = { ...moneyBase, margenObjetivo, costoPlan, costoPlanHH, costoPlanCompras };
 
-    // ===== Tareas enriquecidas =====
-    const tareas = tareasRaw.map(t => ({
-      ...t,
-      tipo: t.jira_tipo || "Tarea",
-      nombre: t.jira_key ? `${t.jira_key} ${t.nombre || ""}`.trim() : (t.nombre || "Sin nombre"),
-    }));
-
-    // ===== Pesos para ponderación =====
-    const weightsById = new Map();
-    let sumW = 0;
-    for (const t of tareas) {
-      const w = taskWeight(t); weightsById.set(t.id, w); sumW += w;
-    }
-
-    // ===== Avance actual ponderado =====
-    let sumWA = 0;
-    for (const t of tareas) {
-      const w = weightsById.get(t.id) || 1;
-      sumWA += w * pct01From100(t.avance);
-    }
-    const avanceActual01 = sumW > 0 ? sumWA / sumW : 0;
-    const devengadoAcumulado = Math.round(base.valor * avanceActual01);
-
-    // ===== Compras =====
+    // ===== Compras y Costos =====
     const comprasList = comprasRaw.map(c => ({
       numero: c.numero, fecha: c.fecha_docto,
       proveedor: c.proveedor?.nombre || "Sin proveedor",
       estado: c.estado, total: c.total, factura_url: c.factura_url, tipo_doc: c.tipo_doc
     }));
 
-    // DEBUG: ver qué tipo_doc tienen las compras
-    console.log("COMPRAS RAW tipo_doc:", comprasRaw.map(c => ({ num: c.numero, tipo_doc: c.tipo_doc, tipo: typeof c.tipo_doc, total: c.total })));
-
-    // Presupuesto utilizado por proyecto = ∑ FAC - ∑ NC
-    // FAC: 33 (Electrónica), 34 (Exenta), 39 (Boleta), 41 (Boleta Exenta), 46 (Factura de Compra), 56 (Nota de Débito), 69 (Otras)
-    // NC: 61 (Nota de Crédito)
     let pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
       const est = (c.estado || "").toUpperCase();
-      if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO") return acc;
-
+      // Incluir también "ACEPTADA" o similares si son compras en proceso pero que ya restan?
+      // El usuario dice "ppto compras = sumatoria(compras tipo_doc = 33 y 34)) - sumatoria (compras tipo_doc = 61)"
+      // No especificó estado, pero usualmente son las emitidas/pagadas.
+      if (est !== "FACTURADA" && est !== "PAGADA" && est !== "PAGADO" && est !== "ACEPTADA") return acc;
+      
       const td = Number(c.tipo_doc);
-      // FA: 33, 34, 39, 41, 46, 56, 69 (Suma)
-      // NC: 61 (Resta)
       if (td === 61) return acc - (c.total || 0);
-      if ([33, 34, 39, 41, 46, 56, 69].includes(td)) return acc + (c.total || 0);
+      if ([33, 34].includes(td)) return acc + (c.total || 0);
       return acc;
     }, 0);
-    // Fallback: si las compras son manuales (sin tipo_doc), usar el total de compras como ppto utilizado
-    if (pptoUtilizadoReal === 0 && comprasRaw.length > 0) {
-      pptoUtilizadoReal = comprasRaw.reduce((acc, c) => {
-        const est = (c.estado || "").toUpperCase();
-        if (est === "FACTURADA" || est === "PAGADA" || est === "PAGADO") {
-          return acc + (c.total || 0);
-        }
-        return acc;
-      }, 0);
-    }
 
-    // ===== Costo real HH (subtareas) =====
     const hhCostoReal = tareasRaw.reduce((sumTask, t) => {
       let costo = t.total_costo_real || 0;
       if (t.detalles?.length > 0) {
@@ -160,25 +121,13 @@ export async function reporteDevengadoProfesional(request, reply) {
       return acc + (c.total || 0);
     }, 0);
     const totalRendiciones = rendiciones.reduce((acc, r) => acc + (r.monto_total || 0), 0);
-    const comprasFacturadas = comprasList
-      .filter(c => c.estado === "FACTURADA" || c.factura_url)
-      .reduce((acc, c) => {
-        const td = Number(c.tipo_doc);
-        if (td === 61) return acc - (c.total || 0);
-        return acc + (c.total || 0);
-      }, 0);
-    const costosRealesContabilizados = totalCompras + totalRendiciones + hhCostoReal;
-    const costoAcumulado = costosRealesContabilizados;
+    const costoAcumulado = totalCompras + totalRendiciones + hhCostoReal;
 
     const costos = {
       totalCompras, totalRendiciones, valorHHReal: hhCostoReal,
-      comprasFacturadas, costoAcumulado, costoPlan, pptoUtilizadoReal,
-      costoReales: costosRealesContabilizados,
-      costoPlanCompras: Math.max(0, costoPlan - costoPlanHH),
-      hhPlan: {
-        horas: totalHorasPlan,
-        costo: costoPlanHH
-      }
+      costoAcumulado, costoPlan, pptoUtilizadoReal,
+      costoPlanCompras,
+      hhPlan: { horas: totalHorasPlan, costo: costoPlanHH }
     };
 
     // ===== Equipo =====
@@ -186,197 +135,345 @@ export async function reporteDevengadoProfesional(request, reply) {
       const e = m.empleado;
       const u = e?.usuario;
       const nombre = u?.nombre || "Usuario";
-      const iniciales = nombre.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
-      const hh = e?.hhRegistros?.[0];
       return {
         id: e?.id,
         nombre,
-        iniciales,
-        cargo: e?.cargo || m.rol || "Miembro",
-        costoHH: hh?.costoHH || Math.round((e?.sueldo_base || 500000) / 180),
+        cargo: e?.cargo || m.rol || "Miembro"
       };
     });
 
-    // ===== Jerarquía: Épicas -> Tareas -> Detalles =====
+    const now = new Date();
+    // ===== Date helpers locales =====
+    // ===== Date helpers locales =====
+    const calculatePlannedProgress = (item, refDate) => {
+      if (!item.fecha_inicio_plan || !item.fecha_fin_plan) return 0;
+      const s = new Date(item.fecha_inicio_plan);
+      const e = new Date(item.fecha_fin_plan);
+      const q = new Date(refDate);
+      if (q < s) return 0;
+      const total = Math.max(1, (e - s) / 86400000 + 1);
+      const elap = Math.max(0, (Math.min(q, e) - s) / 86400000 + 1);
+      return Math.min(1, elap / total);
+    };
+
+    // ===== Pesos y Avance Ponderado =====
+    
+    // Función central para calcular peso de un item
+    const getPesoItem = (item) => {
+      const costo = Number(item.costo_plan || item.total_costo_plan || 0);
+      if (costo > 0) return costo;
+      const horas = Number(item.horas_plan || item.total_horas_plan || 0);
+      if (horas > 0) return horas; // Podríamos multiplicar por un valor_hora promedio si quisiéramos
+      const dias = Number(item.dias_plan || 0);
+      if (dias > 0) return dias;
+      return 1; // Fallback mínimo para evitar divisiones por cero
+    };
+
+    // 1. Procesar Tareas y Subtareas
+    const tareasProcesadas = tareasRaw.map(t => {
+      const subtasks = t.detalles || [];
+      let sumSubW = 0;
+      let sumSubWeightedAvance = 0;
+      let sumSubWeightedPlan = 0;
+
+      const detalles = subtasks.map(d => {
+        const w = getPesoItem(d);
+        sumSubW += w;
+        const subAvance = Number(d.avance || 0);
+        const subPlan = calculatePlannedProgress(d, now) * 100;
+        sumSubWeightedAvance += w * subAvance;
+        sumSubWeightedPlan += w * subPlan;
+        
+        return {
+          ...d,
+          peso: w,
+          avance_real_pct: subAvance,
+          avance_plan_pct: Math.round(subPlan * 100) / 100,
+          fecha_inicio_plan: d.fecha_inicio_plan,
+          fecha_fin_plan: d.fecha_fin_plan,
+          fecha_inicio_real: d.fecha_inicio_real,
+          fecha_fin_real: d.fecha_fin_real,
+        };
+      });
+
+      // Avance ponderado de la tarea
+      const hasSubtasks = detalles.length > 0;
+      const avance_real_pct = hasSubtasks 
+        ? Math.round((sumSubWeightedAvance / (sumSubW || 1)) * 100) / 100 
+        : Number(t.avance || 0);
+      
+      const avance_plan_pct = hasSubtasks
+        ? Math.round((sumSubWeightedPlan / (sumSubW || 1)) * 100) / 100
+        : Math.round(calculatePlannedProgress(t, now) * 10000) / 100;
+
+      const peso = sumSubW > 0 ? sumSubW : getPesoItem(t);
+
+      return {
+        ...t,
+        detalles,
+        avance_real_pct,
+        avance_plan_pct,
+        peso,
+        fecha_inicio_plan: t.fecha_inicio_plan,
+        fecha_fin_plan: t.fecha_fin_plan,
+        fecha_inicio_real: t.fecha_inicio_real,
+        fecha_fin_real: t.fecha_fin_real,
+      };
+    });
+
+    // 2. Agrupar en Épicas y Calcular su Avance Ponderado
     const epicasMap = new Map();
-    proyecto.epicas.forEach(e => {
-      epicasMap.set(e.id, { ...e, tareas: [] });
-    });
-
+    (proyecto.epicas || []).forEach(e => epicasMap.set(e.id, { ...e, tareas: [] }));
     const tareasSinEpica = [];
-    tareas.forEach(t => {
-      if (t.epica_id && epicasMap.has(t.epica_id)) {
-        epicasMap.get(t.epica_id).tareas.push(t);
-      } else {
-        tareasSinEpica.push(t);
-      }
+    
+    tareasProcesadas.forEach(t => {
+      if (t.epica_id && epicasMap.has(t.epica_id)) epicasMap.get(t.epica_id).tareas.push(t);
+      else tareasSinEpica.push(t);
     });
 
-    const epicasJerarquia = Array.from(epicasMap.values());
+    const epicasJerarquia = Array.from(epicasMap.values()).map(e => {
+      const sumTaskW = e.tareas.reduce((acc, t) => acc + t.peso, 0);
+      const sumTaskWeightedAvance = e.tareas.reduce((acc, t) => acc + (t.avance_real_pct * t.peso), 0);
+      const sumTaskWeightedPlan = e.tareas.reduce((acc, t) => acc + (t.avance_plan_pct * t.peso), 0);
+
+      const avance_real_pct = e.tareas.length > 0
+        ? Math.round((sumTaskWeightedAvance / (sumTaskW || 1)) * 100) / 100
+        : Number(e.avance || 0);
+      
+      const avance_plan_pct = e.tareas.length > 0
+        ? Math.round((sumTaskWeightedPlan / (sumTaskW || 1)) * 100) / 100
+        : Math.round(calculatePlannedProgress(e, now) * 10000) / 100;
+
+      const peso = sumTaskW > 0 ? sumTaskW : (Number(e.dias_plan || 0) || 1);
+
+      return {
+        ...e,
+        avance_real_pct,
+        avance_plan_pct,
+        peso,
+        tareas: e.tareas,
+        fecha_inicio_plan: e.fecha_inicio_plan,
+        fecha_fin_plan: e.fecha_fin_plan,
+        fecha_inicio_real: e.fecha_inicio_real,
+        fecha_fin_real: e.fecha_fin_real,
+      };
+    });
+
+    // Épica virtual para tareas sin épica
     if (tareasSinEpica.length > 0) {
+      const sumW = tareasSinEpica.reduce((acc, t) => acc + t.peso, 0);
+      const sumWeightedAvance = tareasSinEpica.reduce((acc, t) => acc + (t.avance_real_pct * t.peso), 0);
+      const sumWeightedPlan = tareasSinEpica.reduce((acc, t) => acc + (t.avance_plan_pct * t.peso), 0);
+      
       epicasJerarquia.push({
         id: "sin-epica",
-        nombre: "Sin Épica / Generales",
-        avance: Math.round(tareasSinEpica.reduce((acc, t) => acc + (t.avance || 0), 0) / tareasSinEpica.length),
-        tareas: tareasSinEpica
+        nombre: "Tareas Generales",
+        avance_real_pct: Math.round((sumWeightedAvance / (sumW || 1)) * 100) / 100,
+        avance_plan_pct: Math.round((sumWeightedPlan / (sumW || 1)) * 100) / 100,
+        peso: sumW || 1,
+        tareas: tareasSinEpica,
+        fecha_inicio_plan: null,
+        fecha_fin_plan: null,
       });
     }
 
-    // ===== Rango dinámico basado en tareas =====
-    const now = new Date();
+    // 3. Calcular Avance Total del Proyecto
+    const totalW = epicasJerarquia.reduce((acc, e) => acc + e.peso, 0);
+    const totalWeightedAvance = epicasJerarquia.reduce((acc, e) => acc + (e.avance_real_pct * e.peso), 0);
+    const totalWeightedPlan = epicasJerarquia.reduce((acc, e) => acc + (e.avance_plan_pct * e.peso), 0);
+
+    const avanceActual01 = totalW > 0 ? (totalWeightedAvance / totalW) / 100 : 0;
+    const avancePlan01 = totalW > 0 ? (totalWeightedPlan / totalW) / 100 : 0;
+
+    const devengadoAcumulado = Math.round(base.valor * avanceActual01);
+    const devengadoProyectado = Math.round(base.valor * avancePlan01);
+
+    // 4. Enriquecer con Datos Financieros Finales (Distribución de Ingresos)
+    const enrichFinancieramente = (node) => {
+      const pRaw = totalW > 0 ? (node.peso || 0) / totalW : 0;
+      const participacion = isFinite(pRaw) ? pRaw : 0;
+      const devengado_asignado = Math.round(base.valor * participacion);
+      
+      const enr = {
+        ...node,
+        avance: node.avance_real_pct, 
+        participacion,
+        devengado_asignado,
+        devengado_real: Math.round(devengado_asignado * (node.avance_real_pct / 100)),
+        devengado_plan: Math.round(devengado_asignado * (node.avance_plan_pct / 100)),
+        desviacion_pct: Math.round((node.avance_real_pct - node.avance_plan_pct) * 100) / 100
+      };
+
+      if (enr.tareas && enr.tareas.length > 0) {
+        enr.tareas = enr.tareas.map(t => enrichFinancieramente(t));
+      }
+      if (enr.detalles && enr.detalles.length > 0) {
+        const tSumW = enr.detalles.reduce((acc, d) => acc + (d.peso || 0), 0);
+        enr.detalles = enr.detalles.map(d => {
+          const sPRaw = tSumW > 0 ? (d.peso || 0) / tSumW : 0;
+          const subPart = isFinite(sPRaw) ? sPRaw : 0;
+          const subAsignado = Math.round(devengado_asignado * subPart);
+          return {
+            ...d,
+            participacion: subPart,
+            devengado_asignado: subAsignado,
+            devengado_real: Math.round(subAsignado * (d.avance_real_pct / 100)),
+            devengado_plan: Math.round(subAsignado * (d.avance_plan_pct / 100)),
+            desviacion_pct: Math.round((d.avance_real_pct - d.avance_plan_pct) * 100) / 100
+          };
+        });
+      }
+      return enr;
+    };
+
+    const jerarquiaEnriquecida = epicasJerarquia.map(e => enrichFinancieramente(e));
+
+    // ===== Historial Semanal =====
     let minDate = proyecto.fecha_inicio_plan ? new Date(proyecto.fecha_inicio_plan) : null;
     let maxDate = proyecto.fecha_fin_plan ? new Date(proyecto.fecha_fin_plan) : null;
-
     for (const t of tareasRaw) {
-      if (t.fecha_inicio_plan) {
-        const d = new Date(t.fecha_inicio_plan);
-        if (!minDate || d < minDate) minDate = d;
+      if (t.fecha_inicio_plan) { 
+        const d = new Date(t.fecha_inicio_plan); 
+        if (!minDate || d < minDate) minDate = d; 
       }
-      if (t.fecha_fin_plan) {
-        const d = new Date(t.fecha_fin_plan);
-        if (!maxDate || d > maxDate) maxDate = d;
+      if (t.fecha_fin_plan) { 
+        const d = new Date(t.fecha_fin_plan); 
+        if (!maxDate || d > maxDate) maxDate = d; 
       }
     }
-    if (!minDate) minDate = addDays(now, -14);
-    if (!maxDate) maxDate = addDays(now, 14);
+    const plotStart = startOfWeekMonday(minDate || addDays(now, -14));
+    const plotEnd = endOfWeekSunday(new Date(Math.max(now.getTime(), (maxDate || now).getTime())));
 
-    const plotStart = startOfWeekMonday(minDate);
-    const plotEnd = endOfWeekSunday(new Date(Math.max(now.getTime(), maxDate.getTime())));
-
-    // ===== Plan semanal =====
-    const weeklyPlanned = (sStart, sEnd) => {
-      let sumP = 0;
-      for (const t of tareasRaw) {
-        if (!t.fecha_inicio_plan || !t.fecha_fin_plan) continue;
-        const w = weightsById.get(t.id) || 1;
-        const totalDays = Math.max(1, overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, t.fecha_inicio_plan, t.fecha_fin_plan));
-        const ov = overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, sStart, sEnd);
-        if (ov <= 0) continue;
-        sumP += (ov / totalDays) * w;
-      }
-      const pct = sumW > 0 ? sumP / sumW : 0;
-      return { pct: Math.round(pct * 10000) / 100, amount: Math.round(base.valor * pct) };
-    };
-
-    // ===== Real semanal (delta de avance via historial) =====
-    const weeklyReal = async (sStart, sEnd) => {
-      if (!tareasRaw.length) return { devengadoSemana: 0, avanceSemanaPct: 0 };
-      const tareaIds = tareasRaw.map(t => t.id);
-      const startMinus = new Date(sStart); startMinus.setMilliseconds(-1);
-
-      const [rowsBefore, rowsAfter] = await Promise.all([
-        prisma.$queryRaw`
-          SELECT DISTINCT ON (h.tarea_id) h.tarea_id, h.to_avance
-          FROM "TareaHistorial" h
-          WHERE h.proyecto_id = ${proyectoId}
-            AND h.tarea_id = ANY(${tareaIds})
-            AND h.occurred_at <= ${startMinus}
-            AND h.to_avance IS NOT NULL
-          ORDER BY h.tarea_id, h.occurred_at DESC`,
-        prisma.$queryRaw`
-          SELECT DISTINCT ON (h.tarea_id) h.tarea_id, h.to_avance
-          FROM "TareaHistorial" h
-          WHERE h.proyecto_id = ${proyectoId}
-            AND h.tarea_id = ANY(${tareaIds})
-            AND h.occurred_at <= ${new Date(sEnd)}
-            AND h.to_avance IS NOT NULL
-          ORDER BY h.tarea_id, h.occurred_at DESC`,
-      ]);
-
-      const mapB = new Map(rowsBefore.map(r => [r.tarea_id, Number(r.to_avance)]));
-      const mapA = new Map(rowsAfter.map(r => [r.tarea_id, Number(r.to_avance)]));
-
-      let wB = 0, wA = 0;
-      for (const t of tareasRaw) {
-        const w = weightsById.get(t.id) || 1;
-        wB += w * pct01From100(mapB.has(t.id) ? mapB.get(t.id) : 0);
-        wA += w * pct01From100(mapA.has(t.id) ? mapA.get(t.id) : 0);
-      }
-      const delta = sumW > 0 ? Math.max(0, (wA - wB) / sumW) : 0;
-      return { devengadoSemana: Math.round(base.valor * delta), avanceSemanaPct: Math.round(delta * 10000) / 100 };
-    };
-
-    // ===== Construir historial semana a semana =====
     const weeklyHistory = [];
     let curr = new Date(plotStart);
     let iter = 1;
+    let prev = { pAmt: 0, rAmt: 0 };
+    const tareaIds = tareasRaw.map(t => t.id);
+    let maxRealPctSoFar = 0;
+
     while (curr <= plotEnd && iter <= 52) {
-      const sStart = new Date(curr);
-      const sEnd = endOfWeekSunday(curr);
-      const plan = weeklyPlanned(sStart, sEnd);
-      const real = await weeklyReal(sStart, sEnd);
-      const costoSemana = sumW > 0 ? Math.round(costoAcumulado * (plan.pct / 100)) : 0;
+      const d = endOfWeekSunday(curr);
       
-      const mesNombre = sStart.toLocaleDateString("es-CL", { month: "short" }).toUpperCase().replace(".", "");
+      // 1. Planificado Ponderado en la fecha d
+      let sumWeightedPlan = 0;
+
+      for (const t of tareasProcesadas) {
+        let tPlan = 0;
+        if (t.detalles && t.detalles.length > 0) {
+          let sW = 0; let sWP = 0;
+          for (const det of t.detalles) {
+            const w = det.peso;
+            sW += w;
+            sWP += w * (calculatePlannedProgress(det, d) * 100);
+          }
+          tPlan = sW > 0 ? sWP / sW : 0;
+        } else {
+          tPlan = calculatePlannedProgress(t, d) * 100;
+        }
+        sumWeightedPlan += t.peso * (tPlan / 100); // Convert tPlan back to 0-1 range
+      }
+      const pPct = totalW > 0 ? sumWeightedPlan / totalW : 0;
+
+      // 2. Real Ponderado en la fecha d (historial de tareas)
+      const [rows] = await Promise.all([
+        prisma.$queryRaw`SELECT DISTINCT ON (tarea_id) tarea_id, to_avance FROM "TareaHistorial" WHERE proyecto_id = ${proyectoId} AND tarea_id = ANY(${tareaIds}) AND occurred_at <= ${d} AND to_avance IS NOT NULL ORDER BY tarea_id, occurred_at DESC`,
+      ]);
+      const mapA = new Map(rows.map(r => [r.tarea_id, Number(r.to_avance)]));
       
+      let sumWeightedReal_P = 0;
+      for (const t of tareasProcesadas) {
+        let tReal = 0;
+        
+        if (t.detalles && t.detalles.length > 0) {
+          let sW = 0; let sWR = 0;
+          for (const det of t.detalles) {
+            const w = det.peso;
+            sW += w;
+            
+            let rAvance = mapA.get(det.id) ?? null;
+            if (rAvance === null) {
+              const sR = det.fecha_inicio_real ? new Date(det.fecha_inicio_real) : null;
+              const eR = det.fecha_fin_real ? new Date(det.fecha_fin_real) : null;
+              if (sR && eR) {
+                if (d >= eR) rAvance = det.avance_real_pct;
+                else if (d < sR) rAvance = 0;
+                else {
+                  const totalDays = Math.max(1, (eR - sR) / 86400000);
+                  const elapsedDays = Math.max(0, (d - sR) / 86400000);
+                  rAvance = (elapsedDays / totalDays) * det.avance_real_pct;
+                }
+              } else {
+                rAvance = 0;
+              }
+            }
+            sWR += w * rAvance;
+          }
+          tReal = sW > 0 ? sWR / sW : 0;
+        } else {
+          let rAvance = mapA.get(t.id) ?? null;
+          if (rAvance === null) {
+            const sR = t.fecha_inicio_real ? new Date(t.fecha_inicio_real) : null;
+            const eR = t.fecha_fin_real ? new Date(t.fecha_fin_real) : null;
+            if (sR && eR) {
+              if (d >= eR) rAvance = t.avance_real_pct;
+              else if (d < sR) rAvance = 0;
+              else {
+                const totalDays = Math.max(1, (eR - sR) / 86400000);
+                const elapsedDays = Math.max(0, (d - sR) / 86400000);
+                rAvance = (elapsedDays / totalDays) * t.avance_real_pct;
+              }
+            } else {
+              rAvance = 0;
+            }
+          }
+          tReal = rAvance;
+        }
+        sumWeightedReal_P += t.peso * (tReal / 100);
+      }
+      let rPct = totalW > 0 ? sumWeightedReal_P / totalW : 0;
+      
+      // Garantizar que la curva real sea acumulativa (no decreciente)
+      if (rPct > maxRealPctSoFar) maxRealPctSoFar = rPct;
+      else rPct = maxRealPctSoFar;
+
+      const pAmt = Math.round(base.valor * pPct);
+      const rAmt = Math.round(base.valor * rPct);
+
       weeklyHistory.push({
-        num: iter, label: `S${iter}`, day: `S${iter}`,
-        mes: mesNombre,
-        semana: iter,
-        inicio: sStart, fin: sEnd, plan, real,
-        ingreso: real.devengadoSemana,
-        costo: costoSemana,
-        planValue: plan.amount > 0 ? plan.amount : costoSemana,
-        realValue: real.devengadoSemana,
+        num: iter, label: `S${iter}`, mes: curr.toLocaleDateString("es-CL", { month: "short" }).toUpperCase(),
+        planValue: pAmt, realValue: rAmt,
+        avance_plan_acumulado: Math.round(pPct * 10000)/100,
+        avance_real_acumulado: Math.round(rPct * 10000)/100,
+        devengado_plan_semanal: Math.max(0, pAmt - prev.pAmt),
+        devengado_real_semanal: Math.max(0, rAmt - prev.rAmt),
+        semana: iter
       });
-      curr = addDays(curr, 7); iter++;
+      prev = { pAmt, rAmt };
+      curr.setDate(curr.getDate() + 7);
+      iter++;
     }
-
-    // Semana actual / pasada / próxima
-    const semanaActual = { inicio: startOfWeekMonday(now), fin: endOfWeekSunday(now) };
-    const semanaPasada = { inicio: addDays(semanaActual.inicio, -7), fin: addDays(semanaActual.fin, -7) };
-    const semanaProxima = { inicio: addDays(semanaActual.inicio, 7), fin: addDays(semanaActual.fin, 7) };
-
-    const [rwSA, rwSP] = await Promise.all([weeklyReal(semanaActual.inicio, semanaActual.fin), weeklyReal(semanaPasada.inicio, semanaPasada.fin)]);
 
     return reply.send({
       ok: true,
-      proyecto: {
-        ...proyecto,
-        epicas: epicasJerarquia
-      },
+      proyecto: { ...proyecto, epicas: jerarquiaEnriquecida },
       financiero: {
         base, costos,
         devengado: {
           devengado: devengadoAcumulado,
+          devengado_proyectado: devengadoProyectado,
           avancePct: Math.round(avanceActual01 * 10000) / 100,
-          utilidadDevengada: Math.max(0, devengadoAcumulado - costoAcumulado),
-          faltanteParaEquilibrio: Math.max(0, costoAcumulado - devengadoAcumulado),
-          yaPasoCosto: devengadoAcumulado >= costoAcumulado,
-          breakevenPct: null,
+          avancePlanPct: Math.round(avancePlan01 * 10000) / 100,
+          desviacion_devengado: devengadoAcumulado - devengadoProyectado,
+          desviacion_avance: Math.round((avanceActual01 - avancePlan01) * 10000) / 100,
           saludPct: Math.round(avanceActual01 * 100),
-        },
-      },
-      tareas: {
-        avancePct: Math.round(avanceActual01 * 10000) / 100,
-        conteo: {
-          total: tareas.length,
-          completadas: tareas.filter(t => String(t.estado).toLowerCase() === "completa" || t.avance >= 100).length,
-          enSemanaActual: tareas.filter(t => t.fecha_inicio_plan && t.fecha_fin_plan && overlapDays(t.fecha_inicio_plan, t.fecha_fin_plan, semanaActual.inicio, semanaActual.fin) > 0).length,
-          atrasadas: tareas.filter(t => {
-            const done = String(t.estado).toLowerCase() === "completa" || t.avance >= 100;
-            return !done && t.fecha_fin_plan && new Date(t.fecha_fin_plan) < semanaActual.inicio;
-          }).length,
-        },
+        }
       },
       compras: comprasList,
       empleados: empleadosList,
-      weekly: {
-        semanaActual: { plan: weeklyPlanned(semanaActual.inicio, semanaActual.fin), real: rwSA },
-        semanaPasada: { plan: weeklyPlanned(semanaPasada.inicio, semanaPasada.fin), real: rwSP },
-        semanaProxima: { plan: weeklyPlanned(semanaProxima.inicio, semanaProxima.fin), real: { devengadoSemana: 0 } },
-        history: weeklyHistory,
-        daily: weeklyHistory,
-      },
-      tareas_all: tareas, // Se mantiene por compatibilidad si es necesario
-      notas: [
-        `Rango del proyecto: ${minDate.toLocaleDateString("es-CL")} → ${maxDate.toLocaleDateString("es-CL")}`,
-        `Semanas generadas: ${weeklyHistory.length}`,
-        `Avance ponderado: ${Math.round(avanceActual01 * 100)}%`,
-      ]
+      weekly: { history: weeklyHistory }
     });
   } catch (err) {
-    console.error("ERROR EN DEVENGADO:", err);
-    return reply.code(500).send({ ok: false, error: err.message, debug_id: "NEW_FILE_V2" });
+    console.error("ERROR DEVENGADO:", err);
+    return reply.code(500).send({ ok: false, error: err.message });
   }
 }
