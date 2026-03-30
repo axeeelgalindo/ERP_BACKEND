@@ -92,38 +92,44 @@ export const getDashboardData = async (request, reply) => {
     // KPIs CALCULADOS
     // ============================================
 
-    // Función helper interna para fechas (MODIFICADO: Retorna siempre true para mostrar toda la data histórica)
+    // ============================================
+    // HELPERS DE FILTRADO (REALES)
+    // ============================================
     const isThisMonth = (dStr) => {
-      return true;
+      if (!dStr) return false;
+      const d = new Date(dStr);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
     };
 
     const isThisWeek = (dStr) => {
-      return true;
+      if (!dStr) return false;
+      const d = new Date(dStr);
+      return d >= startOfWeek && d <= endOfWeek;
     };
 
-    // 1. Facturado Mes (Facturación Real = Ventas / Costeos)
+    // 1. Facturado Mes (Facturación Real = Ventas emitidas este mes)
     const facturadoMes = ventas.reduce((acc, v) => {
       let totalVenta = v.total || 0; 
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
       }
-      if (isThisMonth(v.fecha || v.createdAt)) return acc + Number(totalVenta);
+      // Se factura según fecha de la Venta
+      if (isThisMonth(v.fecha)) return acc + Number(totalVenta);
       return acc;
     }, 0);
 
-    // 1a. Ventas Mes (Solo Ordenes de Venta / Cotizaciones Aprobadas)
+    // 1a. Ventas Mes (Cotizaciones que pasaron a OV este mes)
     const ventasMes = cotizaciones.reduce((acc, c) => {
-      const estado = (c.estado || '').toLowerCase();
-      const isAprobada = estado.includes('aprob') || estado.includes('ganad') || estado.includes('acept');
-      if (isAprobada && isThisMonth(c.creada_en || c.fecha)) {
+      // Usamos la nueva fecha_ov para saber si se vendió este mes
+      if (isThisMonth(c.fecha_ov)) {
         return acc + (Number(c.total) || 0);
       }
       return acc;
     }, 0);
 
-    // 1b. Cotizado Mes (Todas las cotizaciones, incluyendo las aprobadas)
+    // 1b. Cotizado Mes (Total de cotizaciones creadas este mes)
     const cotizadoMes = cotizaciones.reduce((acc, c) => {
-      if (isThisMonth(c.creada_en || c.fecha)) {
+      if (isThisMonth(c.creada_en)) {
         return acc + (Number(c.total) || 0);
       }
       return acc;

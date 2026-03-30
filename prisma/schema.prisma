@@ -654,6 +654,9 @@ model Cotizacion {
   fecha_documento       DateTime?
   vencimiento_documento DateTime?
 
+  fecha_ov        DateTime?
+  fecha_facturada DateTime?
+
   motivo_rechazo String?
 
   // ✅ NUEVO: descuento general de la cotización (porcentaje 0..99.99)
@@ -760,6 +763,14 @@ model Venta {
   isUrgencia Boolean @default(false)
 
   createdAt DateTime @default(now())
+  
+  // === RCV (opcionales)
+  tipo_doc        Int?
+  folio           String?   @db.VarChar(50)
+  rut_cliente     String?   @db.VarChar(40)
+  razon_social    String?   @db.VarChar(255)
+  fecha_docto     DateTime?
+  total           Float?    // total bruto para facilitar RCV
 
   // ✅ soft delete (AGREGAR)
   eliminado    Boolean   @default(false)
