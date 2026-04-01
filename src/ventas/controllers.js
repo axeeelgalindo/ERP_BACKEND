@@ -9,7 +9,10 @@ export const listVentas = async (request, reply) => {
 
     const ventas = await prisma.venta.findMany({
       where: {
-        AND: [{ eliminado: false }],
+        AND: [
+          { eliminado: false },
+          { folio: null }
+        ],
         OR: [
           // 1) Por OV/Cotización
           { ordenVenta: { empresa_id: String(empresaId), eliminado: false } },

@@ -176,6 +176,7 @@ export async function createRendicion(request, reply) {
 
         descripcion: body.descripcion ?? "",
         monto_total,
+        monto_pagado: 0,
         estado: body.estado ?? "pendiente",
 
         items: {
@@ -395,7 +396,20 @@ export async function updateRendicion(request, reply) {
           ? new Date(body.fecha_revision)
           : undefined,
         comentario_revision: body.comentario_revision ?? undefined,
+
+        // ✅ NUEVO: Soporte para pagos parciales
+        monto_pagado: body.monto_pagado !== undefined ? toNum(body.monto_pagado) : undefined,
       };
+
+      // ✅ Lógica automática: si el monto_pagado >= monto_total, marcar como 'pagada'
+      const checkTotal = body.monto_total ?? current.monto_total;
+      const checkPaid = body.monto_pagado ?? current.monto_pagado ?? 0;
+      
+      if (checkPaid > 0 && checkPaid >= checkTotal) {
+        data.estado = "pagada";
+      } else if (checkPaid > 0 && checkPaid < checkTotal) {
+        data.estado = "pagada_parcial"; // O mantener aprobada si prefieres
+      }
 
       // Si mandan items => reemplazo completo (deleteMany + create)
       if (body.items) {

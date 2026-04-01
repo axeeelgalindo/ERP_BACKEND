@@ -147,52 +147,7 @@ function normStr(v) {
 /* =========================
    Vinculación Compra -> Costeo (Venta)
 ========================= */
-function getPrevPeriod(year, month) {
-  if (month === 1) return { y: year - 1, m: 12 };
-  return { y: year, m: month - 1 };
-}
-
-async function countComprasNoVinculadas(tx, empresa_id, year, month) {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-
-  const compras = await tx.compra.findMany({
-    where: {
-      empresa_id,
-      eliminado: false,
-      fecha_docto: { gte: start, lt: end },
-      estado: { in: ["FACTURADA", "PAGADA"] },
-    },
-    select: { id: true, total: true },
-  });
-
-  if (!compras.length) return { total: 0, pendientes: 0, ids: [] };
-
-  const ids = compras.map((c) => c.id);
-
-  const sums = await tx.compraCosteo.groupBy({
-    by: ["compra_id"],
-    where: { empresa_id, compra_id: { in: ids } },
-    _sum: { monto: true },
-  });
-
-  const map = new Map(
-    sums.map((x) => [x.compra_id, Number(x._sum.monto || 0)])
-  );
-
-  const pendingIds = [];
-  for (const c of compras) {
-    const sum = map.get(c.id) || 0;
-    const pct = c.total > 0 ? sum / c.total : 0;
-    if (pct < 0.999999) pendingIds.push(c.id);
-  }
-
-  return {
-    total: compras.length,
-    pendientes: pendingIds.length,
-    ids: pendingIds,
-  };
-}
+/* Helper functions removed as the RCV import restriction was disabled */
 
 async function attachVinculadoPct(empresa_id, compras) {
   const ids = compras.map((c) => c.id);
@@ -274,32 +229,7 @@ export async function importComprasCSV(request, reply) {
       return httpError(reply, 400, "CSV vacío o formato inválido");
     }
 
-    // ✅ bloquear import si mes anterior tiene compras no 100% vinculadas
-    const firstRow = records.find((r) => r["Fecha Docto"]);
-    const firstDate = parseDateDMY(firstRow?.["Fecha Docto"]);
-    if (!firstDate) {
-      return httpError(
-        reply,
-        400,
-        "No se pudo detectar el periodo del CSV (Fecha Docto)"
-      );
-    }
-
-    const csvYear = firstDate.getFullYear();
-    const csvMonth = firstDate.getMonth() + 1;
-    const prev = getPrevPeriod(csvYear, csvMonth);
-
-    const check = await prisma.$transaction((tx) =>
-      countComprasNoVinculadas(tx, empresa_id, prev.y, prev.m)
-    );
-
-    if (check.pendientes > 0) {
-      return httpError(
-        reply,
-        409,
-        `No puedes importar el RCV ${csvMonth}/${csvYear}: hay ${check.pendientes} compras del periodo ${prev.m}/${prev.y} sin 100% vincular a un costeo`
-      );
-    }
+    // Bloque de validación eliminado para permitir importación sin restricciones de vinculación
 
     let created = 0;
     let skipped = 0;

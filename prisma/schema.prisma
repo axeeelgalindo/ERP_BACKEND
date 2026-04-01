@@ -605,6 +605,8 @@ enum EstadoCotizacion {
   COTIZACION
   ACEPTADA
   ORDEN_VENTA
+  ENTREGADO
+  POR_FACTURAR
   FACTURADA
   PAGADA
   RECHAZADA
@@ -662,6 +664,13 @@ model Cotizacion {
   // ✅ NUEVO: descuento general de la cotización (porcentaje 0..99.99)
   descuento_pct   Float @default(0)
   descuento_monto Float @default(0) // monto descontado calculado (opcional pero útil)
+
+  // ✅ NUEVO: Documentos adjuntos
+  doc_oc_url          String?
+  doc_hes_url         String?
+  doc_fac_url         String?
+  doc_comprobante_url String?
+  doc_gd_url          String?
 
   estado EstadoCotizacion @default(COTIZACION)
 
@@ -1037,6 +1046,7 @@ model Rendicion {
   centro_costo String?
   descripcion  String?
   monto_total  Float   @default(0)
+  monto_pagado Float   @default(0) // ✅ Nuevo: para pagos parciales
   estado       String  @default("pendiente")
 
   creado_en      DateTime  @default(now())

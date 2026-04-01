@@ -54,7 +54,9 @@ export const getDashboardData = async (request, reply) => {
             compras: { include: { compra: true } }
           }
         },
-        ordenVenta: true
+        ordenVenta: {
+          include: { cliente: true }
+        }
       }
     });
 
@@ -107,21 +109,43 @@ export const getDashboardData = async (request, reply) => {
       return d >= startOfWeek && d <= endOfWeek;
     };
 
+    // --- BREAKDOWN ARRAYS ---
+    const b_facturadoMes = [];
+    const b_ventasMes = [];
+    const b_cotizadoMes = [];
+    const b_comprasSemana = [];
+    const b_devengadoSemana = [];
+    const b_ingresosMes = [];
+    const b_egresosMes = [];
+
     // 1. Facturado Mes (Facturación Real = Ventas emitidas este mes)
     const facturadoMes = ventas.reduce((acc, v) => {
       let totalVenta = v.total || 0; 
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
       }
-      // Se factura según fecha de la Venta
-      if (isThisMonth(v.fecha)) return acc + Number(totalVenta);
+      if (isThisMonth(v.fecha)) {
+        b_facturadoMes.push({ 
+          folio: v.folio || v.id, 
+          cliente: v.ordenVenta?.cliente?.nombre || "N/A",
+          total: totalVenta, 
+          fecha: v.fecha 
+        });
+        return acc + Number(totalVenta);
+      }
       return acc;
     }, 0);
 
     // 1a. Ventas Mes (Cotizaciones que pasaron a OV este mes)
     const ventasMes = cotizaciones.reduce((acc, c) => {
-      // Usamos la nueva fecha_ov para saber si se vendió este mes
       if (isThisMonth(c.fecha_ov)) {
+        b_ventasMes.push({ 
+          id: c.id, 
+          cliente: c.cliente?.nombre || "N/A",
+          asunto: c.asunto, 
+          total: c.total, 
+          fecha_ov: c.fecha_ov 
+        });
         return acc + (Number(c.total) || 0);
       }
       return acc;
@@ -130,14 +154,24 @@ export const getDashboardData = async (request, reply) => {
     // 1b. Cotizado Mes (Total de cotizaciones creadas este mes)
     const cotizadoMes = cotizaciones.reduce((acc, c) => {
       if (isThisMonth(c.creada_en)) {
+        b_cotizadoMes.push({ 
+          id: c.id, 
+          cliente: c.cliente?.nombre || "N/A",
+          asunto: c.asunto, 
+          total: c.total, 
+          creada_en: c.creada_en 
+        });
         return acc + (Number(c.total) || 0);
       }
       return acc;
     }, 0);
 
-    // 2. Compras Proyectadas Semana
+    // 2. Compras Proyectadas Semana (Nuevas Órdenes de Compra generadas esta semana)
     const comprasSemana = compras.reduce((acc, c) => {
-      if (isThisWeek(c.fecha || c.createdAt)) return acc + (Number(c.total) || 0);
+      if (isThisWeek(c.creada_en || c.fecha)) {
+        b_comprasSemana.push({ numero: c.numero, total: c.total, fecha: c.creada_en || c.fecha });
+        return acc + (Number(c.total) || 0);
+      }
       return acc;
     }, 0);
 
@@ -145,68 +179,115 @@ export const getDashboardData = async (request, reply) => {
     function taskWeight(t) {
       const costo = Number(t.total_costo_plan ?? t.costo_plan ?? 0);
       if (Number.isFinite(costo) && costo > 0) return costo;
-
       const horas = Number(t.total_horas_plan ?? t.horas_plan ?? 0);
       if (Number.isFinite(horas) && horas > 0) return horas;
-
       const dias = Number(t.dias_plan ?? 0);
       if (Number.isFinite(dias) && dias > 0) return dias;
-
       return 1;
     }
 
-    // 3. Devengado Semana (Proyectos)
-    const devengadoSemana = proyectos.reduce((acc, p) => {
+    // 3. Generado Semana (Devengado Incremental de los últimos 7 días)
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(now.getDate() - 7);
+
+    const taskIdList = proyectos.flatMap(p => p.tareas.map(t => t.id));
+    const historial7Dias = await prisma.$queryRaw`
+      SELECT DISTINCT ON (tarea_id) tarea_id, to_avance 
+      FROM "TareaHistorial" 
+      WHERE tarea_id = ANY(${taskIdList}) 
+        AND occurred_at <= ${sevenDaysAgo} 
+        AND to_avance IS NOT NULL 
+      ORDER BY tarea_id, occurred_at DESC
+    `;
+    const mapHistorial = new Map(historial7Dias.map(r => [r.tarea_id, Number(r.to_avance)]));
+
+    const devengadoSemana = proyectos.reduce((accTotal, p) => {
       const isActivo = p.estado && (p.estado.toLowerCase() === 'activo' || p.estado.toLowerCase() === 'en_progreso');
-      if (isActivo) {
-        const valor = Number(p.presupuesto) || 0;
-        
-        // Ponderación de Avance como el devengado individual de cada proyecto
-        let sumW = 0;
-        let sumWA = 0;
-        if (p.tareas && p.tareas.length > 0) {
-           p.tareas.forEach(t => {
-             const w = taskWeight(t);
-             const a100 = Number(t.avance || 0);
-             const a01 = Math.max(0, Math.min(1, a100 / 100)); // Clamp 0..1
-             sumW += w;
-             sumWA += (w * a01);
-           });
-        }
-        const avancePonderado01 = sumW > 0 ? sumWA / sumW : 0;
-        
-        // Por defecto o lógica original mostrábamos el devengado histórico "total" si no hay fechas, 
-        // pero la regla era filtrar isThisWeek(). 
-        // Para que de números, usamos avance histórico igual que hiciste al inicio.
-        if (isThisWeek(p.actualizado_en || p.creada_en)) {
-          return acc + (valor * avancePonderado01);
-        }
+      if (!isActivo) return accTotal;
+
+      const valor = Number(p.presupuesto) || 0;
+      if (valor <= 0) return accTotal;
+
+      let sumW = 0;
+      let sumWA_Ahora = 0;
+      let sumWA_Hace7 = 0;
+      const tasksWithDelta = [];
+
+      if (p.tareas && p.tareas.length > 0) {
+        p.tareas.forEach(t => {
+          const w = taskWeight(t);
+          sumW += w;
+          const aAhora = Math.max(0, Math.min(1, Number(t.avance || 0) / 100));
+          sumWA_Ahora += (w * aAhora);
+          const aHace7_Val = mapHistorial.get(t.id) ?? 0;
+          const aHace7 = Math.max(0, Math.min(1, aHace7_Val / 100));
+          sumWA_Hace7 += (w * aHace7);
+
+          if (aAhora > aHace7) {
+            tasksWithDelta.push({
+              nombre: t.nombre,
+              avance_ahora: aAhora * 100,
+              avance_hace7: aHace7 * 100,
+              delta_pct: (aAhora - aHace7) * 100,
+              contribucion_devengado: sumW > 0 ? (valor * (w * (aAhora - aHace7) / sumW)) : 0
+            });
+          }
+        });
       }
-      return acc;
+
+      if (sumW > 0) {
+        const devHoy = valor * (sumWA_Ahora / sumW);
+        const devHace7 = valor * (sumWA_Hace7 / sumW);
+        const delta = Math.max(0, devHoy - devHace7);
+        if (delta > 0) {
+          b_devengadoSemana.push({ 
+            proyecto: p.nombre, 
+            monto_incremental: delta, 
+            devHoy, 
+            devHace7,
+            tareas_con_avance: tasksWithDelta 
+          });
+        }
+        return accTotal + delta;
+      }
+      return accTotal;
     }, 0);
 
-    // 4. Flujo Caja Mes
+    // 4. Flujo Caja Mes (Entradas y Salidas reales del mes)
     const ingresosPagadosMes = ventas.reduce((acc, v) => {
-        let totalVenta = v.total || 0; 
-        if (!v.total && v.detalles) {
-            totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
-        }
-      
-      const isPagada = v.ordenVenta?.estado === 'PAGADA' || (v.detalles && v.detalles.some(d => d.compras?.compra?.estado === 'PAGADA'));
-      if (isPagada && isThisMonth(v.fecha || v.createdAt)) {
+      let totalVenta = v.total || 0; 
+      if (!v.total && v.detalles) {
+          totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
+      }
+      const isPagada = v.ordenVenta?.estado === 'PAGADA';
+      if (isPagada && isThisMonth(v.ordenVenta?.actualizado_en)) {
+         b_ingresosMes.push({ concepto: `Venta ${v.folio || v.id}`, total: totalVenta, fecha_pago: v.ordenVenta?.actualizado_en });
          return acc + totalVenta;
       }
       return acc;
     }, 0);
 
     const egresosPagadosMes = compras.reduce((acc, c) => {
-      if ((c.estado === 'PAGADA' || c.estado === 'PAGADO') && isThisMonth(c.fecha || c.createdAt || c.creada_en)) {
+      const isPagada = c.estado === 'PAGADA' || c.estado === 'PAGADO';
+      if (isPagada && isThisMonth(c.actualizado_en)) {
+         b_egresosMes.push({ concepto: `Compra ${c.numero}`, proveedor: c.proveedor?.nombre, total: c.total, fecha_pago: c.actualizado_en });
          return acc + (Number(c.total) || 0);
        }
       return acc;
     }, 0);
 
     const flujoCajaMes = ingresosPagadosMes - egresosPagadosMes;
+
+    console.log("--- DESGLOSE KPIS ---");
+    const logB = (title, data) => console.log(title, JSON.stringify(data, null, 2));
+    
+    logB("Ventas Mes (OV):", b_ventasMes);
+    logB("Facturado Mes (Facturas):", b_facturadoMes);
+    logB("Cotizado Mes:", b_cotizadoMes);
+    logB("Compras Semana (Nuevas):", b_comprasSemana);
+    logB("Devengado Semana (Incremental):", b_devengadoSemana);
+    logB("Ingresos (Cash):", b_ingresosMes);
+    logB("Egresos (Cash):", b_egresosMes);
 
     // ============================================
     // DATA PARA PIE CHARTS
@@ -316,7 +397,7 @@ export const getDashboardData = async (request, reply) => {
     // RESPONSE
     // ============================================
 
-    return reply.send({
+    const response = {
       success: true,
       kpis: {
         ventasMes,
@@ -337,7 +418,11 @@ export const getDashboardData = async (request, reply) => {
          proyectosMesActivo: proyectosMes.length > 0,
          cotizacionesMesDataActivo: cotizacionesMesData.length > 0
       }
-    });
+    };
+
+    console.log("--- DASHBOARD KPIs ---", response.kpis);
+
+    return reply.send(response);
 
   } catch (error) {
     console.error("[getDashboardData] Error:", error);

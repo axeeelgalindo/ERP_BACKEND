@@ -1,6 +1,10 @@
 // src/modules/cotizaciones/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { createRequire } from "node:module";
+import fs from "fs/promises";
+import path from "path";
+import { pipeline } from "stream/promises";
+import { createWriteStream } from "fs";
 
 const require = createRequire(import.meta.url);
 
@@ -127,11 +131,30 @@ export const listCotizaciones = async (request, reply) => {
         proyecto: true,
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
+        ventas: {
+          where: { eliminado: false },
+          include: { detalles: true },
+        },
       },
     });
 
-    return reply.send(cotizaciones);
+    // ✅ calcular avance de pago pct
+    const result = cotizaciones.map((c) => {
+      const totalVentas = (c.ventas || []).reduce(
+        (acc, v) => acc + calcTotalVenta(v),
+        0
+      );
+      const pct = c.total > 0 ? (totalVentas / c.total) * 100 : 0;
+      return {
+        ...c,
+        total_ventas: totalVentas,
+        avance_pago_pct: Math.min(100, pct),
+      };
+    });
+
+    return reply.send(result);
   } catch (e) {
+    console.error("ERROR EN listCotizaciones:", e);
     return reply.code(e.statusCode || 500).send({
       error: "Error al listar cotizaciones",
       detalle: e.message,
@@ -460,7 +483,7 @@ export const updateCotizacion = async (request, reply) => {
 
       // ✅ mismo nombre que create
       descuento_pct,
-      
+
       fecha_documento,
       vencimiento_documento,
       vendedor_id,
@@ -885,6 +908,8 @@ export const updateCotizacionEstado = async (request, reply) => {
           estado: true,
           proyecto_id: true,
           empresa_id: true,
+          fecha_ov: true,
+          fecha_facturada: true,
         },
       });
 
@@ -946,17 +971,29 @@ export const updateCotizacionEstado = async (request, reply) => {
         });
       }
 
+      const updateData = {
+        estado,
+        proyecto_id: proyectoIdFinal ?? null,
+        motivo_rechazo: toRechazada
+          ? motivo_rechazo
+            ? String(motivo_rechazo).trim()
+            : null
+          : null,
+      };
+
+      if (estado === "ORDEN_VENTA") {
+        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
+      } else if (estado === "FACTURADA") {
+        if (!cot.fecha_facturada) updateData.fecha_facturada = new Date();
+        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
+      } else if (estado === "PAGADA") {
+        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
+        if (!cot.fecha_facturada) updateData.fecha_facturada = new Date();
+      }
+
       const updated = await tx.cotizacion.update({
         where: { id: cot.id },
-        data: {
-          estado,
-          proyecto_id: proyectoIdFinal ?? null,
-          motivo_rechazo: toRechazada
-            ? motivo_rechazo
-              ? String(motivo_rechazo).trim()
-              : null
-            : null,
-        },
+        data: updateData,
         include: {
           proyecto: true,
           cliente: true,
@@ -970,6 +1007,7 @@ export const updateCotizacionEstado = async (request, reply) => {
 
     return reply.send(result);
   } catch (e) {
+    console.error("ERROR EN updateCotizacionEstado:", e);
     return reply.code(e.statusCode || 500).send({
       error: "Error al actualizar estado",
       detalle: e.message,
@@ -993,12 +1031,24 @@ export const deleteCotizacion = async (request, reply) => {
       return reply.code(404).send({ error: "Cotización no encontrada" });
     }
 
-    await prisma.cotizacion.update({
-      where: { id },
-      data: {
-        eliminado: true,
-        eliminado_en: new Date(),
-      },
+    await prisma.$transaction(async (tx) => {
+      // 1) Mark Cotizacion as deleted
+      await tx.cotizacion.update({
+        where: { id },
+        data: {
+          eliminado: true,
+          eliminado_en: new Date(),
+        },
+      });
+
+      // 2) Mark associated Ventas as deleted (cascade soft-delete)
+      await tx.venta.updateMany({
+        where: { ordenVentaId: id, eliminado: false },
+        data: {
+          eliminado: true,
+          eliminado_en: new Date(),
+        },
+      });
     });
 
     return reply.send({ ok: true });
@@ -1009,3 +1059,276 @@ export const deleteCotizacion = async (request, reply) => {
     });
   }
 };
+
+/* =====================================================
+   IMPORT RCV VENTAS (SII)
+   ===================================================== */
+export const importVentasCSV = async (request, reply) => {
+  try {
+    const { empresaId, userId } = getScope(request);
+    const data = await request.file();
+    if (!data) return reply.code(400).send({ error: "No se recibió archivo" });
+
+    const { parse } = await import("csv-parse/sync");
+    const buffer = await data.toBuffer();
+    const content = buffer.toString("utf-8");
+
+    const records = parse(content, {
+      columns: true,
+      skip_empty_lines: true,
+      delimiter: [";", ","],
+      trim: true,
+      relax_column_count: true,
+      relax_quotes: true,
+      skip_records_with_error: true, // para ignorar líneas corruptas si las hay
+    });
+
+    if (!records.length) {
+      return reply.code(400).send({ error: "CSV vacío o formato inválido" });
+    }
+
+    let created = 0;
+    let skipped = 0;
+    let linked = 0;
+
+    const normRut = (r) => String(r || "").replace(/[^0-9kK]/g, "").toUpperCase();
+    const normStr = (s) => String(s || "").trim().slice(0, 255);
+    const toInt = (v) => parseInt(v) || 0;
+    const toFloat = (v) => parseFloat(String(v || "0").replace(/\./g, "").replace(",", ".")) || 0;
+
+      // Helper para fechas DD-MM-YYYY
+    const parseDate = (str) => {
+      if (!str) return null;
+      const parts = str.split(/[-\/]/);
+      if (parts.length === 3) {
+        return new Date(parts[2], parts[1] - 1, parts[0]);
+      }
+      return new Date(str);
+    };
+
+    for (const row of records) {
+      try {
+        const tipoDoc = toInt(row["Tipo Doc"] || row["Tipo docto"]);
+        const rutReceptor = normRut(
+          row["Rut cliente"] ||
+          row["RUT Receptor"] ||
+          row["Rut Receptor"] ||
+          row["RUT cliente"]
+        );
+        const razon = normStr(row["Razon Social"]);
+        const folio = normStr(row["Folio"]);
+        const fechaDocto = parseDate(row["Fecha Docto"]);
+        const montoTotal = toFloat(row["Monto total"] || row["Monto Total"]);
+
+        console.log(`[RCV Import] Row: Folio=${folio}, RUT=${rutReceptor}, Total=${montoTotal}`);
+
+        if (!rutReceptor || !folio || montoTotal <= 0) {
+          console.log(`[RCV Import] Skipping row due to missing RUT/Folio or Total <= 0`);
+          continue;
+        }
+
+        await prisma.$transaction(async (tx) => {
+          // 1) Cliente por RUT
+          let cliente = await tx.cliente.findFirst({
+            where: { empresa_id: empresaId, rut: rutReceptor, eliminado: false },
+          });
+
+          if (!cliente) {
+            console.log(`[RCV Import] Creating new client: ${rutReceptor}`);
+            cliente = await tx.cliente.create({
+              data: {
+                empresa_id: empresaId,
+                rut: rutReceptor,
+                nombre: razon || rutReceptor,
+              },
+            });
+          }
+
+          // 2) Dedupe Venta: empresa + folio + tipoDoc + rut_cliente
+          const exists = await tx.venta.findFirst({
+            where: {
+              Cliente: { empresa_id: empresaId },
+              folio,
+              tipo_doc: tipoDoc,
+              rut_cliente: rutReceptor,
+              eliminado: false,
+              // Evitar saltar si la cotización vinculada está eliminada (huérfana)
+              OR: [
+                { ordenVentaId: null },
+                { ordenVenta: { eliminado: false } }
+              ]
+            },
+          });
+
+          if (exists) {
+            console.log(`[RCV Import] Folio ${folio} already exists. SKIPPING.`);
+            skipped++;
+            return;
+          }
+
+          // 3) Match Cotizacion (exact same total + client)
+          // Buscamos cotizaciones NO terminadas o que coincidan en monto
+          let cot = await tx.cotizacion.findFirst({
+            where: {
+              empresa_id: empresaId,
+              cliente_id: cliente.id,
+              total: { gte: montoTotal - 1, lte: montoTotal + 1 }, // tolerancia por redondeo
+              eliminado: false,
+              estado: { not: "RECHAZADA" }
+            },
+            orderBy: { creada_en: "desc" }
+          });
+
+          let isNewCot = false;
+          if (!cot) {
+            console.log(`[RCV Import] No matching Cotizacion, creating draft for Folio ${folio}`);
+            // Crear Borrador si no hay match
+            const neto = Math.round(montoTotal / 1.19);
+            const iva = montoTotal - neto;
+
+            cot = await tx.cotizacion.create({
+              data: {
+                empresa_id: empresaId,
+                cliente_id: cliente.id,
+                vendedor_id: userId,
+                asunto: `Import RCV Folio ${folio}`,
+                total: montoTotal,
+                subtotal: neto,
+                iva: iva,
+                estado: "COTIZACION",
+                glosas: {
+                  create: {
+                    descripcion: `Venta RCV Folio ${folio}`,
+                    monto: neto,
+                    cantidad: 1,
+                    orden: 0
+                  }
+                }
+              }
+            });
+            isNewCot = true;
+          }
+
+          // 4) Crear Venta
+          await tx.venta.create({
+            data: {
+              ordenVentaId: cot.id,
+              clienteId: cliente.id,
+              fecha: fechaDocto || new Date(),
+              folio,
+              tipo_doc: tipoDoc,
+              rut_cliente: rutReceptor,
+              razon_social: razon,
+              total: montoTotal,
+              detalles: {
+                create: {
+                  descripcion: `Venta RCV Folio ${folio}`,
+                  cantidad: 1,
+                  total: montoTotal,
+                  ventaTotal: montoTotal,
+                  fecha: fechaDocto || new Date(),
+                }
+              }
+            }
+          });
+
+          if (isNewCot) {
+            console.log(`[RCV Import] Created new Cotización and Venta for Folio ${folio}`);
+            created++;
+          } else {
+            console.log(`[RCV Import] Linked Venta to existing Cotización for Folio ${folio}`);
+            linked++;
+          }
+        });
+      } catch (err) {
+        console.error(`[RCV Import] Error processing row Folio=${row["Folio"]}:`, err);
+      }
+    }
+
+    return reply.send({ ok: true, created, skipped, linked });
+  } catch (e) {
+    console.error(e);
+    return reply.code(500).send({ error: "Error fatal en importación", detalle: e.message });
+  }
+};
+
+/* =====================================================
+   UPLOAD DOCUMENTOS ADJUNTOS
+   ===================================================== */
+export const uploadCotizacionDoc = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id, docType } = request.params; // "oc", "hes", "fac", "comprobante", "gd"
+
+    const data = await request.file();
+    if (!data) return reply.code(400).send({ error: "No se envió ningún archivo" });
+
+    // Validar tipo
+    const validDocs = ["oc", "hes", "fac", "comprobante", "gd"];
+    if (!validDocs.includes(docType)) {
+      return reply.code(400).send({ error: "Tipo de documento inválido" });
+    }
+
+    // Verificar que la cotización existe y pertenece a la empresa
+    const cot = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false }
+    });
+
+    if (!cot) {
+      return reply.code(404).send({ error: "Cotización no encontrada" });
+    }
+
+    const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads", "cotizaciones");
+    const relFolder = path.join(String(empresaId), String(id));
+    const folderPath = path.join(UPLOADS_ROOT, relFolder);
+
+    await fs.mkdir(folderPath, { recursive: true });
+
+    const ext = path.extname(data.filename) || ".pdf";
+    const uniqueName = `${docType}_${Date.now()}${ext}`;
+    const finalPath = path.join(folderPath, uniqueName);
+
+    await pipeline(data.file, createWriteStream(finalPath));
+
+    const fileUrl = `/uploads/cotizaciones/${empresaId}/${id}/${uniqueName}`;
+    const fieldName = `doc_${docType}_url`;
+
+    // Lógica para avanzar de estado automáticamente:
+    let nuevoEstado = cot.estado;
+    const est = cot.estado;
+
+    if (docType === "oc" && (est === "COTIZACION" || est === "ACEPTADA")) {
+      nuevoEstado = "ORDEN_VENTA";
+    } else if (docType === "gd" && (est === "ACEPTADA" || est === "ORDEN_VENTA")) {
+      nuevoEstado = "ENTREGADO";
+    } else if (docType === "hes" && (est === "ORDEN_VENTA" || est === "ENTREGADO")) {
+      nuevoEstado = "POR_FACTURAR";
+    } else if (docType === "fac" && (est === "ENTREGADO" || est === "POR_FACTURAR")) {
+      nuevoEstado = "FACTURADA";
+    } else if (docType === "comprobante" && (est === "POR_FACTURAR" || est === "FACTURADA")) {
+      nuevoEstado = "PAGADA";
+    }
+
+    const updated = await prisma.cotizacion.update({
+      where: { id },
+      data: { 
+        [fieldName]: fileUrl,
+        estado: nuevoEstado
+      },
+      include: {
+        cliente: true,
+        cliente_responsable: true,
+        proyecto: true,
+        vendedor: { select: { id: true, nombre: true, correo: true } },
+        glosas: { orderBy: { orden: "asc" } },
+        ventas: { include: { detalles: true } },
+      }
+    });
+
+    return reply.send(updated);
+  } catch (e) {
+    console.error("Error uploadCotizacionDoc:", e);
+    return reply.code(500).send({ error: "Error al subir documento", detalle: e.message });
+  }
+};
+

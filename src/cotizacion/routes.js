@@ -1,4 +1,3 @@
-// src/modules/cotizaciones/routes.js
 import {
   listCotizaciones,
   getCotizacion,
@@ -6,6 +5,8 @@ import {
   updateCotizacion,
   updateCotizacionEstado,
   deleteCotizacion,
+  importVentasCSV,
+  uploadCotizacionDoc,
 } from "./controllers.js";
 
 import {
@@ -36,4 +37,6 @@ export default async function cotizacionesRoutes(server) {
   server.delete("/cotizaciones/:id", deleteCotizacion);
   server.post("/cotizaciones/import/pdf", importCotizacionFromPdf);
   server.post("/cotizaciones/import/pdf/batch", importCotizacionesFromPdfBatch);
+  server.post("/cotizaciones/import/rcv", importVentasCSV);
+  server.post("/cotizaciones/:id/upload/:docType", uploadCotizacionDoc);
 }
