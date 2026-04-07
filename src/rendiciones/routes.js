@@ -6,6 +6,7 @@ import {
   updateRendicion,
   deleteRendicion,
   uploadComprobanteItem,
+  uploadRendicionMainDoc,
 } from "./controllers.js";
 
 export default async function rendicionesRoutes(fastify) {
@@ -14,6 +15,9 @@ export default async function rendicionesRoutes(fastify) {
   fastify.post("/rendiciones", createRendicion);
   fastify.patch("/rendiciones/:id", updateRendicion);
   fastify.delete("/rendiciones/:id", deleteRendicion);
+
+  // Comprobante principal (anticipo/reembolso)
+  fastify.post("/rendiciones/:id/documento", uploadRendicionMainDoc);
 
    // Comprobante por item (multipart file)
   fastify.post(

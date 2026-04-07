@@ -484,17 +484,21 @@ export const createVenta = async (request, reply) => {
 
         // base con alpha
         let costoConAlphaBase = 0;
+        let costoConAlphaNeto = 0; // ✅ Nuevo: sin CIF
 
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null) {
             throw new Error(`El registro HHEmpleado ${hhEmpleadoId} no tiene costoHH definido`);
           }
 
-          costoHH = Number(hhEmpleado.costoHH);
+          const costoHHVal = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          const costoSinAlpha = cantidad > 0 ? costoHH * cantidad + cif : 0;
+          const costoSinAlpha = cantidad > 0 ? costoHHVal * cantidad + cif : 0;
           costoConAlphaBase = costoSinAlpha * alphaMult;
+          
+          // Neto para utilidad: solo costoHH
+          costoConAlphaNeto = (cantidad > 0 ? costoHHVal * cantidad : 0) * alphaMult;
 
           costoTotal = costoConAlphaBase + extraFijo;
           ventaTotal = costoConAlphaBase + extraFijo;
@@ -517,6 +521,7 @@ export const createVenta = async (request, reply) => {
 
           const costoSinAlpha = costoUnitario * cantidad;
           costoConAlphaBase = costoSinAlpha * alphaMult;
+          costoConAlphaNeto = costoConAlphaBase; // COMPRA no tiene CIF
 
           costoTotal = costoConAlphaBase + extraFijo;
           ventaTotal = costoConAlphaBase + extraFijo;
@@ -561,54 +566,32 @@ export const createVenta = async (request, reply) => {
 
         // guardamos mult para usar post-k (sin ensuciar schema)
         detallesData[detallesData.length - 1]._descuentoItemMult = descuentoItemMult;
+        detallesData[detallesData.length - 1]._costoConAlphaNeto = costoConAlphaNeto;
       }
 
       // totales base (sin extra por costeo)
-      const totalCosto = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
-      const totalVentaActual = detallesData.reduce(
-        (acc, d) => acc + (Number(d.ventaTotal) || 0),
-        0,
-      );
+      const totalCostoTotal = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
+      const totalCostoBaseNeto = detallesData.reduce((acc, d) => acc + (Number(d._costoConAlphaNeto) || 0), 0);
 
-      const totalVentaActualBase = totalVentaActual;
-      const totalCostoBase = totalCosto;
+      const uPct = utilidadPct != null ? utilidadPct : 0;
+      const targetMarkup = uPct / 100;
+
+      // ✅ NUEVO: Cálculo deVenta Target basado en Markup sobre Costo Neto
+      const totalProfitTarget = totalCostoBaseNeto * targetMarkup;
+      const totalVentaTarget = totalCostoTotal + totalProfitTarget;
 
       let k = 1;
-
-      // Margen sobre venta SOLO a base
-      if (utilidadPct != null) {
-        const u = utilidadPct / 100;
-        const denom = 1 - u;
-
-        const baseMontoBase =
-          base === "VENTA_ACTUAL" ? totalVentaActualBase : totalCostoBase;
-
-        const ventaObjetivoBase = denom > 0 ? baseMontoBase / denom : null;
-
-        if (
-          ventaObjetivoBase != null &&
-          Number.isFinite(ventaObjetivoBase) &&
-          ventaObjetivoBase > 0 &&
-          totalVentaActualBase > 0
-        ) {
-          k = ventaObjetivoBase / totalVentaActualBase;
-        }
+      if (totalCostoTotal > 0) {
+        k = totalVentaTarget / totalCostoTotal;
       }
 
-      // ✅ 1) aplicar k a la venta bruta de cada línea
-      if (k !== 1 && Number.isFinite(k)) {
-        for (const d of detallesData) {
-          d.ventaTotal = Number(d.ventaTotal || 0) * k;
-          d.total = d.ventaTotal;
-          d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
-        }
-      } else {
-        // nada
-      }
-
-      // ✅ 2) guardar BRUTO post-k y aplicar descuentos (ítem y general) sobre venta
+      // ✅ Aplicar Markup preciso por línea y luego descuentos
       for (const d of detallesData) {
-        const bruto = Number(d.ventaTotal || 0);
+        const costoLineTotal = Number(d.costoTotal || 0);
+        const costoLineNeto = Number(d._costoConAlphaNeto || 0);
+
+        // VentaBrutaLine = CostoTotalLine + (CostoNetoLine * targetMarkup)
+        const bruto = costoLineTotal + (costoLineNeto * targetMarkup);
         d.ventaTotalBruto = bruto;
 
         const itemMult = d._descuentoItemMult ?? 1;
@@ -618,11 +601,12 @@ export const createVenta = async (request, reply) => {
         d.total = neto;
         d.ventaUnitario = d.cantidad > 0 ? neto / d.cantidad : neto;
 
-        d.utilidad = neto - Number(d.costoTotal || 0);
+        d.utilidad = neto - costoLineTotal;
         d.porcentajeUtilidad = neto > 0 ? (d.utilidad / neto) * 100 : 0;
 
-        // limpiar campo interno
+        // limpiar campos internos
         delete d._descuentoItemMult;
+        delete d._costoConAlphaNeto;
       }
 
       if (ordenVentaId) {
@@ -965,6 +949,7 @@ export async function updateVenta(request, reply) {
 
         // base con alpha
         let costoConAlphaBase = 0;
+        let costoConAlphaNeto = 0; // ✅ Nuevo: sin CIF
 
         if (modo === "HH") {
           if (hhEmpleado.costoHH == null) {
@@ -973,11 +958,14 @@ export async function updateVenta(request, reply) {
             );
           }
 
-          costoHH = Number(hhEmpleado.costoHH);
+          const costoHHVal = Number(hhEmpleado.costoHH);
           const cif = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          const costoSinAlpha = cantidad > 0 ? costoHH * cantidad + cif : 0;
+          const costoSinAlpha = cantidad > 0 ? costoHHVal * cantidad + cif : 0;
           costoConAlphaBase = costoSinAlpha * alphaMult;
+
+          // Neto para utilidad: solo costoHH
+          costoConAlphaNeto = (cantidad > 0 ? costoHHVal * cantidad : 0) * alphaMult;
 
           costoTotal = costoConAlphaBase + extraFijo;
           ventaTotal = costoConAlphaBase + extraFijo;
@@ -1000,6 +988,7 @@ export async function updateVenta(request, reply) {
 
           const costoSinAlpha = costoUnitario * cantidad;
           costoConAlphaBase = costoSinAlpha * alphaMult;
+          costoConAlphaNeto = costoConAlphaBase; // COMPRA no tiene CIF
 
           costoTotal = costoConAlphaBase + extraFijo;
           ventaTotal = costoConAlphaBase + extraFijo;
@@ -1036,59 +1025,45 @@ export async function updateVenta(request, reply) {
           porcentajeUtilidad,
           total: ventaTotal,
         });
+
+        // guardamos mult para usar post-k
+        detallesData[detallesData.length - 1]._costoConAlphaNeto = costoConAlphaNeto;
       }
 
       // totales base (sin extra por costeo)
-      const totalCosto = detallesData.reduce(
-        (acc, d) => acc + (Number(d.costoTotal) || 0),
-        0,
-      );
-      const totalVentaActual = detallesData.reduce(
-        (acc, d) => acc + (Number(d.ventaTotal) || 0),
-        0,
-      );
+      const totalCostoTotal = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
+      const totalCostoBaseNeto = detallesData.reduce((acc, d) => acc + (Number(d._costoConAlphaNeto) || 0), 0);
 
-      // Bases para k (extraVenta NO participa del % objetivo)
-      const totalVentaActualBase = totalVentaActual;
-      const totalCostoBase = totalCosto;
+      const uPct = utilidadPct != null ? utilidadPct : 0;
+      const targetMarkup = uPct / 100;
+
+      // ✅ NUEVO: Cálculo de Venta Target (Markup sobre Neto)
+      const totalProfitTarget = totalCostoBaseNeto * targetMarkup;
+      const totalVentaTarget = totalCostoTotal + totalProfitTarget;
 
       let k = 1;
-
-      // Margen sobre venta SOLO a base
-      if (utilidadPct != null) {
-        const u = utilidadPct / 100;
-        const denom = 1 - u;
-
-        const baseMontoBase =
-          base === "VENTA_ACTUAL" ? totalVentaActualBase : totalCostoBase;
-
-        const ventaObjetivoBase = denom > 0 ? baseMontoBase / denom : null;
-
-        if (
-          ventaObjetivoBase != null &&
-          Number.isFinite(ventaObjetivoBase) &&
-          ventaObjetivoBase > 0 &&
-          totalVentaActualBase > 0
-        ) {
-          k = ventaObjetivoBase / totalVentaActualBase;
-        }
+      if (totalCostoTotal > 0) {
+        k = totalVentaTarget / totalCostoTotal;
       }
 
-      // aplicar k a la venta de cada línea
-      if (k !== 1 && Number.isFinite(k)) {
-        for (const d of detallesData) {
-          d.ventaTotal = Number(d.ventaTotal || 0) * k;
-          d.total = d.ventaTotal;
-          d.ventaUnitario = d.cantidad > 0 ? d.ventaTotal / d.cantidad : d.ventaTotal;
+      // ✅ Aplicar Markup preciso por línea
+      for (const d of detallesData) {
+        const costoLineTotal = Number(d.costoTotal || 0);
+        const costoLineNeto = Number(d._costoConAlphaNeto || 0);
 
-          d.utilidad = d.ventaTotal - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
-        }
-      } else {
-        for (const d of detallesData) {
-          d.utilidad = Number(d.ventaTotal || 0) - Number(d.costoTotal || 0);
-          d.porcentajeUtilidad = d.ventaTotal > 0 ? (d.utilidad / d.ventaTotal) * 100 : 0;
-        }
+        // VentaBrutaLine = CostoTotalLine + (CostoNetoLine * targetMarkup)
+        const bruto = costoLineTotal + (costoLineNeto * targetMarkup);
+        d.ventaTotalBruto = bruto;
+
+        const neto = bruto; // En update no hay descuentos implementados en el loop original, los mantenemos así
+        d.ventaTotal = neto;
+        d.total = neto;
+        d.ventaUnitario = d.cantidad > 0 ? neto / d.cantidad : neto;
+
+        d.utilidad = neto - costoLineTotal;
+        d.porcentajeUtilidad = neto > 0 ? (d.utilidad / neto) * 100 : 0;
+
+        delete d._costoConAlphaNeto;
       }
 
       // guardamos base: VENTA_ACTUAL se persiste como VENTA

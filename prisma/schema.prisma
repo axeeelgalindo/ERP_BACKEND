@@ -1045,9 +1045,13 @@ model Rendicion {
   destino      String
   centro_costo String?
   descripcion  String?
-  monto_total  Float   @default(0)
-  monto_pagado Float   @default(0) // ✅ Nuevo: para pagos parciales
-  estado       String  @default("pendiente")
+  monto_total    Float   @default(0)
+  monto_entregado Float  @default(0) // ✅ Nuevo: Anticipo entregado
+  monto_pagado   Float   @default(0) // ✅ Reembolso real realizado
+  estado         String  @default("pendiente")
+
+  doc_entrega_url   String? // ✅ Comprobante de anticipo
+  doc_reembolso_url String? // ✅ Comprobante de pago final/devolución
 
   creado_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt

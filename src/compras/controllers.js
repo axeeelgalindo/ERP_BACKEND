@@ -387,6 +387,7 @@ export async function listCompras(request, reply) {
     ...(proveedorId ? { proveedorId: String(proveedorId) } : {}),
     ...(proyectoId ? { proyecto_id: String(proyectoId) } : {}),
     ...(cotizacionId ? { cotizacionId: String(cotizacionId) } : {}),
+    ...(toBool(request.query?.sinRendicion) ? { rendicion_id: null } : {}),
     ...(toBool(includeDeleted) ? {} : { eliminado: false }),
   };
 
@@ -530,7 +531,8 @@ export async function createCompra(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
 
-  const empresa_id = scope.isMaster ? body.empresa_id || scope.empresaId : scope.empresaId;
+  try {
+    const empresa_id = scope.isMaster ? body.empresa_id || scope.empresaId : scope.empresaId;
 
   const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
@@ -582,25 +584,34 @@ export async function createCompra(request, reply) {
       if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
     }
 
-    // ✅ Si viene rendicion_id, validamos consistencia
     if (rendicion_id) {
       const r = await tx.rendicion.findFirst({
         where: { id: rendicion_id, eliminado: false, proyecto: { empresa_id, eliminado: false } },
         select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
       });
-      if (!r) throw httpError(404, "Rendición no existe o no pertenece a la empresa");
+      if (!r) {
+        const err = new Error("Rendición no existe o no pertenece a la empresa");
+        err.statusCode = 404;
+        throw err;
+      }
 
       // destino debe coincidir
       if (String(r.destino) !== destino) {
-        throw httpError(400, "La rendición tiene un destino distinto a la compra");
+        const err = new Error("La rendición tiene un destino distinto a la compra");
+        err.statusCode = 400;
+        throw err;
       }
       // centro debe coincidir
       if ((r.centro_costo || null) !== (centro_costo || null)) {
-        throw httpError(400, "La rendición tiene un centro_costo distinto a la compra");
+        const err = new Error("La rendición tiene un centro_costo distinto a la compra");
+        err.statusCode = 400;
+        throw err;
       }
       // si es proyecto, proyecto_id debe coincidir
       if (destino === "PROYECTO" && r.proyecto_id !== body.proyecto_id) {
-        throw httpError(400, "La compra debe usar el mismo proyecto_id de la rendición");
+        const err = new Error("La compra debe usar el mismo proyecto_id de la rendición");
+        err.statusCode = 400;
+        throw err;
       }
     }
 
@@ -656,10 +667,14 @@ export async function createCompra(request, reply) {
         rendicion: { select: { id: true, destino: true, centro_costo: true, proyecto_id: true } },
         items: { include: { producto: true, proveedor: true, tipoItem: true } },
       },
-    });
-  });
+    }); // cierra tx.compra.create
+    }); // cierra transaction
 
-  return reply.code(201).send(created);
+    return reply.code(201).send(created);
+  } catch (e) {
+    if (e.statusCode) return reply.code(e.statusCode).send({ error: e.message });
+    return reply.code(500).send({ error: e.message || "Error interno" });
+  }
 }
 
 /* =========================
@@ -672,81 +687,101 @@ export async function asignarRendicionACompra(request, reply) {
   const body = request.body || {};
   const rendicion_id = body.rendicion_id ? String(body.rendicion_id) : null;
 
-  const updated = await prisma.$transaction(async (tx) => {
-    // 1) validar compra (empresa)
-    const compra = await tx.compra.findFirst({
-      where: scope.isMaster ? { id } : { id, empresa_id: scope.empresaId },
-      include: {
-        proyecto: { select: { id: true, empresa_id: true } },
-      },
-    });
-    if (!compra) return null;
-
-    // 2) si viene rendicion_id, validar que exista y sea compatible
-    if (rendicion_id) {
-      const rend = await tx.rendicion.findFirst({
-        where: {
-          id: rendicion_id,
-          eliminado: false,
-          proyecto: {
-            empresa_id: compra.empresa_id, // misma empresa
-            eliminado: false,
-            empresa: { eliminado: false },
-          },
-        },
-        select: {
-          id: true,
-          destino: true,
-          centro_costo: true,
-          proyecto_id: true,
-          estado: true,
+  try {
+    const updated = await prisma.$transaction(async (tx) => {
+      // 1) validar compra (empresa)
+      const compra = await tx.compra.findFirst({
+        where: scope.isMaster ? { id } : { id, empresa_id: scope.empresaId },
+        include: {
+          proyecto: { select: { id: true, empresa_id: true } },
         },
       });
-      if (!rend) {
-        return reply.code(404).send({ error: "Rendición no encontrada" });
+      if (!compra) {
+        const err = new Error("Compra no encontrada");
+        err.statusCode = 404;
+        throw err;
       }
 
-      // ✅ Compatibilidad básica (ajusta si quieres reglas más estrictas):
-      // - Si compra es PROYECTO -> rendición debe ser PROYECTO y mismo proyecto_id
-      // - Si compra es ADMIN/TALLER -> rendición mismo destino y mismo centro_costo
-      const compraDestino = String(compra.destino || "PROYECTO").toUpperCase();
-      const compraCentro = compra.centro_costo ? String(compra.centro_costo).toUpperCase() : null;
-      const compraProyectoId = compra.proyecto_id || null;
+      // 2) si viene rendicion_id, validar que exista y sea compatible
+      if (rendicion_id) {
+        const rend = await tx.rendicion.findFirst({
+          where: {
+            id: rendicion_id,
+            eliminado: false,
+            proyecto: {
+              empresa_id: compra.empresa_id, // misma empresa
+              eliminado: false,
+              empresa: { eliminado: false },
+            },
+          },
+          select: {
+            id: true,
+            destino: true,
+            centro_costo: true,
+            proyecto_id: true,
+            estado: true,
+          },
+        });
+        if (!rend) {
+          const err = new Error("Rendición no encontrada");
+          err.statusCode = 404;
+          throw err;
+        }
 
-      const rendDestino = String(rend.destino || "PROYECTO").toUpperCase();
-      const rendCentro = rend.centro_costo ? String(rend.centro_costo).toUpperCase() : null;
+        // ✅ Compatibilidad básica (ajusta si quieres reglas más estrictas):
+        // - Si compra es PROYECTO -> rendición debe ser PROYECTO y mismo proyecto_id
+        // - Si compra es ADMIN/TALLER -> rendición mismo destino y mismo centro_costo
+        const compraDestino = String(compra.destino || "PROYECTO").toUpperCase();
+        const compraCentro = compra.centro_costo ? String(compra.centro_costo).toUpperCase() : null;
+        const compraProyectoId = compra.proyecto_id || null;
 
-      if (compraDestino === "PROYECTO") {
-        if (rendDestino !== "PROYECTO") {
-          return reply.code(400).send({ error: "Rendición incompatible: destino distinto (compra PROYECTO)" });
-        }
-        if (String(rend.proyecto_id) !== String(compraProyectoId)) {
-          return reply.code(400).send({ error: "Rendición incompatible: proyecto distinto" });
-        }
-      } else {
-        if (rendDestino !== compraDestino) {
-          return reply.code(400).send({ error: "Rendición incompatible: destino distinto" });
-        }
-        if (!compraCentro || !rendCentro || rendCentro !== compraCentro) {
-          return reply.code(400).send({ error: "Rendición incompatible: centro_costo distinto" });
+        const rendDestino = String(rend.destino || "PROYECTO").toUpperCase();
+        const rendCentro = rend.centro_costo ? String(rend.centro_costo).toUpperCase() : null;
+
+        if (compraDestino === "PROYECTO") {
+          if (rendDestino !== "PROYECTO") {
+            const err = new Error("Rendición incompatible: destino distinto (compra PROYECTO)");
+            err.statusCode = 400;
+            throw err;
+          }
+          if (String(rend.proyecto_id) !== String(compraProyectoId)) {
+            const err = new Error("Rendición incompatible: proyecto distinto");
+            err.statusCode = 400;
+            throw err;
+          }
+        } else {
+          if (rendDestino !== compraDestino) {
+            const err = new Error("Rendición incompatible: destino distinto");
+            err.statusCode = 400;
+            throw err;
+          }
+          if (!compraCentro || !rendCentro || rendCentro !== compraCentro) {
+            const err = new Error("Rendición incompatible: centro_costo distinto");
+            err.statusCode = 400;
+            throw err;
+          }
         }
       }
-    }
 
-    // 3) update compra
-    const row = await tx.compra.update({
-      where: { id: compra.id },
-      data: { rendicion_id },
-      include: {
-        rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
-      },
+      // 3) update compra
+      const row = await tx.compra.update({
+        where: { id: compra.id },
+        data: { rendicion_id },
+        include: {
+          rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
+        },
+      });
+
+      return row;
     });
 
-    return row;
-  });
-
-  if (!updated) return httpError(reply, 404, "Compra no encontrada");
-  return reply.send({ ok: true, row: updated });
+    return reply.send({ ok: true, row: updated });
+  } catch (e) {
+    if (e.statusCode) {
+      return reply.code(e.statusCode).send({ error: e.message });
+    }
+    return reply.code(500).send({ error: e.message || "Error interno del servidor" });
+  }
 }
 
 /* =========================
@@ -761,7 +796,8 @@ export async function updateCompra(request, reply) {
   const { id } = request.params;
   const body = request.body || {};
 
-  const exists = await prisma.compra.findUnique({
+  try {
+    const exists = await prisma.compra.findUnique({
     where: { id },
     include: { items: true },
   });
@@ -879,34 +915,44 @@ export async function updateCompra(request, reply) {
       // o si cambió imputación y la compra ya tenía rendición
       (imputacionChanged && !!exists.rendicion_id);
 
-    if (mustRevalidateRendicion && nextRendicionId) {
-      const r = await tx.rendicion.findFirst({
-        where: {
-          id: nextRendicionId,
-          eliminado: false,
-          proyecto: {
-            empresa_id,
+      if (mustRevalidateRendicion && nextRendicionId) {
+        const r = await tx.rendicion.findFirst({
+          where: {
+            id: nextRendicionId,
             eliminado: false,
-            empresa: { eliminado: false },
+            proyecto: {
+              empresa_id,
+              eliminado: false,
+              empresa: { eliminado: false },
+            },
           },
-        },
-        select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
-      });
-      if (!r) throw httpError(404, "Rendición no existe o no pertenece a la empresa");
+          select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
+        });
+        if (!r) {
+          const err = new Error("Rendición no existe o no pertenece a la empresa");
+          err.statusCode = 404;
+          throw err;
+        }
 
-      if (String(r.destino || "PROYECTO").toUpperCase() !== nextDestino) {
-        throw httpError(400, "La rendición tiene un destino distinto a la compra");
-      }
+        if (String(r.destino || "PROYECTO").toUpperCase() !== nextDestino) {
+          const err = new Error("La rendición tiene un destino distinto a la compra");
+          err.statusCode = 400;
+          throw err;
+        }
 
-      const rCentro = r.centro_costo ? String(r.centro_costo).toUpperCase() : null;
-      if ((rCentro || null) !== (nextCentroCosto || null)) {
-        throw httpError(400, "La rendición tiene un centro_costo distinto a la compra");
-      }
+        const rCentro = r.centro_costo ? String(r.centro_costo).toUpperCase() : null;
+        if ((rCentro || null) !== (nextCentroCosto || null)) {
+          const err = new Error("La rendición tiene un centro_costo distinto a la compra");
+          err.statusCode = 400;
+          throw err;
+        }
 
-      if (nextDestino === "PROYECTO" && String(r.proyecto_id) !== String(nextProyectoId)) {
-        throw httpError(400, "La compra debe usar el mismo proyecto_id de la rendición");
+        if (nextDestino === "PROYECTO" && String(r.proyecto_id) !== String(nextProyectoId)) {
+          const err = new Error("La compra debe usar el mismo proyecto_id de la rendición");
+          err.statusCode = 400;
+          throw err;
+        }
       }
-    }
 
     // ===== Construir data update
     const data = {};
@@ -989,8 +1035,12 @@ export async function updateCompra(request, reply) {
     return row;
   });
 
-  const [withPct] = await attachVinculadoPct(empresa_id, [updated]);
-  return reply.send(withPct);
+    const [withPct] = await attachVinculadoPct(empresa_id, [updated]);
+    return reply.send(withPct);
+  } catch (e) {
+    if (e.statusCode) return reply.code(e.statusCode).send({ error: e.message });
+    return reply.code(500).send({ error: e.message || "Error interno" });
+  }
 }
 
 /* =========================

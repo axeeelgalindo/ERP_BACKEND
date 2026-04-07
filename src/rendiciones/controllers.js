@@ -1,7 +1,9 @@
-// backend/src/rendiciones/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
+import path from "path";
+import crypto from "crypto";
+import fsp from "fs/promises";
 
 const prisma = new PrismaClient();
 
@@ -176,6 +178,7 @@ export async function createRendicion(request, reply) {
 
         descripcion: body.descripcion ?? "",
         monto_total,
+        monto_entregado: toNum(body.monto_entregado ?? 0),
         monto_pagado: 0,
         estado: body.estado ?? "pendiente",
 
@@ -257,7 +260,14 @@ export async function listRendiciones(request, reply) {
         empleado: { select: { id: true, rut: true, cargo: true } },
         revisada_por: { select: { id: true, nombre: true, correo: true } },
         items: true,
-        compras: { select: { id: true, numero: true, total: true } }, // ✅ emparentado con compras
+        compras: { 
+          select: { 
+            id: true, 
+            numero: true, 
+            total: true, 
+            proveedor: { select: { nombre: true } } 
+          } 
+        },
       },
     }),
   ]);
@@ -293,6 +303,7 @@ export async function getRendicionById(request, reply) {
           total: true,
           destino: true,
           centro_costo: true,
+          proveedor: { select: { nombre: true } },
         },
       },
     },
@@ -397,18 +408,27 @@ export async function updateRendicion(request, reply) {
           : undefined,
         comentario_revision: body.comentario_revision ?? undefined,
 
-        // ✅ NUEVO: Soporte para pagos parciales
+        // ✅ NUEVO: Soporte para anticipos y pagos parciales
+        monto_entregado: body.monto_entregado !== undefined ? toNum(body.monto_entregado) : undefined,
         monto_pagado: body.monto_pagado !== undefined ? toNum(body.monto_pagado) : undefined,
       };
 
-      // ✅ Lógica automática: si el monto_pagado >= monto_total, marcar como 'pagada'
-      const checkTotal = body.monto_total ?? current.monto_total;
-      const checkPaid = body.monto_pagado ?? current.monto_pagado ?? 0;
-      
-      if (checkPaid > 0 && checkPaid >= checkTotal) {
-        data.estado = "pagada";
-      } else if (checkPaid > 0 && checkPaid < checkTotal) {
-        data.estado = "pagada_parcial"; // O mantener aprobada si prefieres
+      // ✅ Lógica automática: calcular balance real
+      const cTotal = body.monto_total !== undefined ? toNum(body.monto_total) : (current.monto_total ?? 0);
+      const cEntr = body.monto_entregado !== undefined ? toNum(body.monto_entregado) : (current.monto_entregado ?? 0);
+      const targetBalance = Math.abs(cTotal - cEntr);
+
+      if (data.monto_pagado !== undefined) {
+        // Capar el pago al balance real
+        if (data.monto_pagado > targetBalance) {
+          data.monto_pagado = targetBalance;
+        }
+
+        if (data.monto_pagado >= targetBalance && targetBalance >= 0) {
+          data.estado = "pagada";
+        } else if (data.monto_pagado > 0) {
+          data.estado = "pagada_parcial";
+        }
       }
 
       // Si mandan items => reemplazo completo (deleteMany + create)
@@ -643,4 +663,59 @@ export async function uploadComprobanteItem(request, reply) {
   });
 
   return reply.send({ ok: true, ...updated });
+}
+
+/** =========================
+ *  ✅ POST /rendiciones/:id/documento?type=<entrega|reembolso>
+ *  multipart: file=<image|pdf|docx|xlsx>
+ * ========================= */
+export async function uploadRendicionMainDoc(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params || {};
+  const { type } = request.query || {}; // 'entrega' o 'reembolso'
+
+  if (!["entrega", "reembolso"].includes(type)) {
+    return httpError(reply, 400, "Tipo de documento inválido (use entrega or reembolso)");
+  }
+
+  const rend = await prisma.rendicion.findFirst({
+    where: {
+      id: String(id),
+      eliminado: false,
+      empresa_id: scope.empresaId,
+    },
+    select: { id: true, empresa_id: true, creado_en: true },
+  });
+  if (!rend) return httpError(reply, 404, "Rendición no encontrada");
+
+  const file = await request.file();
+  if (!file) return httpError(reply, 400, "Debes enviar file en form-data");
+
+  const slug = makeRendicionSlug(rend);
+  const dir = rendicionesDir(slug);
+  await ensureDir(dir);
+
+  const ext = path.extname(file.filename || "").toLowerCase().replace(".", "");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const rnd = crypto.randomBytes(6).toString("hex");
+
+  const field = type === "entrega" ? "doc_entrega_url" : "doc_reembolso_url";
+  const filename = `doc_${type}_${stamp}_${rnd}_${safeFileName(file.filename)}`;
+  const fullpath = path.join(dir, filename);
+
+  const buf = await file.toBuffer();
+  await fsp.writeFile(fullpath, buf);
+
+  const url = `${rendicionesPublicPrefix(slug)}/${filename}`;
+
+  await prisma.rendicion.update({
+    where: { id: String(id) },
+    data: { [field]: url },
+  });
+
+  return reply.send({
+    ok: true,
+    message: `Documento de ${type} subido correctamente`,
+    url,
+  });
 }
