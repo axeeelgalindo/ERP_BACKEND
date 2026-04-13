@@ -19,7 +19,12 @@ await server.register(sensible);
 await server.register(jwt, { secret: process.env.JWT_SECRET });
 
 await server.register(cors, {
-  origin: ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3002", "http://127.0.0.1:3002"],
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://erp-orcin-ten.vercel.app",
+    "https://api-erp.blue-ingenieria.com",
+  ],
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-empresa-id"],
