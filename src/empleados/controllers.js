@@ -233,7 +233,7 @@ export const createEmpleado = async (request, reply) => {
         usuario_id: usuarioIdFinal,
         cargo: body.cargo ?? null,
         telefono: body.telefono ?? null,
-        fecha_ingreso: body.fecha_ingreso ? new Date(body.fecha_ingreso) : null,
+        fecha_ingreso: body.fecha_ingreso ? new Date(`${String(body.fecha_ingreso).slice(0, 10)}T12:00:00`) : null,
         sueldo_base:
           typeof body.sueldo_base === "number"
             ? body.sueldo_base
@@ -295,7 +295,7 @@ export const updateEmpleado = async (request, reply) => {
     ...(body.fecha_ingreso !== undefined
       ? {
           fecha_ingreso: body.fecha_ingreso
-            ? new Date(body.fecha_ingreso)
+            ? new Date(`${String(body.fecha_ingreso).slice(0, 10)}T12:00:00`)
             : null,
         }
       : {}),

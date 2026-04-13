@@ -131,6 +131,7 @@ export const listCotizaciones = async (request, reply) => {
         proyecto: true,
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
+        pagos: { where: { eliminado: false }, orderBy: { fecha: "desc" } },
         ventas: {
           where: { eliminado: false },
           include: { detalles: true },
@@ -144,10 +145,15 @@ export const listCotizaciones = async (request, reply) => {
         (acc, v) => acc + calcTotalVenta(v),
         0
       );
-      const pct = c.total > 0 ? (totalVentas / c.total) * 100 : 0;
+      const totalPagado = (c.pagos || []).reduce(
+        (acc, p) => acc + Number(p.monto || 0),
+        0
+      );
+      const pct = c.total > 0 ? (totalPagado / c.total) * 100 : 0;
       return {
         ...c,
         total_ventas: totalVentas,
+        total_pagado: totalPagado,
         avance_pago_pct: Math.min(100, pct),
       };
     });
@@ -182,6 +188,7 @@ export const getCotizacion = async (request, reply) => {
         cliente_responsable: true,
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
+        pagos: { where: { eliminado: false }, orderBy: { fecha: "desc" } },
       },
     });
 
@@ -639,7 +646,6 @@ export const updateCotizacion = async (request, reply) => {
         const ventas = await tx.venta.findMany({
           where: {
             id: { in: finalVentaIds },
-            empresa_id: empresaId,
             eliminado: false,
           },
           include: { detalles: true },
@@ -713,11 +719,11 @@ export const updateCotizacion = async (request, reply) => {
       // Fechas (igual create)
       // =========================
       const fechaDocumento = fecha_documento && String(fecha_documento).length >= 10
-        ? new Date(fecha_documento)
+        ? new Date(`${String(fecha_documento).slice(0, 10)}T12:00:00`)
         : (existing.fecha_documento ? new Date(existing.fecha_documento) : new Date());
 
       const vencimientoDocumento = vencimiento_documento && String(vencimiento_documento).length >= 10
-        ? new Date(vencimiento_documento)
+        ? new Date(`${String(vencimiento_documento).slice(0, 10)}T12:00:00`)
         : new Date(fechaDocumento);
 
       if (!vencimiento_documento || String(vencimiento_documento).length < 10) {
@@ -1041,12 +1047,11 @@ export const deleteCotizacion = async (request, reply) => {
         },
       });
 
-      // 2) Mark associated Ventas as deleted (cascade soft-delete)
+      // 2) Unlink associated Ventas (costeos) instead of deleting them
       await tx.venta.updateMany({
         where: { ordenVentaId: id, eliminado: false },
         data: {
-          eliminado: true,
-          eliminado_en: new Date(),
+          ordenVentaId: null,
         },
       });
     });
@@ -1329,6 +1334,110 @@ export const uploadCotizacionDoc = async (request, reply) => {
   } catch (e) {
     console.error("Error uploadCotizacionDoc:", e);
     return reply.code(500).send({ error: "Error al subir documento", detalle: e.message });
+  }
+};
+
+/* =====================================================
+   PAGOS DE COTIZACIONES
+   ===================================================== */
+export const addPago = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { id } = request.params;
+    const { monto, fecha } = request.body || {};
+
+    if (!monto) return reply.code(400).send({ error: "Falta monto del pago" });
+
+    const cot = await prisma.cotizacion.findFirst({
+      where: { id, empresa_id: empresaId, eliminado: false }
+    });
+
+    if (!cot) return reply.code(404).send({ error: "Cotización no encontrada" });
+
+    const pago = await prisma.cotizacionPago.create({
+      data: {
+        cotizacion_id: id,
+        monto: Number(monto),
+        fecha: fecha ? new Date(`${fecha}T12:00:00`) : new Date(),
+      }
+    });
+
+    return reply.send(pago);
+  } catch (e) {
+    console.error("Error addPago:", e);
+    return reply.code(500).send({ error: "Error al agregar pago", detalle: e.message });
+  }
+};
+
+export const deletePago = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { pagoId } = request.params;
+
+    const pago = await prisma.cotizacionPago.findFirst({
+      where: { id: pagoId, eliminado: false },
+      include: { cotizacion: true }
+    });
+
+    if (!pago || pago.cotizacion.empresa_id !== empresaId) {
+      return reply.code(404).send({ error: "Pago no encontrado" });
+    }
+
+    await prisma.cotizacionPago.update({
+      where: { id: pagoId },
+      data: { eliminado: true, eliminado_en: new Date() }
+    });
+
+    return reply.send({ ok: true });
+  } catch (e) {
+    console.error("Error deletePago:", e);
+    return reply.code(500).send({ error: "Error al eliminar pago", detalle: e.message });
+  }
+};
+
+export const uploadPagoDoc = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { pagoId } = request.params;
+
+    const data = await request.file();
+    if (!data) return reply.code(400).send({ error: "No se envió ningún archivo" });
+
+    const pago = await prisma.cotizacionPago.findFirst({
+      where: { id: pagoId, eliminado: false },
+      include: { cotizacion: true }
+    });
+
+    if (!pago || pago.cotizacion.empresa_id !== empresaId) {
+      return reply.code(404).send({ error: "Pago no encontrado" });
+    }
+
+    const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads", "cotizaciones_pagos");
+    const relFolder = path.join(String(empresaId), String(pago.cotizacion_id));
+    const folderPath = path.join(UPLOADS_ROOT, relFolder);
+
+    await fs.mkdir(folderPath, { recursive: true });
+
+    const ext = path.extname(data.filename) || ".pdf";
+    const uniqueName = `pago_${pagoId}_${Date.now()}${ext}`;
+    const finalPath = path.join(folderPath, uniqueName);
+
+    await pipeline(data.file, createWriteStream(finalPath));
+
+    const fileUrl = `/uploads/cotizaciones_pagos/${empresaId}/${pago.cotizacion_id}/${uniqueName}`;
+
+    const updated = await prisma.cotizacionPago.update({
+      where: { id: pagoId },
+      data: { 
+        comprobante_url: fileUrl,
+        comprobante_nombre: data.filename
+      }
+    });
+
+    return reply.send(updated);
+  } catch (e) {
+    console.error("Error uploadPagoDoc:", e);
+    return reply.code(500).send({ error: "Error al subir comprobante", detalle: e.message });
   }
 };
 

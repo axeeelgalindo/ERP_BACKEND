@@ -8,7 +8,11 @@ const prisma = new PrismaClient();
 const PAGE = 1,
   SIZE = 100;
 
-const parseDate = (d) => (d ? new Date(d) : null);
+const parseDate = (d) => {
+  if (!d) return null;
+  const s = String(d);
+  return s.includes("T") ? new Date(s) : new Date(`${s.slice(0, 10)}T12:00:00`);
+};
 const isNumber = (v) => typeof v === "number" && !Number.isNaN(v);
 const toIntOrNull = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -135,9 +139,12 @@ export async function listTareas(request, reply) {
             responsable: {
               include: { usuario: { select: { nombre: true, correo: true } } },
             },
+            evidencias: { orderBy: { creado_en: 'desc' }, take: 5 }
           },
           orderBy: [{ fecha_inicio_plan: "asc" }],
         },
+        
+        evidencias: { orderBy: { creado_en: 'desc' }, take: 5 },
 
         responsable: {
           include: { usuario: { select: { nombre: true, correo: true } } },
@@ -244,6 +251,7 @@ export async function createTarea(request, reply) {
     fecha_inicio_real,
     dias_reales,
     detalles,
+    es_planificado,
   } = body;
 
   if (!epica_id) return httpError(reply, 400, "Debes indicar epica_id");
@@ -372,6 +380,7 @@ export async function createTarea(request, reply) {
         fecha_fin_real: ffr,
         dias_reales: diasReales || null,
         dias_desviacion: diasDesviacion, // ✅ esto es de Tarea (sí existe)
+        es_planificado,
       },
     });
 
@@ -442,6 +451,9 @@ export async function updateTarea(request, reply) {
   const scope = resolveScope(request);
   const id = request.params.id;
   const data = request.body || {};
+
+  const comentarioRevision = data.comentario_revision;
+  delete data.comentario_revision;
 
   const row = await prisma.$transaction(async (tx) => {
     const tarea = await tx.tarea.findFirst({
@@ -581,6 +593,20 @@ export async function updateTarea(request, reply) {
           fecha_inicio_real: fir || new Date(),
           fecha_fin_real: ffr || new Date(),
         },
+      });
+    }
+
+    if (comentarioRevision) {
+      await tx.tareaHistorial.create({
+        data: {
+          empresa_id: scope.empresaId,
+          proyecto_id: tarea.proyecto_id,
+          tarea_id: id,
+          tipo: "COMENTARIO",
+          metadata: JSON.stringify({ comentario: comentarioRevision }),
+          actor_id: request.user?.userId || null,
+          source: "ERP"
+        }
       });
     }
 

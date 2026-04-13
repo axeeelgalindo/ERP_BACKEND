@@ -144,6 +144,7 @@ export async function getProyecto(request, reply) {
           epica: { select: { id: true, nombre: true } },
 
           responsable: { include: { usuario: true } },
+          evidencias: { orderBy: { creado_en: 'desc' }, take: 5 },
           detalles: {
             where: { eliminado: false },
             orderBy: [{ fecha_inicio_plan: "asc" }],
@@ -153,6 +154,7 @@ export async function getProyecto(request, reply) {
                   usuario: { select: { nombre: true, correo: true } },
                 },
               },
+              evidencias: { orderBy: { creado_en: 'desc' }, take: 5 },
             },
           },
         },
@@ -167,6 +169,7 @@ export async function getProyecto(request, reply) {
       cotizaciones: true,
       compras: { where: { eliminado: false } },
       rendiciones: { where: { eliminado: false } },
+      retrasos: { orderBy: { creado_en: "desc" } },
     },
   });
 
@@ -374,13 +377,16 @@ export async function updateProyecto(request, reply) {
   if (typeof body.descripcion === "string") data.descripcion = body.descripcion.trim() || null;
   if (body.descripcion === null) data.descripcion = null;
 
+  if (typeof body.motivo_retraso === "string") data.motivo_retraso = body.motivo_retraso.trim() || null;
+  if (body.motivo_retraso === null) data.motivo_retraso = null;
+
   if (body.presupuesto === null) data.presupuesto = null;
   if (typeof body.presupuesto === "number") data.presupuesto = body.presupuesto;
 
   // (opcional) permitir editar estado/fechas si lo usas
   if (typeof body.estado === "string") data.estado = body.estado;
-  if (body.fecha_inicio_plan) data.fecha_inicio_plan = new Date(body.fecha_inicio_plan);
-  if (body.fecha_fin_plan) data.fecha_fin_plan = new Date(body.fecha_fin_plan);
+  if (body.fecha_inicio_plan) data.fecha_inicio_plan = new Date(`${String(body.fecha_inicio_plan).slice(0, 10)}T12:00:00`);
+  if (body.fecha_fin_plan) data.fecha_fin_plan = new Date(`${String(body.fecha_fin_plan).slice(0, 10)}T12:00:00`);
 
   // seguridad: empresa_id no se toca si no es master
   if (data.empresa_id && !scope.isMaster) delete data.empresa_id;
@@ -1073,4 +1079,28 @@ export async function obtenerInfoProyecto(request, reply) {
     console.error("Error al obtener info del proyecto:", error);
     return reply.code(500).send({ ok: false, error: "Error interno del servidor" });
   }
+}
+
+export async function addProyectoRetraso(req, reply) {
+  const scope = resolveScope(req);
+  const { id } = req.params;
+  const { comentario } = req.body || {};
+  
+  if (!comentario) return reply.code(400).send({ ok: false, message: "Comentario vacío" });
+
+  const p = await prisma.proyecto.findUnique({
+    where: { id },
+    select: { id: true, empresa_id: true }
+  });
+  if (!p) return reply.code(404).send({ ok: false, message: "Proyecto no encontrado" });
+  if (!scope.isMaster && p.empresa_id !== scope.empresaId) return reply.code(403).send({ ok: false, message: "No autorizado" });
+  
+  const retraso = await prisma.proyectoRetraso.create({
+    data: {
+      proyecto_id: id,
+      comentario: String(comentario).trim(),
+      actor_id: req.user?.id || null
+    }
+  });
+  return reply.send({ ok: true, retraso });
 }

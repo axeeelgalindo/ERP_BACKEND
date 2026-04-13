@@ -636,12 +636,12 @@ export async function createCompra(request, reply) {
         folio: body.folio ?? null,
         rut_proveedor: body.rut_proveedor ?? null,
         razon_social: body.razon_social ?? null,
-        fecha_docto: body.fecha_docto ? new Date(body.fecha_docto) : null,
-        fecha_recepcion: body.fecha_recepcion ? new Date(body.fecha_recepcion) : null,
+        fecha_docto: body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null,
+        fecha_recepcion: body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null,
 
         factura_url: body.factura_url ?? null,
         factura_numero: body.factura_numero ?? null,
-        factura_fecha: body.factura_fecha ? new Date(body.factura_fecha) : null,
+        factura_fecha: body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null,
         factura_monto: body.factura_monto != null ? Number(body.factura_monto) : null,
 
         items: {
@@ -708,11 +708,7 @@ export async function asignarRendicionACompra(request, reply) {
           where: {
             id: rendicion_id,
             eliminado: false,
-            proyecto: {
-              empresa_id: compra.empresa_id, // misma empresa
-              eliminado: false,
-              empresa: { eliminado: false },
-            },
+            empresa_id: compra.empresa_id, // misma empresa
           },
           select: {
             id: true,
@@ -728,39 +724,16 @@ export async function asignarRendicionACompra(request, reply) {
           throw err;
         }
 
-        // ✅ Compatibilidad básica (ajusta si quieres reglas más estrictas):
-        // - Si compra es PROYECTO -> rendición debe ser PROYECTO y mismo proyecto_id
-        // - Si compra es ADMIN/TALLER -> rendición mismo destino y mismo centro_costo
-        const compraDestino = String(compra.destino || "PROYECTO").toUpperCase();
-        const compraCentro = compra.centro_costo ? String(compra.centro_costo).toUpperCase() : null;
-        const compraProyectoId = compra.proyecto_id || null;
-
-        const rendDestino = String(rend.destino || "PROYECTO").toUpperCase();
-        const rendCentro = rend.centro_costo ? String(rend.centro_costo).toUpperCase() : null;
-
-        if (compraDestino === "PROYECTO") {
-          if (rendDestino !== "PROYECTO") {
-            const err = new Error("Rendición incompatible: destino distinto (compra PROYECTO)");
-            err.statusCode = 400;
-            throw err;
+        // ✅ Auto-alineación: Al vincular, la compra hereda el contexto de la rendición
+        // para asegurar consistencia (destino, proyecto, centro de costo).
+        await tx.compra.update({
+          where: { id: compra.id },
+          data: {
+            destino: rend.destino,
+            centro_costo: rend.centro_costo,
+            proyecto_id: rend.proyecto_id
           }
-          if (String(rend.proyecto_id) !== String(compraProyectoId)) {
-            const err = new Error("Rendición incompatible: proyecto distinto");
-            err.statusCode = 400;
-            throw err;
-          }
-        } else {
-          if (rendDestino !== compraDestino) {
-            const err = new Error("Rendición incompatible: destino distinto");
-            err.statusCode = 400;
-            throw err;
-          }
-          if (!compraCentro || !rendCentro || rendCentro !== compraCentro) {
-            const err = new Error("Rendición incompatible: centro_costo distinto");
-            err.statusCode = 400;
-            throw err;
-          }
-        }
+        });
       }
 
       // 3) update compra
@@ -977,14 +950,14 @@ export async function updateCompra(request, reply) {
     if (body.rut_proveedor !== undefined) data.rut_proveedor = body.rut_proveedor ?? null;
     if (body.razon_social !== undefined) data.razon_social = body.razon_social ?? null;
     if (body.fecha_docto !== undefined)
-      data.fecha_docto = body.fecha_docto ? new Date(body.fecha_docto) : null;
+      data.fecha_docto = body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null;
     if (body.fecha_recepcion !== undefined)
-      data.fecha_recepcion = body.fecha_recepcion ? new Date(body.fecha_recepcion) : null;
+      data.fecha_recepcion = body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null;
 
     if (body.factura_url !== undefined) data.factura_url = body.factura_url ?? null;
     if (body.factura_numero !== undefined) data.factura_numero = body.factura_numero ?? null;
     if (body.factura_fecha !== undefined)
-      data.factura_fecha = body.factura_fecha ? new Date(body.factura_fecha) : null;
+      data.factura_fecha = body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null;
     if (body.factura_monto !== undefined)
       data.factura_monto = body.factura_monto != null ? Number(body.factura_monto) : null;
 

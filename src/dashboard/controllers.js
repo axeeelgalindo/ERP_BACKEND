@@ -120,6 +120,11 @@ export const getDashboardData = async (request, reply) => {
 
     // 1. Facturado Mes (Facturación Real = Ventas emitidas este mes)
     const facturadoMes = ventas.reduce((acc, v) => {
+      // ✅ Considerar sólo ventas facturadas (con folio/tipo_doc) o Cotizaciones en FACTURADA/PAGADA
+      const isFacturadaOC = v.ordenVenta && ['FACTURADA', 'PAGADA'].includes(v.ordenVenta.estado?.toUpperCase());
+      const isImportedRCV = !!(v.folio || v.tipo_doc);
+      if (!isFacturadaOC && !isImportedRCV) return acc;
+
       let totalVenta = v.total || 0; 
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
@@ -127,7 +132,7 @@ export const getDashboardData = async (request, reply) => {
       if (isThisMonth(v.fecha)) {
         b_facturadoMes.push({ 
           folio: v.folio || v.id, 
-          cliente: v.ordenVenta?.cliente?.nombre || "N/A",
+          cliente: v.ordenVenta?.cliente?.nombre || v.Cliente?.nombre || "N/A",
           total: totalVenta, 
           fecha: v.fecha 
         });
@@ -255,6 +260,11 @@ export const getDashboardData = async (request, reply) => {
 
     // 4. Flujo Caja Mes (Entradas y Salidas reales del mes)
     const ingresosPagadosMes = ventas.reduce((acc, v) => {
+      // ✅ Considerar sólo ventas facturadas (con folio/tipo_doc) o Cotizaciones en FACTURADA/PAGADA
+      const isFacturadaOC = v.ordenVenta && ['FACTURADA', 'PAGADA'].includes(v.ordenVenta.estado?.toUpperCase());
+      const isImportedRCV = !!(v.folio || v.tipo_doc);
+      if (!isFacturadaOC && !isImportedRCV) return acc;
+
       let totalVenta = v.total || 0; 
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
@@ -343,6 +353,11 @@ export const getDashboardData = async (request, reply) => {
     }
 
     ventas.forEach(v => {
+      // ✅ Considerar sólo ventas facturadas (con folio/tipo_doc) o Cotizaciones en FACTURADA/PAGADA
+      const isFacturadaOC = v.ordenVenta && ['FACTURADA', 'PAGADA'].includes(v.ordenVenta.estado?.toUpperCase());
+      const isImportedRCV = !!(v.folio || v.tipo_doc);
+      if (!isFacturadaOC && !isImportedRCV) return;
+
       const dateV = new Date(v.fecha || v.createdAt);
       if(isNaN(dateV)) return;
       

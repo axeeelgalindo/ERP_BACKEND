@@ -10,7 +10,8 @@ import {
   iniciarProyecto,
   finalizarProyecto,
   reporteDevengadoProyecto,
-  obtenerInfoProyecto
+  obtenerInfoProyecto,
+  addProyectoRetraso
 } from "./controllers.js";
 import { reporteDevengadoProfesional } from "./devengado_new.js";
 
@@ -79,6 +80,7 @@ export default async function proyectosRoutes(server) {
 
   server.post("/proyectos/:id/iniciar", iniciarProyecto);
   server.post("/proyectos/:id/finalizar", finalizarProyecto);
+  server.post("/proyectos/:id/retrasos", { ...guard }, addProyectoRetraso);
 
   //devengado
   server.get("/proyectos/:id/reporte-devengado", reporteDevengadoProyecto);

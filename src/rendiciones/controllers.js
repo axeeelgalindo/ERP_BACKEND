@@ -39,7 +39,7 @@ function normalizeItems(items = []) {
     const linea = Number.isFinite(Number(it.linea)) ? Number(it.linea) : i + 1;
 
     // fecha: permitir string o Date. Si no viene, usamos hoy.
-    let fecha = it.fecha ? new Date(it.fecha) : new Date();
+    let fecha = it.fecha ? new Date(`${String(it.fecha).slice(0, 10)}T12:00:00`) : new Date();
     if (Number.isNaN(fecha.getTime())) fecha = new Date();
 
     out.push({
@@ -239,12 +239,14 @@ export async function listRendiciones(request, reply) {
     ...(centro_costo ? { centro_costo } : {}),
     ...(q
       ? {
-          OR: [
-            { descripcion: { contains: q, mode: "insensitive" } },
-            { empleado: { rut: { contains: q, mode: "insensitive" } } },
-            { proyecto: { nombre: { contains: q, mode: "insensitive" } } }, // OK aunque proyecto sea null
-          ],
-        }
+        OR: [
+          { descripcion: { contains: q, mode: "insensitive" } },
+          { empleado: { rut: { contains: q, mode: "insensitive" } } },
+          { proyecto: { nombre: { contains: q, mode: "insensitive" } } },
+          { empleado: { usuario: { nombre: { contains: q, mode: "insensitive" } } } },
+
+        ],
+      }
       : {}),
   };
 
@@ -256,17 +258,25 @@ export async function listRendiciones(request, reply) {
       skip: (page - 1) * pageSize,
       take: pageSize,
       include: {
+        usuario: { select: { id: true, nombre: true, correo: true } },
         proyecto: { select: { id: true, nombre: true } },
-        empleado: { select: { id: true, rut: true, cargo: true } },
-        revisada_por: { select: { id: true, nombre: true, correo: true } },
-        items: true,
-        compras: { 
+        empleado: { 
           select: { 
             id: true, 
-            numero: true, 
-            total: true, 
-            proveedor: { select: { nombre: true } } 
+            rut: true, 
+            cargo: true,
+            usuario: { select: { id: true, nombre: true, correo: true } }
           } 
+        },
+        revisada_por: { select: { id: true, nombre: true, correo: true } },
+        items: true,
+        compras: {
+          select: {
+            id: true,
+            numero: true,
+            total: true,
+            proveedor: { select: { nombre: true } }
+          }
         },
       },
     }),
@@ -293,7 +303,14 @@ export async function getRendicionById(request, reply) {
     },
     include: {
       proyecto: { select: { id: true, nombre: true } },
-      empleado: { select: { id: true, rut: true, cargo: true } },
+      empleado: { 
+        select: { 
+          id: true, 
+          rut: true, 
+          cargo: true,
+          usuario: { select: { id: true, nombre: true, correo: true } }
+        } 
+      },
       revisada_por: { select: { id: true, nombre: true, correo: true } },
       items: true,
       compras: {
@@ -342,6 +359,10 @@ export async function updateRendicion(request, reply) {
           id: true,
           empleado_id: true,
           proyecto_id: true,
+          monto_total: true,
+          monto_entregado: true,
+          monto_pagado: true,
+          estado: true,
           destino: true,
           centro_costo: true,
         },
@@ -404,7 +425,7 @@ export async function updateRendicion(request, reply) {
 
         revisada_por_id: body.revisada_por_id ?? undefined,
         fecha_revision: body.fecha_revision
-          ? new Date(body.fecha_revision)
+          ? new Date(`${String(body.fecha_revision).slice(0, 10)}T12:00:00`)
           : undefined,
         comentario_revision: body.comentario_revision ?? undefined,
 
@@ -428,6 +449,12 @@ export async function updateRendicion(request, reply) {
           data.estado = "pagada";
         } else if (data.monto_pagado > 0) {
           data.estado = "pagada_parcial";
+        }
+      } else if (data.estado === "pagada") {
+        // ✅ Si fuerzan el estado a "pagada" sin mandar monto, asumimos liquidación total
+        const currentPaid = current.monto_pagado || 0;
+        if (currentPaid < targetBalance) {
+          data.monto_pagado = targetBalance;
         }
       }
 
@@ -689,7 +716,12 @@ export async function uploadRendicionMainDoc(request, reply) {
   if (!rend) return httpError(reply, 404, "Rendición no encontrada");
 
   const file = await request.file();
-  if (!file) return httpError(reply, 400, "Debes enviar file en form-data");
+  if (!file) {
+    console.warn(`[UPLOAD] No file received for rendicion ${id}, type ${type}`);
+    return httpError(reply, 400, "Debes enviar file en form-data");
+  }
+
+  console.log(`[UPLOAD] Receiving file ${file.filename} (${file.mimetype}) for rendicion ${id}, type ${type}`);
 
   const slug = makeRendicionSlug(rend);
   const dir = rendicionesDir(slug);

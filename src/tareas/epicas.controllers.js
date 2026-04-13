@@ -259,7 +259,7 @@ export async function getEpica(request, reply) {
 export async function createEpica(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
-  const {  nombre, descripcion, proyecto_id } = body;
+  const {  nombre, descripcion, proyecto_id, es_planificado } = body;
 
   if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
   if (!nombre?.trim())
@@ -284,6 +284,7 @@ export async function createEpica(request, reply) {
       estado: "pendiente",
       avance: 0,
       source: "MANUAL",
+      es_planificado,
     },
   });
 
@@ -316,6 +317,13 @@ export async function updateEpica(request, reply) {
           }
         : {}),
     };
+
+    if (Object.prototype.hasOwnProperty.call(data, "fecha_inicio_real")) {
+      updateData.fecha_inicio_real = data.fecha_inicio_real ? new Date(`${String(data.fecha_inicio_real).slice(0, 10)}T12:00:00`) : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "fecha_fin_real")) {
+      updateData.fecha_fin_real = data.fecha_fin_real ? new Date(`${String(data.fecha_fin_real).slice(0, 10)}T12:00:00`) : null;
+    }
 
     // ✅ Sincronizar estado y avance
     if (Object.prototype.hasOwnProperty.call(data, "avance")) {

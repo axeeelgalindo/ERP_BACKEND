@@ -7,7 +7,11 @@ import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
 
 const prisma = new PrismaClient();
 
-const parseDate = (d) => (d ? new Date(d) : null);
+const parseDate = (d) => {
+  if (!d) return null;
+  const s = String(d);
+  return s.includes("T") ? new Date(s) : new Date(`${s.slice(0, 10)}T12:00:00`);
+};
 const toIntOrNull = (v) => {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -173,6 +177,7 @@ export async function listTareaDetalles(request, reply) {
       responsable: {
         include: { usuario: { select: { nombre: true, correo: true } } },
       },
+      evidencias: { orderBy: { creado_en: 'desc' }, take: 5 }
     },
   });
 
@@ -196,6 +201,7 @@ export async function createTareaDetalle(request, reply) {
     dias_reales,
     horas_plan,
     horas_real,
+    es_planificado,
   } = body;
 
   const fip = parseDate(fecha_inicio_plan);
@@ -271,6 +277,7 @@ export async function createTareaDetalle(request, reply) {
         valor_hora: valorHora,
         costo_plan: costoPlan,
         costo_real: costoReal,
+        es_planificado,
       },
     });
 
@@ -297,6 +304,9 @@ export async function updateTareaDetalle(request, reply) {
   const accion = data.accion;
   delete data.accion;
 
+  const comentarioRevision = data.comentario_revision;
+  delete data.comentario_revision;
+
   const row = await prisma.$transaction(async (tx) => {
     const current = await tx.tareaDetalle.findFirst({
       where: {
@@ -310,6 +320,9 @@ export async function updateTareaDetalle(request, reply) {
           },
         },
       },
+      include: {
+        tarea: { select: { proyecto_id: true } }
+      }
     });
 
     if (!current)
@@ -469,6 +482,20 @@ export async function updateTareaDetalle(request, reply) {
         costo_real: costoReal,
       },
     });
+
+    if (comentarioRevision) {
+      await tx.tareaHistorial.create({
+        data: {
+          empresa_id: scope.empresaId,
+          proyecto_id: current.tarea.proyecto_id, // we don't have tarea.proyecto_id from current directly unless we include it. wait!
+          tarea_id: tareaId,
+          tipo: "COMENTARIO",
+          metadata: JSON.stringify({ comentario: comentarioRevision, subtarea: current.titulo }),
+          actor_id: request.user?.userId || null,
+          source: "ERP"
+        }
+      });
+    }
 
     const tareaUpdated = await recomputeTareaFromDetalles(tx, tareaId);
     if (tareaUpdated?.epica_id) {
