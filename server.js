@@ -54,7 +54,7 @@ server.get("/", async () => ({ hello: "Soy la api" }));
 // Prefijo /api para todo
 await server.register(Router, { prefix: "/api" });
 
-const PORT = Number(process.env.PORT || 3001);
+const PORT = Number(process.env.PORT || 3002);
 server.addHook("onClose", async () => prisma.$disconnect());
 
 server.listen({ port: PORT, host: "0.0.0.0" });
