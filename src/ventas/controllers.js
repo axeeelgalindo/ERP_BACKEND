@@ -372,6 +372,7 @@ export const createVenta = async (request, reply) => {
       });
 
       const detallesData = [];
+      const uniqueProcessedEmployees = new Set();
 
       for (const det of detalles) {
         const {
@@ -492,16 +493,22 @@ export const createVenta = async (request, reply) => {
           }
 
           const costoHHVal = Number(hhEmpleado.costoHH);
-          const cif = Number(hhEmpleado?.cif?.valor ?? 0);
+          const cifValue = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          cifLine = cantidad > 0 ? cif : 0;
+          let cifToAdd = 0;
+          if (!uniqueProcessedEmployees.has(hhEmpleadoId)) {
+            uniqueProcessedEmployees.add(hhEmpleadoId);
+            cifToAdd = cifValue;
+          }
+
           const costoSinAlpha = cantidad > 0 ? costoHHVal * cantidad : 0;
-          costoConAlphaBase = costoSinAlpha * alphaMult; 
+          costoConAlphaBase = costoSinAlpha * alphaMult;
 
           costoTotal = costoConAlphaBase + extraFijo;
           ventaTotal = costoConAlphaBase + extraFijo;
 
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
+          cifLine = cifToAdd; // Store unique CIF impact
         }
 
         if (modo === "COMPRA") {
@@ -561,29 +568,31 @@ export const createVenta = async (request, reply) => {
           total: ventaTotal,
         });
 
-        // guardamos mult para usar post-k (sin ensuciar schema)
+        // guardamos para usar post-k (sin ensuciar schema)
         detallesData[detallesData.length - 1]._descuentoItemMult = descuentoItemMult;
+        detallesData[detallesData.length - 1]._cifLineUnique = cifLine;
       }
 
       // totales base (sin extra por costeo)
       const totalCostoTotal = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
 
       const uPct = utilidadPct != null ? utilidadPct : 0;
-      const targetMarkup = uPct / 100;
+      const targetMargin = uPct / 100;
+      const marginDivisor = (1 - targetMargin) || 1; // evitar division por cero si uPct=100 (ya validado antes)
 
-      const totalCIF = detallesData.reduce((acc, d) => acc + (Number(d._cifLine) || 0), 0);
-      const totalVentaTarget = totalCostoTotal * (1 + targetMarkup) + totalCIF;
+      const totalCIFUnique = detallesData.reduce((acc, d) => acc + (Number(d._cifLineUnique) || 0), 0);
+      const totalVentaTarget = (totalCostoTotal / marginDivisor) + totalCIFUnique;
 
       let k = 1;
       if (totalCostoTotal > 0) {
         k = totalVentaTarget / totalCostoTotal;
       }
 
-      // ✅ Aplicar Markup preciso por línea y luego descuentos
+      // ✅ Aplicar Margen preciso por línea y luego descuentos
       for (const d of detallesData) {
         const costoLineTotal = Number(d.costoTotal || 0);
 
-        const bruto = (costoLineTotal * (1 + targetMarkup)) + (d._cifLine || 0);
+        const bruto = (costoLineTotal / marginDivisor) + (d._cifLineUnique || 0);
         d.ventaTotalBruto = bruto;
 
         const itemMult = d._descuentoItemMult ?? 1;
@@ -598,6 +607,7 @@ export const createVenta = async (request, reply) => {
 
         // limpiar campos internos
         delete d._descuentoItemMult;
+        delete d._cifLineUnique;
       }
 
       if (ordenVentaId) {
@@ -607,23 +617,26 @@ export const createVenta = async (request, reply) => {
 
       const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
 
-      const nuevaVenta = await tx.venta.create({
+      const nuevaVentaHeader = await tx.venta.create({
         data: {
           ordenVentaId: ordenVentaId ?? null,
           descripcion: descripcion ?? null,
-
           isFeriado: ventaIsFeriado,
           isUrgencia: ventaIsUrgencia,
-
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
-
-          // ✅ NUEVO: descuento general guardado
           descuentoPct: descuentoPctGeneral,
-
-          detalles: { create: detallesData },
         },
+      });
+
+      // Crear detalles por separado con createMany para permitir IDs escalares (tipoItemId, etc.)
+      await tx.detalleVenta.createMany({
+        data: detallesData.map(d => ({ ...d, ventaId: nuevaVentaHeader.id }))
+      });
+
+      const nuevaVenta = await tx.venta.findUnique({
+        where: { id: nuevaVentaHeader.id },
         include: {
           detalles: {
             include: {
@@ -840,6 +853,7 @@ export async function updateVenta(request, reply) {
       }
 
       const detallesData = [];
+      const uniqueProcessedEmployees = new Set();
 
       for (const det of detalles) {
         const {
@@ -950,9 +964,14 @@ export async function updateVenta(request, reply) {
           }
 
           const costoHHVal = Number(hhEmpleado.costoHH);
-          const cif = Number(hhEmpleado?.cif?.valor ?? 0);
+          const cifValue = Number(hhEmpleado?.cif?.valor ?? 0);
 
-          cifLine = cantidad > 0 ? cif : 0;
+          let cifToAdd = 0;
+          if (!uniqueProcessedEmployees.has(hhEmpleadoId)) {
+            uniqueProcessedEmployees.add(hhEmpleadoId);
+            cifToAdd = cifValue;
+          }
+
           const costoSinAlpha = cantidad > 0 ? costoHHVal * cantidad : 0;
           costoConAlphaBase = costoSinAlpha * alphaMult;
 
@@ -960,6 +979,7 @@ export async function updateVenta(request, reply) {
           ventaTotal = costoConAlphaBase + extraFijo;
 
           ventaUnitario = cantidad > 0 ? ventaTotal / cantidad : ventaTotal;
+          cifLine = cifToAdd; // Store unique CIF impact
         }
 
         if (modo === "COMPRA") {
@@ -1014,37 +1034,41 @@ export async function updateVenta(request, reply) {
           total: ventaTotal,
         });
 
-        // guardamos mult para usar post-k
+        // guardamos para usar post-k
+        detallesData[detallesData.length - 1]._cifLineUnique = cifLine;
       }
 
       // totales base (sin extra por costeo)
       const totalCostoTotal = detallesData.reduce((acc, d) => acc + (Number(d.costoTotal) || 0), 0);
 
       const uPct = utilidadPct != null ? utilidadPct : 0;
-      const targetMarkup = uPct / 100;
+      const targetMargin = uPct / 100;
+      const marginDivisor = (1 - targetMargin) || 1;
 
-      const totalCIF = detallesData.reduce((acc, d) => acc + (Number(d._cifLine) || 0), 0);
-      const totalVentaTarget = totalCostoTotal * (1 + targetMarkup) + totalCIF;
+      const totalCIFUnique = detallesData.reduce((acc, d) => acc + (Number(d._cifLineUnique) || 0), 0);
+      const totalVentaTarget = (totalCostoTotal / marginDivisor) + totalCIFUnique;
 
       let k = 1;
       if (totalCostoTotal > 0) {
         k = totalVentaTarget / totalCostoTotal;
       }
 
-      // ✅ Aplicar Markup preciso por línea
+      // ✅ Aplicar Margen preciso por línea
       for (const d of detallesData) {
         const costoLineTotal = Number(d.costoTotal || 0);
 
-        const bruto = (costoLineTotal * (1 + targetMarkup)) + (d._cifLine || 0);
+        const bruto = (costoLineTotal / marginDivisor) + (d._cifLineUnique || 0);
         d.ventaTotalBruto = bruto;
 
-        const neto = bruto; // En update no hay descuentos implementados en el loop original, los mantenemos así
+        const neto = bruto; 
         d.ventaTotal = neto;
         d.total = neto;
         d.ventaUnitario = d.cantidad > 0 ? neto / d.cantidad : neto;
 
         d.utilidad = neto - costoLineTotal;
         d.porcentajeUtilidad = neto > 0 ? (d.utilidad / neto) * 100 : 0;
+
+        delete d._cifLineUnique;
       }
 
       // guardamos base: VENTA_ACTUAL se persiste como VENTA
