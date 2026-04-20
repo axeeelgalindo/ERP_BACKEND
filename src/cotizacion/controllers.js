@@ -1298,27 +1298,35 @@ export const uploadCotizacionDoc = async (request, reply) => {
     const fileUrl = `/uploads/cotizaciones/${empresaId}/${id}/${uniqueName}`;
     const fieldName = `doc_${docType}_url`;
 
-    // Lógica para avanzar de estado automáticamente:
     let nuevoEstado = cot.estado;
     const est = cot.estado;
+    const dateUpdates = {};
 
     if (docType === "oc" && (est === "COTIZACION" || est === "ACEPTADA")) {
       nuevoEstado = "ORDEN_VENTA";
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
     } else if (docType === "gd" && (est === "ACEPTADA" || est === "ORDEN_VENTA")) {
       nuevoEstado = "ENTREGADO";
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
     } else if (docType === "hes" && (est === "ORDEN_VENTA" || est === "ENTREGADO")) {
       nuevoEstado = "POR_FACTURAR";
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
     } else if (docType === "fac" && (est === "ENTREGADO" || est === "POR_FACTURAR")) {
       nuevoEstado = "FACTURADA";
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
+      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = new Date();
     } else if (docType === "comprobante" && (est === "POR_FACTURAR" || est === "FACTURADA")) {
       nuevoEstado = "PAGADA";
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
+      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = new Date();
     }
 
     const updated = await prisma.cotizacion.update({
       where: { id },
       data: { 
         [fieldName]: fileUrl,
-        estado: nuevoEstado
+        estado: nuevoEstado,
+        ...dateUpdates
       },
       include: {
         cliente: true,
