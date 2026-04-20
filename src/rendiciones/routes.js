@@ -7,6 +7,8 @@ import {
   deleteRendicion,
   uploadComprobanteItem,
   uploadRendicionMainDoc,
+  addAnticipo,
+  deleteAnticipo,
 } from "./controllers.js";
 
 export default async function rendicionesRoutes(fastify) {
@@ -15,6 +17,10 @@ export default async function rendicionesRoutes(fastify) {
   fastify.post("/rendiciones", createRendicion);
   fastify.patch("/rendiciones/:id", updateRendicion);
   fastify.delete("/rendiciones/:id", deleteRendicion);
+
+  // Múltiples anticipos
+  fastify.post("/rendiciones/:id/anticipos", addAnticipo);
+  fastify.delete("/rendiciones/:id/anticipos/:anticipoId", deleteAnticipo);
 
   // Comprobante principal (anticipo/reembolso)
   fastify.post("/rendiciones/:id/documento", uploadRendicionMainDoc);

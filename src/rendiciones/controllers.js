@@ -201,6 +201,7 @@ export async function createRendicion(request, reply) {
         compras: { select: { id: true, numero: true, total: true } },
       },
     });
+    return r;
   });
 
   return reply.code(201).send(row);
@@ -270,6 +271,7 @@ export async function listRendiciones(request, reply) {
         },
         revisada_por: { select: { id: true, nombre: true, correo: true } },
         items: true,
+        anticipos: true,
         compras: {
           select: {
             id: true,
@@ -313,6 +315,7 @@ export async function getRendicionById(request, reply) {
       },
       revisada_por: { select: { id: true, nombre: true, correo: true } },
       items: true,
+      anticipos: true,
       compras: {
         select: {
           id: true,
@@ -488,6 +491,7 @@ export async function updateRendicion(request, reply) {
             proyecto: { select: { id: true, nombre: true } },
             empleado: { select: { id: true, rut: true, cargo: true } },
             revisada_por: { select: { id: true, nombre: true, correo: true } },
+            anticipos: true,
             compras: {
               select: {
                 id: true,
@@ -512,6 +516,7 @@ export async function updateRendicion(request, reply) {
           proyecto: { select: { id: true, nombre: true } },
           empleado: { select: { id: true, rut: true, cargo: true } },
           revisada_por: { select: { id: true, nombre: true, correo: true } },
+          anticipos: true,
           compras: {
             select: {
               id: true,
@@ -699,10 +704,10 @@ export async function uploadComprobanteItem(request, reply) {
 export async function uploadRendicionMainDoc(request, reply) {
   const scope = resolveScope(request);
   const { id } = request.params || {};
-  const { type } = request.query || {}; // 'entrega' o 'reembolso'
+  const { type } = request.query || {}; // 'entrega'
 
-  if (!["entrega", "reembolso"].includes(type)) {
-    return httpError(reply, 400, "Tipo de documento inválido (use entrega or reembolso)");
+  if (type !== "entrega") {
+    return httpError(reply, 400, "Tipo de documento inválido (solo 'entrega')");
   }
 
   const rend = await prisma.rendicion.findFirst({
@@ -731,7 +736,7 @@ export async function uploadRendicionMainDoc(request, reply) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const rnd = crypto.randomBytes(6).toString("hex");
 
-  const field = type === "entrega" ? "doc_entrega_url" : "doc_reembolso_url";
+  const field = "doc_entrega_url";
   const filename = `doc_${type}_${stamp}_${rnd}_${safeFileName(file.filename)}`;
   const fullpath = path.join(dir, filename);
 
@@ -750,4 +755,115 @@ export async function uploadRendicionMainDoc(request, reply) {
     message: `Documento de ${type} subido correctamente`,
     url,
   });
+}
+
+/* =========================
+   ✅ POST /rendiciones/:id/anticipos
+   Múltiples anticipos por rendición
+========================= */
+export async function addAnticipo(request, reply) {
+  const scope = resolveScope(request);
+  const { id } = request.params || {};
+
+  const rend = await prisma.rendicion.findFirst({
+    where: { id: String(id), empresa_id: scope.empresaId, eliminado: false },
+    select: { id: true, creado_en: true },
+  });
+  if (!rend) return httpError(reply, 404, "Rendición no encontrada");
+
+  const parts = request.parts();
+  let monto = 0;
+  let fileBuffer = null;
+  let fileName = "";
+  let fileMimetype = "";
+
+  for await (const p of parts) {
+    if (p.type === "file") {
+      fileBuffer = await p.toBuffer();
+      fileName = p.filename;
+      fileMimetype = p.mimetype;
+    } else {
+      if (p.fieldname === "monto") monto = toNum(p.value);
+    }
+  }
+
+  if (monto <= 0) return httpError(reply, 400, "Monto de anticipo inválido");
+
+  let doc_url = null;
+  if (fileBuffer) {
+    const slug = makeRendicionSlug(rend);
+    const dir = rendicionesDir(slug);
+    await ensureDir(dir);
+    const ext = path.extname(fileName || "").toLowerCase().replace(".", "") || "bin";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const rnd = crypto.randomBytes(6).toString("hex");
+    const finalName = `anticipo_${stamp}_${rnd}_${safeFileName(fileName)}`;
+    const fullpath = path.join(dir, finalName);
+    await fsp.writeFile(fullpath, fileBuffer);
+    doc_url = `${rendicionesPublicPrefix(slug)}/${finalName}`;
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const nuevo = await tx.rendicionAnticipo.create({
+      data: {
+        rendicion_id: id,
+        monto,
+        doc_url,
+      },
+    });
+
+    // Actualizar el total en la rendición
+    const totalAdv = await tx.rendicionAnticipo.aggregate({
+      where: { rendicion_id: id },
+      _sum: { monto: true },
+    });
+
+    const sum = totalAdv._sum.monto || 0;
+    await tx.rendicion.update({
+      where: { id },
+      data: { monto_entregado: sum },
+    });
+
+    return nuevo;
+  });
+
+  return reply.code(201).send(result);
+}
+
+/* =========================
+   ✅ DELETE /rendiciones/:id/anticipos/:anticipoId
+========================= */
+export async function deleteAnticipo(request, reply) {
+  const scope = resolveScope(request);
+  const { id, anticipoId } = request.params || {};
+
+  const result = await prisma.$transaction(async (tx) => {
+    const existing = await tx.rendicionAnticipo.findFirst({
+      where: {
+        id: anticipoId,
+        rendicion_id: id,
+        rendicion: { empresa_id: scope.empresaId },
+      },
+    });
+
+    if (!existing) throw new Error("Anticipo no encontrado");
+
+    await tx.rendicionAnticipo.delete({ where: { id: anticipoId } });
+
+    // Actualizar el total en la rendición
+    const totalAdv = await tx.rendicionAnticipo.aggregate({
+      where: { rendicion_id: id },
+      _sum: { monto: true },
+    });
+
+    const sum = totalAdv._sum.monto || 0;
+    await tx.rendicion.update({
+      where: { id },
+      data: { monto_entregado: sum },
+    });
+
+    return { ok: true };
+  });
+
+  return reply.send(result);
 }

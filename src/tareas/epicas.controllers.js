@@ -220,6 +220,8 @@ export async function listEpicas(request, reply) {
       jira_estado: true,
       jira_sprint: true,
       jira_issue_color: true,
+      responsable_id: true,
+      responsable: { include: { usuario: { select: { nombre: true } } } },
 
       creado_en: true,
       actualizado_en: true,
@@ -259,7 +261,7 @@ export async function getEpica(request, reply) {
 export async function createEpica(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
-  const {  nombre, descripcion, proyecto_id, es_planificado } = body;
+  const {  nombre, descripcion, proyecto_id, es_planificado, responsable_id } = body;
 
   if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
   if (!nombre?.trim())
@@ -285,6 +287,7 @@ export async function createEpica(request, reply) {
       avance: 0,
       source: "MANUAL",
       es_planificado,
+      responsable_id: responsable_id || null,
     },
   });
 
@@ -315,6 +318,9 @@ export async function updateEpica(request, reply) {
               ? String(data.descripcion).trim()
               : null,
           }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(data, "responsable_id")
+        ? { responsable_id: data.responsable_id || null }
         : {}),
     };
 

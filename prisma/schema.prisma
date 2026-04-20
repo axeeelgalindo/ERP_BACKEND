@@ -143,6 +143,9 @@ model Empleado {
   // Responsable de subtareas
   detalles TareaDetalle[] @relation("EmpleadoTareaDetalle")
 
+  // Responsable de epicas
+  epicas Epica[] @relation("EmpleadoEpica")
+
   // 👇 HH ya calculadas por periodo (derivado del Excel)
   hhRegistros   HHEmpleado[]
   detalleVentas detalleVenta[]
@@ -435,12 +438,14 @@ model Epica {
   creado_en      DateTime  @default(now())
   actualizado_en DateTime  @updatedAt
   eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
   tareas Tarea[]
+
+  responsable_id String?
+  responsable    Empleado? @relation("EmpleadoEpica", fields: [responsable_id], references: [id], onDelete: SetNull)
 
   @@unique([proyecto_id, jira_key])
   @@index([proyecto_id])
+  @@index([responsable_id])
 }
 
 model Tarea {
@@ -1127,9 +1132,24 @@ model Rendicion {
   empleado Empleado  @relation(fields: [empleado_id], references: [id])
 
   items     RendicionItem[]
+  anticipos RendicionAnticipo[] // ✅ Múltiples transferencias
   compras   Compra[] // ✅ 1 rendición -> muchas compras (relación por Compra.rendicion_id)
   usuario   Usuario?        @relation(fields: [usuarioId], references: [id])
   usuarioId String?
+}
+
+model RendicionAnticipo {
+  id           String    @id @default(cuid())
+  rendicion_id String
+  rendicion    Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
+  
+  monto        Float
+  fecha        DateTime  @default(now())
+  doc_url      String?   // Comprobante específico de esta transferencia
+  
+  creado_en    DateTime  @default(now())
+
+  @@index([rendicion_id])
 }
 
 model RendicionItem {
