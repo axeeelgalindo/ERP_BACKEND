@@ -110,7 +110,7 @@ export async function startMobileTarea(request, reply) {
 export async function finishMobileTarea(request, reply) {
   const parts = request.parts(); // fastify-multipart
   let fields = {};
-  let uploadUrl = null;
+  let uploadUrls = [];
 
   for await (const part of parts) {
     if (part.type === "file") {
@@ -120,7 +120,7 @@ export async function finishMobileTarea(request, reply) {
       const savePath = path.resolve(process.cwd(), "uploads", savedName);
       
       await pipeline(part.file, fs.createWriteStream(savePath));
-      uploadUrl = `/api/uploads/${savedName}`;
+      uploadUrls.push(`/api/uploads/${savedName}`);
     } else {
       fields[part.fieldname] = part.value;
     }
@@ -129,8 +129,8 @@ export async function finishMobileTarea(request, reply) {
   const { id } = request.params;
   const { tipo, comentario } = fields; // tipo = "TAREA" o "SUBTAREA"
 
-  if (!uploadUrl) {
-    return reply.badRequest("Se requiere subir una foto de evidencia");
+  if (uploadUrls.length === 0) {
+    return reply.badRequest("Se requiere subir al menos una foto de evidencia");
   }
 
   // Insertar en TareaEvidencia y cambiar estado a "en_revision"
@@ -139,14 +139,16 @@ export async function finishMobileTarea(request, reply) {
     if (!subt) return reply.notFound();
 
     await prisma.$transaction(async (tx) => {
-      await tx.tareaEvidencia.create({
-        data: {
-          subtarea_id: id,
-          tarea_id: subt.tarea_id,
-          archivo_url: uploadUrl,
-          comentario: comentario || null
-        }
-      });
+      for (const url of uploadUrls) {
+        await tx.tareaEvidencia.create({
+          data: {
+            subtarea_id: id,
+            tarea_id: subt.tarea_id,
+            archivo_url: url,
+            comentario: comentario || null
+          }
+        });
+      }
       await tx.tareaDetalle.update({
         where: { id },
         data: {
@@ -163,13 +165,15 @@ export async function finishMobileTarea(request, reply) {
     if (!t) return reply.notFound();
 
     await prisma.$transaction(async (tx) => {
-      await tx.tareaEvidencia.create({
-        data: {
-          tarea_id: id,
-          archivo_url: uploadUrl,
-          comentario: comentario || null
-        }
-      });
+      for (const url of uploadUrls) {
+        await tx.tareaEvidencia.create({
+          data: {
+            tarea_id: id,
+            archivo_url: url,
+            comentario: comentario || null
+          }
+        });
+      }
       await tx.tarea.update({
         where: { id },
         data: {
@@ -182,4 +186,97 @@ export async function finishMobileTarea(request, reply) {
   }
 
   return reply.send({ ok: true, msg: "Evidencia enviada a revisión" });
+}
+
+export async function listMobileEpicas(request, reply) {
+  const { proyectoId } = request.params;
+  const rows = await prisma.epica.findMany({
+    where: { proyecto_id: proyectoId, eliminado: false },
+    orderBy: { nombre: "asc" },
+  });
+  return reply.send({ ok: true, rows });
+}
+
+export async function createMobileEpica(request, reply) {
+  const { proyectoId } = request.params;
+  const { nombre, descripcion } = request.body || {};
+  if (!nombre) return reply.badRequest("Nombre es obligatorio");
+
+  const row = await prisma.epica.create({
+    data: {
+      proyecto_id: proyectoId,
+      nombre: nombre.trim(),
+      descripcion: descripcion?.trim() || null,
+      estado: "pendiente",
+      avance: 0,
+      source: "MOBILE",
+    },
+  });
+  return reply.send({ ok: true, row });
+}
+
+export async function createMobileTarea(request, reply) {
+  const user = request.user;
+  const { proyectoId } = request.params;
+  const { nombre, descripcion, epica_id, fecha_inicio_plan, dias_plan } = request.body || {};
+
+  if (!nombre || !epica_id) return reply.badRequest("Nombre y Epica son obligatorios");
+
+  // Fechas por defecto si no vienen
+  const fip = fecha_inicio_plan ? new Date(fecha_inicio_plan) : new Date();
+  const dp = parseInt(dias_plan) || 1;
+  const ffp = new Date(fip.getTime() + (dp - 1) * 24 * 60 * 60 * 1000);
+
+  const row = await prisma.tarea.create({
+    data: {
+      proyecto_id: proyectoId,
+      epica_id,
+      nombre: nombre.trim(),
+      descripcion: descripcion?.trim() || null,
+      responsable_id: user.empleadoId,
+      estado: "pendiente",
+      avance: 0,
+      fecha_inicio_plan: fip,
+      fecha_fin_plan: ffp,
+      dias_plan: dp,
+      source: "MOBILE",
+    },
+  });
+
+  await recomputeEpicaFromTareas(prisma, epica_id);
+  return reply.send({ ok: true, row });
+}
+
+export async function createMobileSubtarea(request, reply) {
+  const user = request.user;
+  const { tareaId } = request.params;
+  const { titulo, descripcion, fecha_inicio_plan, dias_plan } = request.body || {};
+
+  if (!titulo) return reply.badRequest("Titulo es obligatorio");
+
+  const t = await prisma.tarea.findUnique({ where: { id: tareaId } });
+  if (!t) return reply.notFound("Tarea no encontrada");
+
+  const fip = fecha_inicio_plan ? new Date(fecha_inicio_plan) : new Date();
+  const dp = parseInt(dias_plan) || 1;
+  const ffp = new Date(fip.getTime() + (dp - 1) * 24 * 60 * 60 * 1000);
+
+  const row = await prisma.tareaDetalle.create({
+    data: {
+      tarea_id: tareaId,
+      titulo: titulo.trim(),
+      descripcion: descripcion?.trim() || null,
+      responsable_id: user.empleadoId,
+      estado: "pendiente",
+      avance: 0,
+      fecha_inicio_plan: fip,
+      fecha_fin_plan: ffp,
+      dias_plan: dp,
+    },
+  });
+
+  const tUpd = await recomputeTareaFromDetalles(prisma, tareaId);
+  if (tUpd?.epica_id) await recomputeEpicaFromTareas(prisma, tUpd.epica_id);
+
+  return reply.send({ ok: true, row });
 }

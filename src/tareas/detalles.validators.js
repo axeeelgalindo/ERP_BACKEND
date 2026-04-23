@@ -40,14 +40,14 @@ export const TareaDetalleCreateBody = Type.Object({
   estado: Type.Optional(Type.String()),
 
   // PLAN
-  fecha_inicio_plan: Type.String({ format: "date-time" }),
+  fecha_inicio_plan: Type.String(),
   dias_plan: Type.Integer({ minimum: 1 }),
-  fecha_fin_plan: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_fin_plan: Type.Optional(Type.String()),
 
   // REAL (opcional)
-  fecha_inicio_real: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_inicio_real: Type.Optional(Type.String()),
   dias_reales: Type.Optional(Type.Integer({ minimum: 1 })),
-  fecha_fin_real: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_fin_real: Type.Optional(Type.String()),
 
   // HORAS / COSTOS
   horas_plan: Type.Optional(Type.Number()),

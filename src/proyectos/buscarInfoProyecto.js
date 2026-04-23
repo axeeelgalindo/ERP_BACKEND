@@ -39,9 +39,13 @@ export async function buscarInfoProyecto(proyectoId) {
 
   if (!proyecto) return null;
 
-  // Cotizacion ACEPTADA más reciente vinculada al proyecto
-  const cotizacion = await prisma.cotizacion.findFirst({
-    where: { proyecto_id: proyectoId, eliminado: false, estado: "ACEPTADA" },
+  // Todas las cotizaciones vinculadas al proyecto que no estén rechazadas
+  const cotizaciones = await prisma.cotizacion.findMany({
+    where: { 
+      proyecto_id: proyectoId, 
+      eliminado: false, 
+      estado: { not: "RECHAZADA" } 
+    },
     orderBy: { fecha_documento: "desc" },
     select: {
       id: true, numero: true, subtotal: true, total: true,
@@ -129,5 +133,5 @@ export async function buscarInfoProyecto(proyectoId) {
     }
   });
 
-  return { proyecto, cotizacion, tareas, compras, rendiciones, miembros };
+  return { proyecto, cotizaciones, tareas, compras, rendiciones, miembros };
 }

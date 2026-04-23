@@ -1,10 +1,14 @@
 // src/mobile/routes.js
 import { mobileLogin } from "./auth.controllers.js";
 import { 
-  listMobileProyectos, 
+  listMobileProyectos,
   listMobileTareas, 
   startMobileTarea, 
-  finishMobileTarea 
+  finishMobileTarea,
+  listMobileEpicas,
+  createMobileEpica,
+  createMobileTarea,
+  createMobileSubtarea
 } from "./tareas.controllers.js";
 
 // Necesario si vas a usar multipart para recibir la foto
@@ -26,5 +30,11 @@ export default async function mobileRoutes(fastify, opts) {
     
     protectedFastify.post("/mobile/tareas/:id/iniciar", startMobileTarea);
     protectedFastify.post("/mobile/tareas/:id/finalizar", finishMobileTarea);
+
+    // ✅ CREACIÓN MOBILE
+    protectedFastify.get("/mobile/proyectos/:proyectoId/epicas", listMobileEpicas);
+    protectedFastify.post("/mobile/proyectos/:proyectoId/epicas/add", createMobileEpica);
+    protectedFastify.post("/mobile/proyectos/:proyectoId/tareas/add", createMobileTarea);
+    protectedFastify.post("/mobile/tareas/:tareaId/subtareas/add", createMobileSubtarea);
   });
 }

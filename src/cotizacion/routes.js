@@ -7,6 +7,7 @@ import {
   deleteCotizacion,
   importVentasCSV,
   uploadCotizacionDoc,
+  deleteCotizacionAdjunto,
   addPago,
   deletePago,
   uploadPagoDoc,
@@ -42,6 +43,7 @@ export default async function cotizacionesRoutes(server) {
   server.post("/cotizaciones/import/pdf/batch", importCotizacionesFromPdfBatch);
   server.post("/cotizaciones/import/rcv", importVentasCSV);
   server.post("/cotizaciones/:id/upload/:docType", uploadCotizacionDoc);
+  server.delete("/cotizaciones/adjuntos/:adjuntoId", deleteCotizacionAdjunto);
   
   // Pagos
   server.post("/cotizaciones/:id/pagos", addPago);

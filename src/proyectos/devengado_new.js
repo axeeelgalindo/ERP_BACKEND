@@ -39,12 +39,19 @@ function taskWeight(t) {
   return 1;
 }
 
-function pickBaseMoney(cotizacion, baseParam) {
-  const vendido = Number(cotizacion?.total || 0); // VENTA = TOTAL (PRECIO + IVA)
-  const subtotal = Number(cotizacion?.subtotal || 0);
+function pickBaseMoney(cotizaciones = [], baseParam) {
   const b = String(baseParam || "VENTA").toUpperCase();
-  const monto = b === "COTIZADO" ? vendido : vendido; // Por ahora ambos usan total si base es VENTA
-  return { fuente: b, valor: monto, valorVendido: vendido, valorSubtotal: subtotal };
+  
+  let totalVendido = 0;
+  let totalSubtotal = 0;
+
+  cotizaciones.forEach(c => {
+    totalVendido += Number(c.total || 0);
+    totalSubtotal += Number(c.subtotal || 0);
+  });
+
+  const monto = b === "COTIZADO" ? totalVendido : totalVendido; // Por ahora ambos usan total si base es VENTA
+  return { fuente: b, valor: monto, valorVendido: totalVendido, valorSubtotal: totalSubtotal };
 }
 
 export async function reporteDevengadoProfesional(request, reply) {
@@ -55,8 +62,8 @@ export async function reporteDevengadoProfesional(request, reply) {
     const info = await buscarInfoProyecto(proyectoId);
     if (!info) return reply.code(404).send({ ok: false, error: "Proyecto no encontrado" });
 
-    const { proyecto, cotizacion, tareas: tareasRaw, compras: comprasRaw, rendiciones, miembros } = info;
-    const moneyBase = pickBaseMoney(cotizacion, baseParam);
+    const { proyecto, cotizaciones = [], tareas: tareasRaw, compras: comprasRaw, rendiciones, miembros } = info;
+    const moneyBase = pickBaseMoney(cotizaciones, baseParam);
 
     let margenObjetivo = 0;
     let costoPlan = Number(proyecto?.presupuesto || 0);
@@ -64,21 +71,34 @@ export async function reporteDevengadoProfesional(request, reply) {
     let costoPlanCompras = 0;
     let totalHorasPlan = 0;
 
-    if (cotizacion?.ventas?.[0]) {
-      const v = cotizacion.ventas[0];
-      margenObjetivo = v.utilidadObjetivoPct || 0;
-      
-      const hhDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH');
-      costoPlanHH = hhDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
-      totalHorasPlan = hhDetalles.reduce((acc, d) => acc + (d.cantidad || 0), 0);
-      
-      const compraDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'COMPRA');
-      costoPlanCompras = compraDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+    // Agregamos datos de todas las ventas asociadas a las cotizaciones
+    let totalCostoVentas = 0;
+    let countVentas = 0;
+    let sumMargen = 0;
 
-      // Si el proyecto no tiene presupuesto seteado, calculamos desde el costeo de la venta
-      if (costoPlan === 0) {
-        costoPlan = v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
-      }
+    cotizaciones.forEach(c => {
+      (c.ventas || []).forEach(v => {
+        countVentas++;
+        sumMargen += (v.utilidadObjetivoPct || 0);
+        
+        const hhDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'HH');
+        costoPlanHH += hhDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+        totalHorasPlan += hhDetalles.reduce((acc, d) => acc + (d.cantidad || 0), 0);
+        
+        const compraDetalles = v.detalles.filter(d => String(d.modo).toUpperCase() === 'COMPRA');
+        costoPlanCompras += compraDetalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+
+        totalCostoVentas += v.detalles.reduce((acc, d) => acc + (d.costoTotal || 0), 0);
+      });
+    });
+
+    if (countVentas > 0) {
+      margenObjetivo = sumMargen / countVentas; // Promedio simple de márgenes
+    }
+
+    // Si el proyecto no tiene presupuesto seteado, calculamos desde el costeo de las ventas
+    if (costoPlan === 0) {
+      costoPlan = totalCostoVentas;
     }
 
     const base = { ...moneyBase, margenObjetivo, costoPlan, costoPlanHH, costoPlanCompras };

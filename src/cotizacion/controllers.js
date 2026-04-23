@@ -136,6 +136,7 @@ export const listCotizaciones = async (request, reply) => {
           where: { eliminado: false },
           include: { detalles: true },
         },
+        adjuntos: { orderBy: { creado_en: "asc" } }
       },
     });
 
@@ -189,6 +190,7 @@ export const getCotizacion = async (request, reply) => {
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
         pagos: { where: { eliminado: false }, orderBy: { fecha: "desc" } },
+        adjuntos: { orderBy: { creado_en: "asc" } }
       },
     });
 
@@ -252,6 +254,7 @@ export const createCotizacion = async (request, reply) => {
     const { empresaId, userId } = getScope(request);
 
     const {
+      proyecto_id,
       cliente_id,
       cliente_responsable_id,
 
@@ -395,9 +398,9 @@ export const createCotizacion = async (request, reply) => {
       const cot = await tx.cotizacion.create({
         data: {
           empresa_id: empresaId,
-          proyecto_id: null,
+          proyecto_id: proyecto_id || null,
           cliente_id,
-          cliente_responsable_id: responsable?.id ?? null,
+          cliente_responsable_id: cliente_responsable_id || null,
 
           vendedor_id: userId,
           asunto: asunto || null,
@@ -478,6 +481,7 @@ export const updateCotizacion = async (request, reply) => {
     const { id } = request.params;
 
     const {
+      proyecto_id,
       cliente_id,
       cliente_responsable_id,
 
@@ -497,8 +501,6 @@ export const updateCotizacion = async (request, reply) => {
 
       ventaIds, // puede ser [] o undefined
       glosas, // puede venir [] o undefined
-
-      proyecto_id,
     } = request.body || {};
 
     // =========================
@@ -1302,6 +1304,7 @@ export const uploadCotizacionDoc = async (request, reply) => {
     const est = cot.estado;
     const dateUpdates = {};
 
+    // Lógica de avance de estados según el tipo de documento (solo cambia estado al subir el primero)
     if (docType === "oc" && (est === "COTIZACION" || est === "ACEPTADA")) {
       nuevoEstado = "ORDEN_VENTA";
       if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
@@ -1321,24 +1324,67 @@ export const uploadCotizacionDoc = async (request, reply) => {
       if (!cot.fecha_facturada) dateUpdates.fecha_facturada = new Date();
     }
 
-    const updated = await prisma.cotizacion.update({
-      where: { id },
-      data: { 
-        [fieldName]: fileUrl,
-        estado: nuevoEstado,
-        ...dateUpdates
-      },
-      include: {
-        cliente: true,
-        cliente_responsable: true,
-        proyecto: true,
-        vendedor: { select: { id: true, nombre: true, correo: true } },
-        glosas: { orderBy: { orden: "asc" } },
-        ventas: { include: { detalles: true } },
-      }
-    });
+    if (docType === "oc") {
+      // OC es único, seguimos usando el campo en Cotizacion
+      const updated = await prisma.cotizacion.update({
+        where: { id },
+        data: { 
+          [fieldName]: fileUrl,
+          estado: nuevoEstado,
+          ...dateUpdates
+        },
+        include: {
+          cliente: true,
+          cliente_responsable: true,
+          proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+          ventas: { include: { detalles: true } },
+          pagos: true,
+          adjuntos: { orderBy: { creado_en: "asc" } }
+        }
+      });
+      return reply.send(updated);
+    } else {
+      // Otros tipos son múltiples, usamos la tabla CotizacionAdjunto
+      const porcentaje = Number(data.fields?.porcentaje?.value || 0);
 
-    return reply.send(updated);
+      await prisma.$transaction(async (tx) => {
+        await tx.cotizacionAdjunto.create({
+          data: {
+            cotizacion_id: id,
+            tipo: docType,
+            url: fileUrl,
+            nombre: data.filename || "Documento",
+            porcentaje: porcentaje
+          }
+        });
+
+        // Actualizamos estado de la cotización si corresponde
+        await tx.cotizacion.update({
+          where: { id },
+          data: {
+            estado: nuevoEstado,
+            ...dateUpdates
+          }
+        });
+      });
+
+      const updated = await prisma.cotizacion.findFirst({
+        where: { id },
+        include: {
+          cliente: true,
+          cliente_responsable: true,
+          proyecto: true,
+          vendedor: { select: { id: true, nombre: true, correo: true } },
+          glosas: { orderBy: { orden: "asc" } },
+          ventas: { include: { detalles: true } },
+          pagos: true,
+          adjuntos: { orderBy: { creado_en: "asc" } }
+        }
+      });
+      return reply.send(updated);
+    }
   } catch (e) {
     console.error("Error uploadCotizacionDoc:", e);
     return reply.code(500).send({ error: "Error al subir documento", detalle: e.message });
@@ -1449,3 +1495,33 @@ export const uploadPagoDoc = async (request, reply) => {
   }
 };
 
+export const deleteCotizacionAdjunto = async (request, reply) => {
+  try {
+    const { empresaId } = getScope(request);
+    const { adjuntoId } = request.params;
+
+    const adjunto = await prisma.cotizacionAdjunto.findFirst({
+      where: { id: adjuntoId },
+      include: { cotizacion: true }
+    });
+
+    if (!adjunto || adjunto.cotizacion.empresa_id !== empresaId) {
+      return reply.code(404).send({ error: "Adjunto no encontrado" });
+    }
+
+    await prisma.cotizacionAdjunto.delete({
+      where: { id: adjuntoId }
+    });
+
+    // Opcionalmente eliminar el archivo físico si se desea
+    // try {
+    //   const fullPath = path.resolve(process.cwd(), adjunto.url.startsWith("/") ? adjunto.url.slice(1) : adjunto.url);
+    //   await fs.unlink(fullPath);
+    // } catch (err) { console.error("Error unlinking file:", err); }
+
+    return reply.send({ ok: true });
+  } catch (e) {
+    console.error("Error deleteCotizacionAdjunto:", e);
+    return reply.code(500).send({ error: "Error al eliminar adjunto", detalle: e.message });
+  }
+};

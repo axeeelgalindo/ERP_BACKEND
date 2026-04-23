@@ -525,19 +525,34 @@ export async function updateTarea(request, reply) {
     const ffp = addDaysInclusive(fip, diasPlan);
 
     // REAL: fecha inicio + días => fecha fin (opcional)
-    const fir = Object.prototype.hasOwnProperty.call(data, "fecha_inicio_real")
+    let fir = Object.prototype.hasOwnProperty.call(data, "fecha_inicio_real")
       ? parseDate(data.fecha_inicio_real)
       : tarea.fecha_inicio_real;
 
-    const diasReales = Object.prototype.hasOwnProperty.call(data, "dias_reales")
+    let ffr = Object.prototype.hasOwnProperty.call(data, "fecha_fin_real")
+      ? parseDate(data.fecha_fin_real)
+      : tarea.fecha_fin_real;
+
+    let diasReales = Object.prototype.hasOwnProperty.call(data, "dias_reales")
       ? toIntOrNull(data.dias_reales)
       : tarea.dias_reales;
 
-    let ffr = tarea.fecha_fin_real;
-    if (fir && diasReales && diasReales > 0) {
+    // ✅ Automatismo: Si el nuevo estado es completada y no hay fechas reales, usamos hoy
+    if (data.estado === "completada" || (data.avance >= 100)) {
+      if (!fir) fir = new Date();
+      if (!ffr) ffr = new Date();
+    }
+
+    // Calcular días reales si tenemos inicio y fin pero no el contador
+    if (fir && ffr && (!diasReales || diasReales <= 0)) {
+      const a0 = new Date(fir.getFullYear(), fir.getMonth(), fir.getDate());
+      const b0 = new Date(ffr.getFullYear(), ffr.getMonth(), ffr.getDate());
+      diasReales = Math.max(1, Math.round((b0.getTime() - a0.getTime()) / (24 * 60 * 60 * 1000)) + 1);
+    }
+
+    // Calcular fecha fin si tenemos inicio y días
+    if (fir && diasReales && diasReales > 0 && !ffr) {
       ffr = addDaysInclusive(fir, diasReales);
-    } else if (!fir || !diasReales || diasReales <= 0) {
-      ffr = null;
     }
 
     const diasDesviacion =

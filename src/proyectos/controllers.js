@@ -1104,3 +1104,40 @@ export async function addProyectoRetraso(req, reply) {
   });
   return reply.send({ ok: true, retraso });
 }
+export async function addMiembroProyecto(req, reply) {
+  const scope = resolveScope(req);
+  const { id } = req.params;
+  const { empleado_id } = req.body || {};
+
+  if (!empleado_id) return reply.code(400).send({ ok: false, message: "Falta empleado_id" });
+
+  const p = await prisma.proyecto.findUnique({
+    where: { id },
+    select: { id: true, empresa_id: true }
+  });
+  if (!p) return reply.code(404).send({ ok: false, message: "Proyecto no encontrado" });
+  if (!scope.isMaster && p.empresa_id !== scope.empresaId) {
+    return reply.code(403).send({ ok: false, message: "No autorizado" });
+  }
+
+  // Verificar si ya es miembro
+  const exists = await prisma.proyectoMiembro.findUnique({
+    where: { proyecto_id_empleado_id: { proyecto_id: id, empleado_id } }
+  });
+
+  if (exists) {
+    return reply.send({ ok: true, message: "Ya es miembro" });
+  }
+
+  const miembro = await prisma.proyectoMiembro.create({
+    data: {
+      proyecto_id: id,
+      empleado_id: empleado_id
+    },
+    include: {
+      empleado: { include: { usuario: true } }
+    }
+  });
+
+  return reply.send({ ok: true, miembro });
+}

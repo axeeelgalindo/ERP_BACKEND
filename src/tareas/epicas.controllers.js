@@ -19,6 +19,16 @@ const daysBetweenInclusive = (start, end) => {
   return diffDays + 1;
 };
 
+const parseDate = (d) => {
+  if (!d) return null;
+  const s = String(d);
+  return s.includes("T") ? new Date(s) : new Date(`${s.slice(0, 10)}T12:00:00`);
+};
+
+const addDaysInclusive = (date, dias) => {
+  return new Date(date.getTime() + (dias - 1) * 24 * 60 * 60 * 1000);
+};
+
 export async function assertEpicaInEmpresaYProyecto(
   tx,
   epicaId,
@@ -226,7 +236,6 @@ export async function listEpicas(request, reply) {
       creado_en: true,
       actualizado_en: true,
       eliminado: true,
-      eliminado_en: true,
     },
   });
 
@@ -278,6 +287,11 @@ export async function createEpica(request, reply) {
   });
   if (!p) return httpError(reply, 403, "Proyecto no pertenece a tu empresa");
 
+  const { fecha_inicio_plan, dias_plan } = body;
+  const fip = parseDate(fecha_inicio_plan);
+  const dp = parseInt(dias_plan) || null;
+  const ffp = fip && dp ? addDaysInclusive(fip, dp) : null;
+
   const row = await prisma.epica.create({
     data: {
       proyecto_id,
@@ -288,6 +302,9 @@ export async function createEpica(request, reply) {
       source: "MANUAL",
       es_planificado,
       responsable_id: responsable_id || null,
+      fecha_inicio_plan: fip,
+      fecha_fin_plan: ffp,
+      dias_plan: dp
     },
   });
 

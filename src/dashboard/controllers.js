@@ -7,29 +7,34 @@ const takeFirst = (arr, n) => (Array.isArray(arr) ? arr.slice(0, n) : []);
 
 export const getDashboardData = async (request, reply) => {
   try {
-    const { scope } = request;
+    const { scope, query } = request;
     const empresa_id = scope?.empresaId;
+    const periodo = query?.periodo || 'mensual'; // 'semanal', 'mensual', 'anual'
 
     if (!empresa_id) {
       return reply.badRequest("No se encontró empresa_id en el scope.");
     }
 
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
+    // Usar la fecha de referencia si viene en query, de lo contrario la actual
+    const now = query?.refDate ? new Date(query.refDate) : new Date();
+    
+    let periodStart = new Date(now);
+    let periodEnd = new Date(now);
 
-    // Rango de la semana actual (Lunes a Domingo)
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1)); // Lunes
-    startOfWeek.setHours(0, 0, 0, 0);
-
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6); // Domingo
-    endOfWeek.setHours(23, 59, 59, 999);
-
-    // Rango del mes actual
-    const startOfMonth = new Date(currentYear, currentMonth, 1);
-    const endOfMonth = new Date(currentYear, currentMonth + 1, 0, 23, 59, 59, 999);
+    if (periodo === 'semanal') {
+      periodStart.setDate(now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1)); // Lunes
+      periodStart.setHours(0, 0, 0, 0);
+      periodEnd = new Date(periodStart);
+      periodEnd.setDate(periodStart.getDate() + 6);
+      periodEnd.setHours(23, 59, 59, 999);
+    } else if (periodo === 'anual') {
+      periodStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+      periodEnd = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+    } else {
+      // mensual por defecto
+      periodStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    }
 
     // ============================================
     // QUERIES A LA BASE DE DATOS
@@ -77,10 +82,18 @@ export const getDashboardData = async (request, reply) => {
       }
     });
 
-    // 4. Cotizaciones
+    const reqYear = new Date().getFullYear();
+    const startYear = proyectos.reduce((min, p) => {
+      if (!p.creada_en && !p.createdAt) return min;
+      const py = new Date(p.creada_en || p.createdAt).getFullYear();
+      return isNaN(py) ? min : Math.min(min, py);
+    }, reqYear);
+    const availableYears = Array.from({ length: reqYear - startYear + 1 }, (_, i) => startYear + i);
+
+    // 4. Cotizaciones (including pagos for exact cash-flow dates)
     const cotizaciones = await prisma.cotizacion.findMany({
       where: baseWhere,
-      include: { cliente: true, glosas: true }
+      include: { cliente: true, glosas: true, pagos: true }
     });
 
     // 5. Clientes (para la tabla de últimos clientes)
@@ -97,16 +110,10 @@ export const getDashboardData = async (request, reply) => {
     // ============================================
     // HELPERS DE FILTRADO (REALES)
     // ============================================
-    const isThisMonth = (dStr) => {
+    const isThisPeriod = (dStr) => {
       if (!dStr) return false;
       const d = new Date(dStr);
-      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-    };
-
-    const isThisWeek = (dStr) => {
-      if (!dStr) return false;
-      const d = new Date(dStr);
-      return d >= startOfWeek && d <= endOfWeek;
+      return d >= periodStart && d <= periodEnd;
     };
 
     // --- BREAKDOWN ARRAYS ---
@@ -129,7 +136,7 @@ export const getDashboardData = async (request, reply) => {
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
       }
-      if (isThisMonth(v.fecha)) {
+      if (isThisPeriod(v.fecha)) {
         b_facturadoMes.push({ 
           folio: v.folio || v.id, 
           cliente: v.ordenVenta?.cliente?.nombre || v.Cliente?.nombre || "N/A",
@@ -141,9 +148,9 @@ export const getDashboardData = async (request, reply) => {
       return acc;
     }, 0);
 
-    // 1a. Ventas Mes (Cotizaciones que pasaron a OV este mes)
+    // 1a. Ventas Periodo (Cotizaciones que pasaron a OV este periodo)
     const ventasMes = cotizaciones.reduce((acc, c) => {
-      if (isThisMonth(c.fecha_ov)) {
+      if (isThisPeriod(c.fecha_ov)) {
         b_ventasMes.push({ 
           id: c.id, 
           cliente: c.cliente?.nombre || "N/A",
@@ -156,9 +163,9 @@ export const getDashboardData = async (request, reply) => {
       return acc;
     }, 0);
 
-    // 1b. Cotizado Mes (Total de cotizaciones creadas este mes)
+    // 1b. Cotizado Periodo (Total de cotizaciones creadas este periodo)
     const cotizadoMes = cotizaciones.reduce((acc, c) => {
-      if (isThisMonth(c.creada_en)) {
+      if (isThisPeriod(c.creada_en)) {
         b_cotizadoMes.push({ 
           id: c.id, 
           cliente: c.cliente?.nombre || "N/A",
@@ -171,10 +178,11 @@ export const getDashboardData = async (request, reply) => {
       return acc;
     }, 0);
 
-    // 2. Compras Proyectadas Semana (Nuevas Órdenes de Compra generadas esta semana)
+    // 2. Compras Proyectadas Periodo (Nuevas Órdenes de Compra generadas este periodo)
     const comprasSemana = compras.reduce((acc, c) => {
-      if (isThisWeek(c.creada_en || c.fecha)) {
-        b_comprasSemana.push({ numero: c.numero, total: c.total, fecha: c.creada_en || c.fecha });
+      const dateC = c.fecha_docto || c.creada_en || c.fecha;
+      if (isThisPeriod(dateC)) {
+        b_comprasSemana.push({ numero: c.numero, total: c.total, fecha: dateC });
         return acc + (Number(c.total) || 0);
       }
       return acc;
@@ -191,24 +199,45 @@ export const getDashboardData = async (request, reply) => {
       return 1;
     }
 
-    // 3. Generado Semana (Devengado Incremental de los últimos 7 días)
-    const sevenDaysAgo = new Date(now);
-    sevenDaysAgo.setDate(now.getDate() - 7);
+    // 3. Generado Periodo (Devengado Incremental desde el inicio del periodo hasta el fin del periodo)
+    const pastDate = new Date(periodStart);
+    const endDate = new Date(periodEnd);
 
     const taskIdList = proyectos.flatMap(p => p.tareas.map(t => t.id));
-    const historial7Dias = await prisma.$queryRaw`
+    
+    // Historial al INICIO del periodo
+    const historialPastDate = await prisma.$queryRaw`
       SELECT DISTINCT ON (tarea_id) tarea_id, to_avance 
       FROM "TareaHistorial" 
       WHERE tarea_id = ANY(${taskIdList}) 
-        AND occurred_at <= ${sevenDaysAgo} 
+        AND occurred_at <= ${pastDate} 
         AND to_avance IS NOT NULL 
       ORDER BY tarea_id, occurred_at DESC
     `;
-    const mapHistorial = new Map(historial7Dias.map(r => [r.tarea_id, Number(r.to_avance)]));
+    const mapHistorialStart = new Map(historialPastDate.map(r => [r.tarea_id, Number(r.to_avance)]));
+
+    const isPastPeriod = endDate < new Date();
+    const isFuturePeriod = pastDate > new Date();
+
+    let mapHistorialEnd = new Map();
+    if (isPastPeriod) {
+      const historialEndDate = await prisma.$queryRaw`
+        SELECT DISTINCT ON (tarea_id) tarea_id, to_avance 
+        FROM "TareaHistorial" 
+        WHERE tarea_id = ANY(${taskIdList}) 
+          AND occurred_at <= ${endDate} 
+          AND to_avance IS NOT NULL 
+        ORDER BY tarea_id, occurred_at DESC
+      `;
+      mapHistorialEnd = new Map(historialEndDate.map(r => [r.tarea_id, Number(r.to_avance)]));
+    }
 
     const devengadoSemana = proyectos.reduce((accTotal, p) => {
-      const isActivo = p.estado && (p.estado.toLowerCase() === 'activo' || p.estado.toLowerCase() === 'en_progreso');
-      if (!isActivo) return accTotal;
+      if (isFuturePeriod) return accTotal;
+
+      // Filtrar proyectos creados despues del final de este periodo (eliminando "ruido" en el pasado)
+      const dateProj = new Date(p.creada_en || p.createdAt);
+      if (!isNaN(dateProj) && dateProj > endDate) return accTotal;
 
       const valor = Number(p.presupuesto) || 0;
       if (valor <= 0) return accTotal;
@@ -222,9 +251,12 @@ export const getDashboardData = async (request, reply) => {
         p.tareas.forEach(t => {
           const w = taskWeight(t);
           sumW += w;
-          const aAhora = Math.max(0, Math.min(1, Number(t.avance || 0) / 100));
+          
+          const valEnd = isPastPeriod ? (mapHistorialEnd.get(t.id) ?? 0) : (t.avance || 0);
+          const aAhora = Math.max(0, Math.min(1, Number(valEnd) / 100));
           sumWA_Ahora += (w * aAhora);
-          const aHace7_Val = mapHistorial.get(t.id) ?? 0;
+          
+          const aHace7_Val = mapHistorialStart.get(t.id) ?? 0;
           const aHace7 = Math.max(0, Math.min(1, aHace7_Val / 100));
           sumWA_Hace7 += (w * aHace7);
 
@@ -258,29 +290,31 @@ export const getDashboardData = async (request, reply) => {
       return accTotal;
     }, 0);
 
-    // 4. Flujo Caja Mes (Entradas y Salidas reales del mes)
-    const ingresosPagadosMes = ventas.reduce((acc, v) => {
-      // ✅ Considerar sólo ventas facturadas (con folio/tipo_doc) o Cotizaciones en FACTURADA/PAGADA
-      const isFacturadaOC = v.ordenVenta && ['FACTURADA', 'PAGADA'].includes(v.ordenVenta.estado?.toUpperCase());
-      const isImportedRCV = !!(v.folio || v.tipo_doc);
-      if (!isFacturadaOC && !isImportedRCV) return acc;
-
-      let totalVenta = v.total || 0; 
-      if (!v.total && v.detalles) {
-          totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
+    // 4. Flujo Caja Periodo — Ingresos basados en pagos individuales (CotizacionPago)
+    // Cada hito de pago registrado en una cotización se contabiliza según su propia fecha
+    const ingresosPagadosMes = cotizaciones.reduce((acc, cot) => {
+      if (!Array.isArray(cot.pagos) || cot.pagos.length === 0) return acc;
+      let sumPeriodo = 0;
+      for (const pago of cot.pagos) {
+        if (isThisPeriod(pago.fecha)) {
+          const monto = Number(pago.monto || 0);
+          b_ingresosMes.push({
+            concepto: `COT #${cot.numero} — Pago`,
+            cliente: cot.cliente?.nombre || 'N/A',
+            total: monto,
+            fecha_pago: pago.fecha,
+          });
+          sumPeriodo += monto;
+        }
       }
-      const isPagada = v.ordenVenta?.estado === 'PAGADA';
-      if (isPagada && isThisMonth(v.ordenVenta?.actualizado_en)) {
-         b_ingresosMes.push({ concepto: `Venta ${v.folio || v.id}`, total: totalVenta, fecha_pago: v.ordenVenta?.actualizado_en });
-         return acc + totalVenta;
-      }
-      return acc;
+      return acc + sumPeriodo;
     }, 0);
 
     const egresosPagadosMes = compras.reduce((acc, c) => {
       const isPagada = c.estado === 'PAGADA' || c.estado === 'PAGADO';
-      if (isPagada && isThisMonth(c.actualizado_en)) {
-         b_egresosMes.push({ concepto: `Compra ${c.numero}`, proveedor: c.proveedor?.nombre, total: c.total, fecha_pago: c.actualizado_en });
+      const dateOut = c.fecha_docto || c.actualizado_en;
+      if (isPagada && isThisPeriod(dateOut)) {
+         b_egresosMes.push({ concepto: `Compra ${c.numero}`, proveedor: c.proveedor?.nombre, total: c.total, fecha_pago: dateOut });
          return acc + (Number(c.total) || 0);
        }
       return acc;
@@ -303,8 +337,17 @@ export const getDashboardData = async (request, reply) => {
     // DATA PARA PIE CHARTS
     // ============================================
 
-    // A. Trabajos Mes
-    const proyectosMes = proyectos.filter(p => isThisMonth(p.fecha_inicio_plan) || isThisMonth(p.fecha_fin_plan) || p.estado?.includes('curso') || p.estado === 'activo');
+    // A. Trabajos Periodo
+    const proyectosMes = proyectos.filter(p => {
+      // Solo incluirlos en la torta si el periodo recubre su inicio, su fin, O si estamos en el presente (isThisPeriod) y está activo
+      const overlapPlan = isThisPeriod(p.fecha_inicio_plan) || isThisPeriod(p.fecha_fin_plan);
+      // Incluir "activos" solo si el periodo consultado es el Actual o abarca la fecha de hoy
+      const includesHoy = periodStart <= new Date() && periodEnd >= new Date();
+      const isActiveNow = p.estado?.toLowerCase().includes('curso') || p.estado?.toLowerCase() === 'activo';
+      
+      return overlapPlan || (includesHoy && isActiveNow);
+    });
+    
     const proyectosEnCurso = proyectosMes.filter(p => p.estado?.toLowerCase().includes('curso') || p.estado?.toLowerCase() === 'activo').length;
     const proyectosFinalizados = proyectosMes.filter(p => p.estado?.toLowerCase().includes('terminad') || p.estado?.toLowerCase().includes('finaliz')).length;
     const proyectosEspera = proyectosMes.length - (proyectosEnCurso + proyectosFinalizados);
@@ -315,8 +358,8 @@ export const getDashboardData = async (request, reply) => {
       { id: 2, value: proyectosEspera > 0 ? proyectosEspera : 0, label: 'Espera/Otros', color: '#f59e0b' },
     ];
 
-    // B. Cotizaciones Mes
-    const cotizacionesMesData = cotizaciones.filter(c => isThisMonth(c.creada_en));
+    // B. Cotizaciones Periodo
+    const cotizacionesMesData = cotizaciones.filter(c => isThisPeriod(c.creada_en));
     let cotAprobadas = 0; let cotRechazadas = 0; let cotEnviadas = 0;
     cotizacionesMesData.forEach(c => {
       const estado = (c.estado || '').toLowerCase();
@@ -375,7 +418,7 @@ export const getDashboardData = async (request, reply) => {
     compras.forEach(c => {
       // Solo tomamos compras pagadas
       if (c.estado !== 'PAGADA' && c.estado !== 'PAGADO') return;
-      const dateC = new Date(c.fecha || c.createdAt || c.creada_en);
+      const dateC = new Date(c.fecha_docto || c.fecha || c.createdAt || c.creada_en);
       if(isNaN(dateC)) return;
       
       const mNode = monthsData.find(m => m.date.getMonth() === dateC.getMonth() && m.date.getFullYear() === dateC.getFullYear());
@@ -421,6 +464,7 @@ export const getDashboardData = async (request, reply) => {
         comprasSemana,
         devengadoSemana,
         flujoCajaMes,
+        ingresosMes: ingresosPagadosMes,
       },
       charts: {
         trabajosMes: pieTrabajos,
@@ -429,6 +473,7 @@ export const getDashboardData = async (request, reply) => {
         evolucion6Meses: barChartDataset
       },
       recents,
+      availableYears,
       flags: {
          proyectosMesActivo: proyectosMes.length > 0,
          cotizacionesMesDataActivo: cotizacionesMesData.length > 0

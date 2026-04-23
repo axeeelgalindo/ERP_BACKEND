@@ -371,17 +371,8 @@ export async function updateTareaDetalle(request, reply) {
 
     // Caso raro: solo mandan fin_real pero no inicio_real
     if (!fir && ffr) {
-      fir = current.fecha_inicio_real || current.fecha_inicio_plan || null;
-      if (fir) {
-        diasReales = daysBetweenInclusive(fir, ffr);
-      }
-    }
-
-    // Si los datos reales no son coherentes, limpiamos
-    if (!fir || !ffr || !diasReales || diasReales <= 0) {
-      fir = null;
-      ffr = null;
-      diasReales = null;
+      fir = current.fecha_inicio_real || current.fecha_inicio_plan || new Date();
+      diasReales = daysBetweenInclusive(fir, ffr);
     }
 
     // ===== OVERRIDE SEGÚN ACCIÓN (checkbox) =====

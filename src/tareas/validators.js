@@ -7,8 +7,8 @@ export const TareaQuery = Type.Object({
   proyectoId: Type.Optional(Id),
   responsableId: Type.Optional(Id),
   estado: Type.Optional(Type.String()),
-  desde: Type.Optional(Type.String({ format: "date-time" })),
-  hasta: Type.Optional(Type.String({ format: "date-time" })),
+  desde: Type.Optional(Type.String()),
+  hasta: Type.Optional(Type.String()),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
   sort: Type.Optional(Type.String()),
@@ -25,15 +25,15 @@ export const TareaCreateBody = Type.Object({
   prioridad: Type.Optional(Type.Integer()),
 
   // 👉 INPUT REAL del frontend: fecha_inicio_plan + dias_plan
-  fecha_inicio_plan: Type.String({ format: "date-time" }),
+  fecha_inicio_plan: Type.String(),
   dias_plan: Type.Integer({ minimum: 1 }),
   // se calcula en backend, por eso OPCIONAL
-  fecha_fin_plan: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_fin_plan: Type.Optional(Type.String()),
 
   // REAL (opcional)
-  fecha_inicio_real: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_inicio_real: Type.Optional(Type.String()),
   dias_reales: Type.Optional(Type.Integer({ minimum: 1 })),
-  fecha_fin_real: Type.Optional(Type.String({ format: "date-time" })),
+  fecha_fin_real: Type.Optional(Type.String()),
 
   // Subtareas opcionales
   detalles: Type.Optional(
@@ -48,19 +48,19 @@ export const TareaCreateBody = Type.Object({
         ),
 
         // PLAN subtarea
-        fecha_inicio_plan: Type.String({ format: "date-time" }),
+        fecha_inicio_plan: Type.String(),
         dias_plan: Type.Integer({ minimum: 1 }),
         fecha_fin_plan: Type.Optional(
-          Type.String({ format: "date-time" })
+          Type.String()
         ),
 
         // REAL subtarea (opcional)
         fecha_inicio_real: Type.Optional(
-          Type.String({ format: "date-time" })
+          Type.String()
         ),
         dias_reales: Type.Optional(Type.Integer({ minimum: 1 })),
         fecha_fin_real: Type.Optional(
-          Type.String({ format: "date-time" })
+          Type.String()
         ),
       })
     )

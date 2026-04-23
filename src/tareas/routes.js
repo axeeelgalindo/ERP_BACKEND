@@ -12,9 +12,10 @@ import {
   createTareasBatch,
   unassignEpicaFromTarea,
   addDetallesToTarea,
-  // ✅ NUEVO (debes exportarlo desde controllers.js)
   listTareasByEpica,
+  // ...otros
 } from "./controllers.js";
+import { processTransition } from "./transition.controllers.js";
 
 import {
   TareaCreateBody,
@@ -130,6 +131,9 @@ export default async function tareasRoutes(server) {
 
   // ✅ quitar épica (volver a "Sin épica")
   server.patch("/tareas/unassign-epica/:tarea_id", { ...guard }, unassignEpicaFromTarea);
+
+  // ✅ Transiciones interactivas (Kanban)
+  server.post("/tareas/:id/transition", { ...guard }, processTransition);
 
   // ✅ crear varias tareas en una épica
   server.post("/tareas/batch-add", { ...guard }, createTareasBatch);

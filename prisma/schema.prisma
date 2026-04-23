@@ -720,6 +720,7 @@ model Cotizacion {
 
   glosas CotizacionGlosa[]
   pagos  CotizacionPago[]
+  adjuntos CotizacionAdjunto[]
 
   ventas  Venta[]
   compras Compra[]
@@ -775,6 +776,21 @@ model CotizacionPago {
   actualizado_en DateTime  @updatedAt
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
+  
+  @@index([cotizacion_id])
+}
+
+model CotizacionAdjunto {
+  id            String     @id @default(cuid())
+  cotizacion_id String
+  cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
+  
+  tipo          String     // "hes", "fac", "comprobante", "gd"
+  url           String
+  nombre        String?    // nombre original del archivo
+  porcentaje    Float      @default(0)
+  
+  creado_en     DateTime   @default(now())
   
   @@index([cotizacion_id])
 }
