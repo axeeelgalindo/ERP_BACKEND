@@ -426,6 +426,8 @@ export const createCotizacion = async (request, reply) => {
             create: glosasFinal.map((g, idx) => ({
               descripcion: g.descripcion,
               monto: round0(g.monto || 0), // BRUTO
+              cantidad: Number(g.cantidad || 1),
+              precio_unitario: Number(g.precio_unitario || g.monto || 0),
               manual: !!g.manual,
               orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
               // si hay general, esto igual debería venir 0, pero lo guardamos tal cual:
