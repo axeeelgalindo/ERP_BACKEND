@@ -152,8 +152,6 @@ export async function createRendicion(request, reply) {
   }
 
   const items = normalizeItems(body.items || []);
-  if (!items.length)
-    return reply.code(400).send({ error: "Debe venir al menos 1 item" });
 
   const monto_total = totalFromItems(items);
 
@@ -464,8 +462,6 @@ export async function updateRendicion(request, reply) {
       // Si mandan items => reemplazo completo (deleteMany + create)
       if (body.items) {
         const items = normalizeItems(body.items || []);
-        if (!items.length)
-          return httpError(reply, 400, "Debe venir al menos 1 item");
 
         const monto_total = totalFromItems(items);
 
