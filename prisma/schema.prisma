@@ -149,9 +149,47 @@ model Empleado {
   // 👇 HH ya calculadas por periodo (derivado del Excel)
   hhRegistros   HHEmpleado[]
   detalleVentas detalleVenta[]
+  documentos    EmpleadoDocumento[]
+  asistencias   Asistencia[]
 
   @@index([afp_id])
   @@index([salud_id])
+}
+
+model EmpleadoDocumento {
+  id          String   @id @default(cuid())
+  empleado_id String
+  empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  
+  nombre      String
+  es_carpeta  Boolean  @default(false)
+  url         String?
+  tamano      String?
+  subido_por  String?
+  
+  parent_id   String?
+  parent      EmpleadoDocumento?  @relation("JerarquiaDocumental", fields: [parent_id], references: [id], onDelete: Cascade)
+  children    EmpleadoDocumento[] @relation("JerarquiaDocumental")
+  
+  creado_en   DateTime @default(now())
+
+  @@index([empleado_id])
+  @@index([parent_id])
+}
+
+model Asistencia {
+  id             String    @id @default(cuid())
+  empleado_id    String
+  empleado       Empleado  @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  fecha          DateTime  @db.Date
+  estado         String    @default("AUSENTE") // AUSENTE, PRESENTE, JUSTIFICADO, PERMISO
+  observacion    String?   @db.Text
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime  @updatedAt
+
+  @@unique([empleado_id, fecha])
+  @@index([empleado_id])
+  @@index([fecha])
 }
 
 model AFPConfig {

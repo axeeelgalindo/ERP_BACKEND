@@ -9,6 +9,13 @@ import {
   updateEmpleadoUsuario
 } from "./controllers.js";
 
+import {
+  listDocumentos,
+  createCarpeta,
+  uploadDocumento,
+  deleteDocumento
+} from "./documentos.controllers.js";
+
 export default async function empleadosRoutes(server) {
   server.addHook("preHandler", server.authenticate);
 
@@ -23,4 +30,10 @@ export default async function empleadosRoutes(server) {
 
   // ✅ nuevo: editar rol/clave del usuario asociado al empleado
   server.patch("/empleados/:id/usuario", updateEmpleadoUsuario);
+
+  // ✅ gestor documental
+  server.get("/empleados/:id/documentos", listDocumentos);
+  server.post("/empleados/:id/documentos/carpeta", createCarpeta);
+  server.post("/empleados/:id/documentos/upload", uploadDocumento);
+  server.delete("/empleados/documentos/:docId", deleteDocumento);
 }

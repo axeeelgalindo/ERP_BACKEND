@@ -300,7 +300,14 @@ export const updateEmpleado = async (request, reply) => {
         }
       : {}),
     ...(body.sueldo_base !== undefined
-      ? { sueldo_base: body.sueldo_base }
+      ? {
+          sueldo_base:
+            typeof body.sueldo_base === "number"
+              ? body.sueldo_base
+              : Number.isFinite(Number(body.sueldo_base))
+              ? Number(body.sueldo_base)
+              : null,
+        }
       : {}),
     ...(body.activo !== undefined ? { activo: body.activo } : {}),
   };
