@@ -104,13 +104,15 @@ export const createUsuario = async (request, reply) => {
   // si no es master, fuerza empresa del scope
   const empresa_id = request.scope?.empresaId ?? body.empresa_id;
 
+  const hashedPassword = await bcrypt.hash(body.contrasena, 10);
+
   const u = await prisma.usuario.create({
     data: {
       empresa_id,
       rol_id: body.rol_id,
       nombre: body.nombre,
       correo: body.correo,
-      contrasena: hash(body.contrasena),
+      contrasena: hashedPassword,
     },
   });
   return reply.code(201).send(u);
@@ -119,7 +121,9 @@ export const createUsuario = async (request, reply) => {
 export const updateUsuario = async (request, reply) => {
   const { id } = request.params;
   const data = { ...request.body };
-  if (data.contrasena) data.contrasena = hash(data.contrasena);
+  if (data.contrasena) {
+    data.contrasena = await bcrypt.hash(data.contrasena, 10);
+  }
 
   const u = await prisma.usuario.update({
     where: { id },
