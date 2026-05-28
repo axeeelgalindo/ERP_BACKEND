@@ -352,6 +352,20 @@ export const getDashboardData = async (request, reply) => {
     const proyectosFinalizados = proyectosMes.filter(p => p.estado?.toLowerCase().includes('terminad') || p.estado?.toLowerCase().includes('finaliz')).length;
     const proyectosEspera = proyectosMes.length - (proyectosEnCurso + proyectosFinalizados);
 
+    // Calcular avance promedio de los proyectos activos en este periodo
+    let totalAvanceSum = 0;
+    let proyectosConAvanceCount = 0;
+    proyectosMes.forEach(p => {
+      if (p.tareas && p.tareas.length > 0) {
+        const avgTaskAvance = p.tareas.reduce((sum, t) => sum + (t.avance || 0), 0) / p.tareas.length;
+        totalAvanceSum += avgTaskAvance;
+      } else {
+        totalAvanceSum += (p.avance || 0);
+      }
+      proyectosConAvanceCount++;
+    });
+    const averageProgress = proyectosConAvanceCount > 0 ? Math.round(totalAvanceSum / proyectosConAvanceCount) : 0;
+
     const pieTrabajos = [
       { id: 0, value: proyectosEnCurso, label: 'En Ejecución', color: '#3b82f6' },
       { id: 1, value: proyectosFinalizados, label: 'Finalizados', color: '#10b981' },
@@ -384,16 +398,41 @@ export const getDashboardData = async (request, reply) => {
     // DATA PARA GRAFICO BARRAS/LINEAS (6 Meses)
     // ============================================
     const monthsData = [];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      monthsData.push({
-        date: d,
-        label: d.toLocaleString('es-CL', { month: 'short' }).toUpperCase(),
-        ventas: 0,
-        cajaIn: 0,
-        cajaOut: 0
-      });
+    if (periodo === 'anual') {
+      for (let i = 0; i < 12; i++) {
+        const d = new Date(now.getFullYear(), i, 1);
+        monthsData.push({
+          date: d,
+          label: d.toLocaleString('es-CL', { month: 'short' }).toUpperCase(),
+          ventas: 0,
+          cajaIn: 0,
+          cajaOut: 0
+        });
+      }
+    } else {
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        monthsData.push({
+          date: d,
+          label: d.toLocaleString('es-CL', { month: 'short' }).toUpperCase(),
+          ventas: 0,
+          cajaIn: 0,
+          cajaOut: 0
+        });
+      }
     }
+
+    // Acumular Ventas (OVs generadas) a partir del total de cotizaciones aprobadas/enlazadas a OVs
+    cotizaciones.forEach(c => {
+      if (!c.fecha_ov) return;
+      const dateV = new Date(c.fecha_ov);
+      if (isNaN(dateV)) return;
+
+      const mNode = monthsData.find(m => m.date.getMonth() === dateV.getMonth() && m.date.getFullYear() === dateV.getFullYear());
+      if (mNode) {
+        mNode.ventas += (Number(c.total) || 0);
+      }
+    });
 
     ventas.forEach(v => {
       // ✅ Considerar sólo ventas facturadas (con folio/tipo_doc) o Cotizaciones en FACTURADA/PAGADA
@@ -410,7 +449,6 @@ export const getDashboardData = async (request, reply) => {
         
         const isPagada = v.ordenVenta?.estado === 'PAGADA' || (v.detalles && v.detalles.some(d => d.compras?.compra?.estado === 'PAGADA'));
 
-        mNode.ventas += totalV;
         if (isPagada) mNode.cajaIn += totalV;
       }
     });
@@ -465,6 +503,7 @@ export const getDashboardData = async (request, reply) => {
         devengadoSemana,
         flujoCajaMes,
         ingresosMes: ingresosPagadosMes,
+        averageProgress,
       },
       charts: {
         trabajosMes: pieTrabajos,
