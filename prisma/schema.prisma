@@ -33,6 +33,8 @@ model Empresa {
   Cotizacion  Cotizacion[]
   Compra      Compra[]
   auditLogs   AuditLog[]
+  epicas      Epica[]
+  tareas      Tarea[]
 
   // 👇 previsión
   afpConfigs   AFPConfig[]
@@ -447,9 +449,13 @@ model ProyectoMiembro {
  * =========================
  */
 model Epica {
-  id          String   @id @default(cuid())
-  proyecto_id String
-  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  id           String    @id @default(cuid())
+  empresa_id   String?
+  empresa      Empresa?  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id  String?
+  proyecto     Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  destino      String    @default("PROYECTO")
+  centro_costo String?
 
   nombre      String
   descripcion String?
@@ -487,9 +493,13 @@ model Epica {
 }
 
 model Tarea {
-  id          String   @id @default(cuid())
-  proyecto_id String
-  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  id           String    @id @default(cuid())
+  empresa_id   String?
+  empresa      Empresa?  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  proyecto_id  String?
+  proyecto     Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  destino      String    @default("PROYECTO")
+  centro_costo String?
 
   nombre         String
   descripcion    String?
@@ -648,8 +658,8 @@ model TareaHistorial {
   empresa_id String
   empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
-  proyecto_id String
-  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  proyecto_id String?
+  proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
 
   tarea_id String
   tarea    Tarea  @relation(fields: [tarea_id], references: [id], onDelete: Cascade)

@@ -11,11 +11,51 @@ import fs from "fs";
 
 import authz from "./src/lib/authz.js";
 import Router from "./src/utils/Routes.js";
+import fastifySwagger from "@fastify/swagger";
+import fastifySwaggerUi from "@fastify/swagger-ui";
 
 const server = Fastify({ logger: true });
 const prisma = new PrismaClient();
 
 await server.register(sensible);
+
+// Registrar Swagger
+await server.register(fastifySwagger, {
+  openapi: {
+    info: {
+      title: "Blue Ingeniería ERP API",
+      description: "Documentación interactiva de la API del ERP de Blue Ingeniería",
+      version: "1.0.0",
+    },
+    servers: [
+      {
+        url: "http://localhost:3002",
+        description: "Servidor de Desarrollo Local",
+      },
+    ],
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description: "Ingresa el token JWT en el formato: Bearer <token>",
+        },
+      },
+    },
+  },
+});
+
+// Registrar Swagger UI
+await server.register(fastifySwaggerUi, {
+  routePrefix: "/documentation",
+  uiConfig: {
+    docExpansion: "list",
+    deepLinking: false,
+  },
+  exposeRoute: true,
+});
+
 await server.register(jwt, { secret: process.env.JWT_SECRET });
 
 await server.register(cors, {

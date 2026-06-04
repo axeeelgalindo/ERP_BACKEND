@@ -75,6 +75,8 @@ export async function listTareas(request, reply) {
   const scope = resolveScope(request);
   const {
     proyectoId,
+    destino,
+    centro_costo,
     responsableId,
     estado,
     desde,
@@ -105,13 +107,11 @@ export async function listTareas(request, reply) {
       : {};
 
   const where = {
-    proyecto: {
-      empresa_id: scope.empresaId,
-      eliminado: false,
-      empresa: { eliminado: false },
-    },
+    empresa_id: scope.empresaId,
     ...(includeDeleted ? {} : { eliminado: false }),
-    ...(proyectoId ? { proyecto_id: proyectoId } : {}),
+    ...(proyectoId ? { proyecto_id: proyectoId, destino: "PROYECTO" } : {}),
+    ...(destino ? { destino } : {}),
+    ...(centro_costo ? { centro_costo } : {}),
     ...(responsableId ? { responsable_id: responsableId } : {}),
     ...(estado ? { estado } : {}),
     ...rango,
@@ -252,6 +252,8 @@ export async function createTarea(request, reply) {
     dias_reales,
     detalles,
     es_planificado,
+    destino,
+    centro_costo,
   } = body;
 
   if (!epica_id) return httpError(reply, 400, "Debes indicar epica_id");
@@ -316,56 +318,69 @@ export async function createTarea(request, reply) {
     diasPlan != null && diasReales != null ? diasReales - diasPlan : null;
 
   const row = await prisma.$transaction(async (tx) => {
-    await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
+    const dest = destino || "PROYECTO";
+    if (dest === "PROYECTO") {
+      if (!proyecto_id) {
+        throw Object.assign(new Error("proyecto_id requerido cuando destino = PROYECTO"), { statusCode: 400 });
+      }
+      await assertProyectoInEmpresa(tx, proyecto_id, scope.empresaId);
+    } else {
+      if (proyecto_id) {
+        throw Object.assign(new Error("proyecto_id debe ser null cuando destino no es PROYECTO"), { statusCode: 400 });
+      }
+    }
 
     const epica = await tx.epica.findFirst({
       where: {
         id: epica_id,
-        proyecto_id,
+        empresa_id: scope.empresaId,
+        ...(dest === "PROYECTO" ? { proyecto_id } : {}),
         eliminado: false,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
       },
       select: { id: true },
     });
     if (!epica) {
-      const err = new Error("Épica inválida para este proyecto");
+      const err = new Error("Épica inválida");
       err.statusCode = 400;
       throw err;
     }
 
     if (responsable_id) {
-      const miembro = await tx.proyectoMiembro.findFirst({
-        where: {
-          proyecto_id,
-          empleado_id: responsable_id,
-          empleado: {
-            eliminado: false,
-            usuario: {
-              empresa_id: scope.empresaId,
-              empresa: { eliminado: false },
+      if (dest === "PROYECTO") {
+        const miembro = await tx.proyectoMiembro.findFirst({
+          where: {
+            proyecto_id,
+            empleado_id: responsable_id,
+            empleado: {
+              eliminado: false,
+              usuario: {
+                empresa_id: scope.empresaId,
+                empresa: { eliminado: false },
+              },
             },
           },
-        },
-        select: { id: true },
-      });
+          select: { id: true },
+        });
 
-      if (!miembro) {
-        throw Object.assign(
-          new Error(
-            "Responsable no es miembro de este proyecto o está deshabilitado"
-          ),
-          { statusCode: 403 }
-        );
+        if (!miembro) {
+          throw Object.assign(
+            new Error(
+              "Responsable no es miembro de este proyecto o está deshabilitado"
+            ),
+            { statusCode: 403 }
+          );
+        }
+      } else {
+        await assertEmpleadoInEmpresa(tx, responsable_id, scope.empresaId);
       }
     }
 
     const tarea = await tx.tarea.create({
       data: {
-        proyecto_id,
+        empresa_id: scope.empresaId,
+        proyecto_id: dest === "PROYECTO" ? proyecto_id : null,
+        destino: dest,
+        centro_costo: dest === "PROYECTO" ? null : (centro_costo || null),
         epica_id,
         nombre,
         descripcion,
@@ -379,7 +394,7 @@ export async function createTarea(request, reply) {
         fecha_inicio_real: fir,
         fecha_fin_real: ffr,
         dias_reales: diasReales || null,
-        dias_desviacion: diasDesviacion, // ✅ esto es de Tarea (sí existe)
+        dias_desviacion: diasDesviacion,
         es_planificado,
       },
     });
@@ -473,32 +488,47 @@ export async function updateTarea(request, reply) {
         statusCode: 404,
       });
 
-    if (data.proyecto_id && data.proyecto_id !== tarea.proyecto_id) {
-      await assertProyectoInEmpresa(tx, data.proyecto_id, scope.empresaId);
+    const dest = data.destino !== undefined ? data.destino : tarea.destino;
+    if (dest === "PROYECTO") {
+      const pId = data.proyecto_id !== undefined ? data.proyecto_id : tarea.proyecto_id;
+      if (!pId) {
+        throw Object.assign(new Error("proyecto_id requerido para destino PROYECTO"), { statusCode: 400 });
+      }
+      if (data.proyecto_id && data.proyecto_id !== tarea.proyecto_id) {
+        await assertProyectoInEmpresa(tx, data.proyecto_id, scope.empresaId);
+      }
+      data.centro_costo = null;
+    } else {
+      data.proyecto_id = null;
     }
 
     if (data.responsable_id) {
-      const miembro = await tx.proyectoMiembro.findFirst({
-        where: {
-          proyecto_id: data.proyecto_id || tarea.proyecto_id,
-          empleado_id: data.responsable_id,
-          empleado: {
-            eliminado: false,
-            usuario: {
-              empresa_id: scope.empresaId,
-              empresa: { eliminado: false },
+      if (dest === "PROYECTO") {
+        const pId = data.proyecto_id !== undefined ? data.proyecto_id : tarea.proyecto_id;
+        const miembro = await tx.proyectoMiembro.findFirst({
+          where: {
+            proyecto_id: pId,
+            empleado_id: data.responsable_id,
+            empleado: {
+              eliminado: false,
+              usuario: {
+                empresa_id: scope.empresaId,
+                empresa: { eliminado: false },
+              },
             },
           },
-        },
-        select: { id: true },
-      });
-      if (!miembro) {
-        throw Object.assign(
-          new Error(
-            "Responsable no es miembro de este proyecto o está deshabilitado",
-          ),
-          { statusCode: 403 },
-        );
+          select: { id: true },
+        });
+        if (!miembro) {
+          throw Object.assign(
+            new Error(
+              "Responsable no es miembro de este proyecto o está deshabilitado",
+            ),
+            { statusCode: 403 },
+          );
+        }
+      } else {
+        await assertEmpleadoInEmpresa(tx, data.responsable_id, scope.empresaId);
       }
     }
 

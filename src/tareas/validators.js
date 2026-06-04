@@ -18,7 +18,10 @@ export const TareaQuery = Type.Object({
 });
 
 export const TareaCreateBody = Type.Object({
-  proyecto_id: Type.String(),
+  proyecto_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  destino: Type.Optional(Type.String()),
+  centro_costo: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  epica_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   nombre: Type.String(),
   descripcion: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   responsable_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),

@@ -9,7 +9,7 @@ const prisma = new PrismaClient();
  */
 export async function getKanbanData(request, reply) {
   const scope = resolveScope(request);
-  const { proyecto_id, responsable_id, q, periodo = "semanal" } = request.query || {};
+  const { proyecto_id, destino, centro_costo, responsable_id, q, periodo = "semanal" } = request.query || {};
 
   const now = new Date();
   let dateRange = {};
@@ -35,13 +35,14 @@ export async function getKanbanData(request, reply) {
   const projectFilter = { empresa_id: scope.empresaId, eliminado: false };
 
   // 1. Fetch EPICAS
-  // NOTA: Si se filtra por responsable_id, las épicas usualmente no se muestran porque no tienen responsable_id directo
   let epicas = [];
   if (!responsable_id) {
     epicas = await prisma.epica.findMany({
       where: {
-        proyecto: projectFilter,
-        ...(proyecto_id ? { proyecto_id } : {}),
+        empresa_id: scope.empresaId,
+        ...(proyecto_id ? { proyecto_id, destino: "PROYECTO" } : {}),
+        ...(destino ? { destino } : {}),
+        ...(centro_costo ? { centro_costo } : {}),
         eliminado: false,
         ...(q ? { nombre: { contains: q, mode: "insensitive" } } : {}),
         ...dateRange,
@@ -56,8 +57,10 @@ export async function getKanbanData(request, reply) {
   // 2. Fetch TAREAS
   const tareas = await prisma.tarea.findMany({
     where: {
-      proyecto: projectFilter,
-      ...(proyecto_id ? { proyecto_id } : {}),
+      empresa_id: scope.empresaId,
+      ...(proyecto_id ? { proyecto_id, destino: "PROYECTO" } : {}),
+      ...(destino ? { destino } : {}),
+      ...(centro_costo ? { centro_costo } : {}),
       ...(responsable_id ? { responsable_id } : {}),
       eliminado: false,
       ...(q ? { nombre: { contains: q, mode: "insensitive" } } : {}),
@@ -75,8 +78,10 @@ export async function getKanbanData(request, reply) {
   const subtareas = await prisma.tareaDetalle.findMany({
     where: {
       tarea: {
-        proyecto: projectFilter,
-        ...(proyecto_id ? { proyecto_id } : {}),
+        empresa_id: scope.empresaId,
+        ...(proyecto_id ? { proyecto_id, destino: "PROYECTO" } : {}),
+        ...(destino ? { destino } : {}),
+        ...(centro_costo ? { centro_costo } : {}),
       },
       ...(responsable_id ? { responsable_id } : {}),
       eliminado: false,
@@ -99,13 +104,13 @@ export async function getKanbanData(request, reply) {
     ...epicas.map((e) => ({
       ...e,
       tipo: "EPICA",
-      parent_name: e.proyecto?.nombre,
+      parent_name: e.proyecto?.nombre || (e.destino === "PROYECTO" ? "Proyecto" : e.destino === "TALLER" ? "Taller" : "Administración"),
       responsable_nombre: e.responsable?.usuario?.nombre || "Sin Asignar",
     })),
     ...tareas.map((t) => ({
       ...t,
       tipo: "TAREA",
-      parent_name: t.epica?.nombre || t.proyecto?.nombre,
+      parent_name: t.epica?.nombre || t.proyecto?.nombre || (t.destino === "PROYECTO" ? "Proyecto" : t.destino === "TALLER" ? "Taller" : "Administración"),
       responsable_nombre: t.responsable?.usuario?.nombre || "Sin Asignar",
     })),
     ...subtareas.map((s) => ({

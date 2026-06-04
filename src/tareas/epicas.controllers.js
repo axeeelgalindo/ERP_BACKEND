@@ -45,19 +45,15 @@ export async function assertEpicaInEmpresaYProyecto(
     where: {
       id: epicaId,
       eliminado: false,
-      proyecto_id: proyectoId,
-      proyecto: {
-        empresa_id: empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      empresa_id: empresaId,
+      ...(proyectoId ? { proyecto_id: proyectoId } : {}),
     },
     select: { id: true },
   });
 
   if (!ep) {
     const err = new Error(
-      "Épica inválida (no pertenece a tu proyecto/empresa o está deshabilitada)"
+      "Épica inválida (no pertenece a tu empresa o está deshabilitada)"
     );
     err.statusCode = 403;
     throw err;
@@ -171,38 +167,39 @@ export async function recomputeEpicaFromTareas(tx, epicaId) {
 export async function listEpicas(request, reply) {
   const scope = resolveScope(request);
 
-  // ✅ acepta ambos formatos
   const q = request.query || {};
   const proyectoId = q.proyectoId || q.proyecto_id;
+  const destino = q.destino;
+  const centro_costo = q.centro_costo;
   const includeDeleted = q.includeDeleted;
 
-  if (!proyectoId) {
-    return httpError(reply, 400, "Falta proyectoId/proyecto_id");
+  if (!proyectoId && !destino) {
+    return httpError(reply, 400, "Falta proyectoId/proyecto_id o destino");
   }
 
-  // seguridad: proyecto pertenece a la empresa
-  const proyecto = await prisma.proyecto.findFirst({
-    where: {
-      id: proyectoId,
-      empresa_id: scope.empresaId,
-      eliminado: false,
-      empresa: { eliminado: false },
-    },
-    select: { id: true },
-  });
+  if (proyectoId) {
+    // seguridad: proyecto pertenece a la empresa
+    const proyecto = await prisma.proyecto.findFirst({
+      where: {
+        id: proyectoId,
+        empresa_id: scope.empresaId,
+        eliminado: false,
+        empresa: { eliminado: false },
+      },
+      select: { id: true },
+    });
 
-  if (!proyecto) {
-    return httpError(reply, 403, "Proyecto no pertenece a tu empresa");
+    if (!proyecto) {
+      return httpError(reply, 403, "Proyecto no pertenece a tu empresa");
+    }
   }
 
   const where = {
-    proyecto_id: proyectoId,
+    empresa_id: scope.empresaId,
+    ...(proyectoId ? { proyecto_id: proyectoId, destino: "PROYECTO" } : {}),
+    ...(destino ? { destino } : {}),
+    ...(centro_costo ? { centro_costo } : {}),
     ...(includeDeleted ? {} : { eliminado: false }),
-    proyecto: {
-      empresa_id: scope.empresaId,
-      eliminado: false,
-      empresa: { eliminado: false },
-    },
   };
 
   const rows = await prisma.epica.findMany({
@@ -211,6 +208,8 @@ export async function listEpicas(request, reply) {
     select: {
       id: true,
       proyecto_id: true,
+      destino: true,
+      centro_costo: true,
       nombre: true,
       descripcion: true,
       estado: true,
@@ -270,22 +269,28 @@ export async function getEpica(request, reply) {
 export async function createEpica(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
-  const {  nombre, descripcion, proyecto_id, es_planificado, responsable_id } = body;
+  const {  nombre, descripcion, proyecto_id, es_planificado, responsable_id, destino, centro_costo } = body;
 
-  if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
+  const dest = destino || "PROYECTO";
+  if (dest === "PROYECTO") {
+    if (!proyecto_id) return httpError(reply, 400, "Falta proyecto_id");
+    
+    const p = await prisma.proyecto.findFirst({
+      where: {
+        id: proyecto_id,
+        empresa_id: scope.empresaId,
+        eliminado: false,
+        empresa: { eliminado: false },
+      },
+      select: { id: true },
+    });
+    if (!p) return httpError(reply, 403, "Proyecto no pertenece a tu empresa");
+  } else {
+    if (proyecto_id) return httpError(reply, 400, "proyecto_id debe ser null para destino no-proyecto");
+  }
+
   if (!nombre?.trim())
     return httpError(reply, 400, "El nombre de la épica es obligatorio");
-
-  const p = await prisma.proyecto.findFirst({
-    where: {
-      id: proyecto_id,
-      empresa_id: scope.empresaId,
-     eliminado: false,
-      empresa: { eliminado: false },
-   },
-    select: { id: true },
-  });
-  if (!p) return httpError(reply, 403, "Proyecto no pertenece a tu empresa");
 
   const { fecha_inicio_plan, dias_plan } = body;
   const fip = parseDate(fecha_inicio_plan);
@@ -294,7 +299,10 @@ export async function createEpica(request, reply) {
 
   const row = await prisma.epica.create({
     data: {
-      proyecto_id,
+      empresa_id: scope.empresaId,
+      proyecto_id: dest === "PROYECTO" ? proyecto_id : null,
+      destino: dest,
+      centro_costo: dest === "PROYECTO" ? null : (centro_costo || null),
       nombre: nombre.trim(),
       descripcion: descripcion?.trim() || null,
       estado: "pendiente",
