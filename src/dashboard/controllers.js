@@ -136,12 +136,13 @@ export const getDashboardData = async (request, reply) => {
       if (!v.total && v.detalles) {
           totalVenta = v.detalles.reduce((sum, det) => sum + (Number(det.ventaTotal ?? det.total) || 0), 0)
       }
-      if (isThisPeriod(v.fecha)) {
+      const dateFactura = isFacturadaOC ? (v.ordenVenta.fecha_facturada || v.fecha) : v.fecha;
+      if (isThisPeriod(dateFactura)) {
         b_facturadoMes.push({ 
           folio: v.folio || v.id, 
           cliente: v.ordenVenta?.cliente?.nombre || v.Cliente?.nombre || "N/A",
           total: totalVenta, 
-          fecha: v.fecha 
+          fecha: dateFactura 
         });
         return acc + Number(totalVenta);
       }
@@ -440,16 +441,22 @@ export const getDashboardData = async (request, reply) => {
       const isImportedRCV = !!(v.folio || v.tipo_doc);
       if (!isFacturadaOC && !isImportedRCV) return;
 
-      const dateV = new Date(v.fecha || v.createdAt);
+      const dateV = isFacturadaOC && v.ordenVenta?.fecha_facturada
+        ? new Date(v.ordenVenta.fecha_facturada)
+        : new Date(v.fecha || v.createdAt);
       if(isNaN(dateV)) return;
       
-      const mNode = monthsData.find(m => m.date.getMonth() === dateV.getMonth() && m.date.getFullYear() === dateV.getFullYear());
-      if (mNode) {
-        let totalV = v.total || (v.detalles ? v.detalles.reduce((sum, d)=> sum+(Number(d.ventaTotal ?? d.total)||0),0) : 0);
-        
-        const isPagada = v.ordenVenta?.estado === 'PAGADA' || (v.detalles && v.detalles.some(d => d.compras?.compra?.estado === 'PAGADA'));
+      let totalV = v.total || (v.detalles ? v.detalles.reduce((sum, d)=> sum+(Number(d.ventaTotal ?? d.total)||0),0) : 0);
+      const isPagada = v.ordenVenta?.estado === 'PAGADA' || (v.detalles && v.detalles.some(d => d.compras?.compra?.estado === 'PAGADA'));
 
-        if (isPagada) mNode.cajaIn += totalV;
+      if (isPagada) {
+        const datePago = isFacturadaOC && v.ordenVenta?.fecha_pagada
+          ? new Date(v.ordenVenta.fecha_pagada)
+          : dateV;
+        const mNodePago = monthsData.find(m => m.date.getMonth() === datePago.getMonth() && m.date.getFullYear() === datePago.getFullYear());
+        if (mNodePago) {
+          mNodePago.cajaIn += totalV;
+        }
       }
     });
 

@@ -254,6 +254,9 @@ export async function createTarea(request, reply) {
     es_planificado,
     destino,
     centro_costo,
+    predecesora_id,
+    requisito_texto,
+    requisitos,
   } = body;
 
   if (!epica_id) return httpError(reply, 400, "Debes indicar epica_id");
@@ -396,8 +399,44 @@ export async function createTarea(request, reply) {
         dias_reales: diasReales || null,
         dias_desviacion: diasDesviacion,
         es_planificado,
+        requisito_texto: requisito_texto || null,
       },
     });
+
+    if (predecesora_id) {
+      const pred = await tx.tarea.findFirst({
+        where: {
+          id: predecesora_id,
+          eliminado: false,
+          empresa_id: scope.empresaId,
+          ...(dest === "PROYECTO" ? { proyecto_id } : { destino: dest, centro_costo }),
+        },
+      });
+      if (pred) {
+        await tx.tareaDependencia.create({
+          data: {
+            tarea_id: tarea.id,
+            predecesora_id: pred.id,
+            tipo: "FS",
+          },
+        });
+      }
+    }
+
+    if (Array.isArray(requisitos) && requisitos.length > 0) {
+      for (const req of requisitos) {
+        if (req.nombre) {
+          await tx.tareaRequisito.create({
+            data: {
+              tarea_id: tarea.id,
+              nombre: req.nombre,
+              predecesora_id: req.predecesora_id || null,
+              completado: false,
+            },
+          });
+        }
+      }
+    }
 
     if (Array.isArray(detalles) && detalles.length > 0) {
       for (const d of detalles) {
@@ -455,7 +494,23 @@ export async function createTarea(request, reply) {
     // ✅ ahora sí: recompute NO toca campos inexistentes en Epica
     await recomputeEpicaFromTareas(tx, epica_id);
 
-    return tarea;
+    const fullTarea = await tx.tarea.findFirst({
+      where: { id: tarea.id },
+      include: {
+        proyecto: { select: { nombre: true } },
+        epica: { select: { nombre: true } },
+        responsable: { include: { usuario: { select: { nombre: true } } } },
+        evidencias: true,
+        dependencias: { include: { predecesora: { select: { id: true, nombre: true } } } },
+        requisitos: {
+          include: {
+            predecesora: { select: { id: true, nombre: true } }
+          }
+        },
+      }
+    });
+
+    return fullTarea;
   });
 
   return reply.code(201).send({ ok: true, row });
@@ -469,6 +524,9 @@ export async function updateTarea(request, reply) {
 
   const comentarioRevision = data.comentario_revision;
   delete data.comentario_revision;
+
+  const predecesora_id = data.predecesora_id;
+  delete data.predecesora_id;
 
   const row = await prisma.$transaction(async (tx) => {
     const tarea = await tx.tarea.findFirst({
@@ -622,10 +680,50 @@ export async function updateTarea(request, reply) {
       }
     }
 
+    if (predecesora_id) {
+      updateData.requisito_texto = null;
+    }
+
     const updated = await tx.tarea.update({
       where: { id },
       data: updateData,
     });
+
+    if (predecesora_id !== undefined) {
+      await tx.tareaDependencia.deleteMany({
+        where: { tarea_id: id }
+      });
+
+      if (predecesora_id) {
+        const pred = await tx.tarea.findFirst({
+          where: {
+            id: predecesora_id,
+            eliminado: false,
+            empresa_id: scope.empresaId,
+            ...(dest === "PROYECTO" ? { proyecto_id: tarea.proyecto_id } : { destino: dest, centro_costo: tarea.centro_costo }),
+          },
+        });
+        if (pred) {
+          const cycle = await createsCycle(tx, predecesora_id, id);
+          if (cycle) {
+            throw Object.assign(new Error("La dependencia genera un ciclo"), {
+              statusCode: 400,
+            });
+          }
+          await tx.tareaDependencia.create({
+            data: {
+              tarea_id: id,
+              predecesora_id,
+              tipo: "FS"
+            }
+          });
+        }
+      }
+    } else if (data.requisito_texto) {
+      await tx.tareaDependencia.deleteMany({
+        where: { tarea_id: id }
+      });
+    }
 
     // ✅ Si se completó la tarea, completar recursivamente todas las subtareas
     if (updateData.estado === "completada") {

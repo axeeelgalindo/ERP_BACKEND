@@ -49,6 +49,13 @@ import {
   updateEpica,
 } from "./epicas.controllers.js";
 
+import {
+  listTareaRequisitos,
+  createTareaRequisito,
+  updateTareaRequisito,
+  deleteTareaRequisito,
+} from "./requisitos.controllers.js";
+
 export default async function tareasRoutes(server) {
   const guard = server.authenticate ? { preHandler: [server.authenticate] } : {};
 
@@ -115,6 +122,12 @@ export default async function tareasRoutes(server) {
 
   // ✅ batch subtareas
   server.post("/tareas-detalle/batch-add", { ...guard }, addDetallesToTarea);
+
+  // ===== REQUISITOS DE TAREA =====
+  server.get("/tareas/:tareaId/requisitos", { ...guard }, listTareaRequisitos);
+  server.post("/tareas-requisito/add", { ...guard }, createTareaRequisito);
+  server.patch("/tareas-requisito/update/:id", { ...guard }, updateTareaRequisito);
+  server.delete("/tareas-requisito/delete/:id", { ...guard }, deleteTareaRequisito);
 
   // ===== EPICAS =====
   server.get("/epicas", { ...guard }, listEpicas); // ?proyectoId=...

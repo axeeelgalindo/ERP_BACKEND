@@ -145,6 +145,12 @@ export async function getProyecto(request, reply) {
 
           responsable: { include: { usuario: true } },
           evidencias: { orderBy: { creado_en: 'desc' }, take: 5 },
+          dependencias: { include: { predecesora: { select: { id: true, nombre: true } } } },
+          requisitos: {
+            include: {
+              predecesora: { select: { id: true, nombre: true } }
+            }
+          },
           detalles: {
             where: { eliminado: false },
             orderBy: [{ fecha_inicio_plan: "asc" }],

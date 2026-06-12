@@ -920,6 +920,11 @@ export const updateCotizacionEstado = async (request, reply) => {
           empresa_id: true,
           fecha_ov: true,
           fecha_facturada: true,
+          fecha_aceptada: true,
+          fecha_entregado: true,
+          fecha_por_facturar: true,
+          fecha_pagada: true,
+          fecha_rechazada: true,
         },
       });
 
@@ -991,14 +996,36 @@ export const updateCotizacionEstado = async (request, reply) => {
           : null,
       };
 
-      if (estado === "ORDEN_VENTA") {
-        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
+      const now = new Date();
+      if (estado === "ACEPTADA") {
+        updateData.fecha_aceptada = now;
+      } else if (estado === "ORDEN_VENTA") {
+        updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
+      } else if (estado === "ENTREGADO") {
+        updateData.fecha_entregado = now;
+        if (!cot.fecha_ov) updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
+      } else if (estado === "POR_FACTURAR") {
+        updateData.fecha_por_facturar = now;
+        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
+        if (!cot.fecha_ov) updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "FACTURADA") {
-        if (!cot.fecha_facturada) updateData.fecha_facturada = new Date();
-        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
+        updateData.fecha_facturada = now;
+        if (!cot.fecha_por_facturar) updateData.fecha_por_facturar = now;
+        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
+        if (!cot.fecha_ov) updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "PAGADA") {
-        if (!cot.fecha_ov) updateData.fecha_ov = new Date();
-        if (!cot.fecha_facturada) updateData.fecha_facturada = new Date();
+        updateData.fecha_pagada = now;
+        if (!cot.fecha_facturada) updateData.fecha_facturada = now;
+        if (!cot.fecha_por_facturar) updateData.fecha_por_facturar = now;
+        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
+        if (!cot.fecha_ov) updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
+      } else if (estado === "RECHAZADA") {
+        updateData.fecha_rechazada = now;
       }
 
       const updated = await tx.cotizacion.update({
@@ -1305,25 +1332,38 @@ export const uploadCotizacionDoc = async (request, reply) => {
     let nuevoEstado = cot.estado;
     const est = cot.estado;
     const dateUpdates = {};
+    const now = new Date();
 
-    // Lógica de avance de estados según el tipo de documento (solo cambia estado al subir el primero)
     if (docType === "oc" && (est === "COTIZACION" || est === "ACEPTADA")) {
       nuevoEstado = "ORDEN_VENTA";
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
+      dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     } else if (docType === "gd" && (est === "ACEPTADA" || est === "ORDEN_VENTA")) {
       nuevoEstado = "ENTREGADO";
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
+      dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     } else if (docType === "hes" && (est === "ORDEN_VENTA" || est === "ENTREGADO")) {
       nuevoEstado = "POR_FACTURAR";
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
+      dateUpdates.fecha_por_facturar = now;
+      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     } else if (docType === "fac" && (est === "ENTREGADO" || est === "POR_FACTURAR")) {
       nuevoEstado = "FACTURADA";
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
-      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = new Date();
+      dateUpdates.fecha_facturada = now;
+      if (!cot.fecha_por_facturar) dateUpdates.fecha_por_facturar = now;
+      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     } else if (docType === "comprobante" && (est === "POR_FACTURAR" || est === "FACTURADA")) {
       nuevoEstado = "PAGADA";
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = new Date();
-      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = new Date();
+      dateUpdates.fecha_pagada = now;
+      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = now;
+      if (!cot.fecha_por_facturar) dateUpdates.fecha_por_facturar = now;
+      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     }
 
     if (docType === "oc") {

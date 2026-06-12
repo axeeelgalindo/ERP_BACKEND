@@ -500,6 +500,7 @@ model Tarea {
   proyecto     Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
   destino      String    @default("PROYECTO")
   centro_costo String?
+  requisito_texto String?
 
   nombre         String
   descripcion    String?
@@ -553,6 +554,8 @@ model Tarea {
 
   detalles TareaDetalle[]
   evidencias TareaEvidencia[]
+  requisitos       TareaRequisito[] @relation("TareaRequisitos")
+  como_requisito   TareaRequisito[] @relation("PredecesoraRequisitos")
 
   dias_desviacion Int?
 
@@ -750,6 +753,11 @@ model Cotizacion {
 
   fecha_ov        DateTime?
   fecha_facturada DateTime?
+  fecha_aceptada        DateTime?
+  fecha_entregado       DateTime?
+  fecha_por_facturar    DateTime?
+  fecha_pagada          DateTime?
+  fecha_rechazada       DateTime?
 
   motivo_rechazo String?
 
@@ -1360,4 +1368,18 @@ model HHEmpleado {
   @@index([empresa_id, anio, mes])
   @@index([empleado_id])
   @@index([rut])
+}
+
+model TareaRequisito {
+  id              String   @id @default(cuid())
+  tarea_id        String
+  tarea           Tarea    @relation("TareaRequisitos", fields: [tarea_id], references: [id], onDelete: Cascade)
+  predecesora_id  String?
+  predecesora     Tarea?   @relation("PredecesoraRequisitos", fields: [predecesora_id], references: [id], onDelete: SetNull)
+  nombre          String
+  completado      Boolean  @default(false)
+  creado_en       DateTime @default(now())
+
+  @@index([tarea_id])
+  @@index([predecesora_id])
 }

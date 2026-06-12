@@ -71,6 +71,12 @@ export async function getKanbanData(request, reply) {
       epica: { select: { nombre: true } },
       responsable: { include: { usuario: { select: { nombre: true } } } },
       evidencias: true,
+      dependencias: { include: { predecesora: { select: { id: true, nombre: true } } } },
+      requisitos: {
+        include: {
+          predecesora: { select: { id: true, nombre: true } }
+        }
+      },
     },
   });
 
@@ -112,6 +118,10 @@ export async function getKanbanData(request, reply) {
       tipo: "TAREA",
       parent_name: t.epica?.nombre || t.proyecto?.nombre || (t.destino === "PROYECTO" ? "Proyecto" : t.destino === "TALLER" ? "Taller" : "Administración"),
       responsable_nombre: t.responsable?.usuario?.nombre || "Sin Asignar",
+      dependencies: (t.dependencias || []).map((d) => d.predecesora_id),
+      predecesora_nombre: t.dependencias?.[0]?.predecesora?.nombre || t.requisito_texto || null,
+      predecesora_id: t.dependencias?.[0]?.predecesora_id || null,
+      requisitos: t.requisitos || [],
     })),
     ...subtareas.map((s) => ({
       ...s,

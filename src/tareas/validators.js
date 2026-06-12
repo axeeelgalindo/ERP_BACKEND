@@ -26,6 +26,16 @@ export const TareaCreateBody = Type.Object({
   descripcion: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   responsable_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   prioridad: Type.Optional(Type.Integer()),
+  predecesora_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  requisito_texto: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  requisitos: Type.Optional(
+    Type.Array(
+      Type.Object({
+        nombre: Type.String(),
+        predecesora_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      })
+    )
+  ),
 
   // 👉 INPUT REAL del frontend: fecha_inicio_plan + dias_plan
   fecha_inicio_plan: Type.String(),
