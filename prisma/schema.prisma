@@ -35,6 +35,7 @@ model Empresa {
   proyectos   Proyecto[]
   Cotizacion  Cotizacion[]
   Compra      Compra[]
+  ventas      Venta[]
   auditLogs   AuditLog[]
   epicas      Epica[]
   tareas      Tarea[]
@@ -895,13 +896,15 @@ enum UtilidadBase {
 
 model Venta {
   id                  String         @id @default(cuid())
-  numero              Int            @unique @default(autoincrement())
+  numero              Int
   fecha               DateTime       @default(now())
   ordenVentaId        String?
   descripcion         String?
   ordenVenta          Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
   detalles            detalleVenta[]
   asignaciones_costeo CompraCosteo[]
+  empresa_id          String
+  empresa             Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
   descuentoPct Float? @default(0) // ✅ descuento general (0-100)
 
@@ -929,6 +932,9 @@ model Venta {
   eliminado_en DateTime?
   Cliente      Cliente?  @relation(fields: [clienteId], references: [id])
   clienteId    String?
+
+  @@index([empresa_id])
+  @@unique([empresa_id, numero])
 }
 
 model detalleVenta {

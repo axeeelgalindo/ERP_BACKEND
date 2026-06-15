@@ -1224,7 +1224,7 @@ export async function setCompraCosteos(req, reply) {
     // opcional pero recomendado: validar que la venta exista
     // (si tu Venta tiene empresa_id, filtra por empresa_id también)
     const ventaOk = await prisma.venta.findFirst({
-      where: { id: String(venta_id) },
+      where: { id: String(venta_id), empresa_id },
       select: { id: true },
     });
     if (!ventaOk) return reply.badRequest(`Venta no existe: ${venta_id}`);

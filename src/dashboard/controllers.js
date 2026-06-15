@@ -42,16 +42,11 @@ export const getDashboardData = async (request, reply) => {
 
     const baseWhere = { empresa_id, eliminado: false };
 
-    // 1. Ventas (Lógica original de listVentas para enlazar a la Empresa)
+    // 1. Ventas (Filtro directo por empresa_id)
     const ventas = await prisma.venta.findMany({
       where: {
-        AND: [{ eliminado: false }],
-        OR: [
-          { ordenVenta: { empresa_id: String(empresa_id), eliminado: false } },
-          { detalles: { some: { hhEmpleado: { empresa_id: String(empresa_id) } } } },
-          { detalles: { some: { compras: { compra: { empresa_id: String(empresa_id), eliminado: false } } } } },
-          { AND: [{ ordenVentaId: null }, { detalles: { every: { hhEmpleadoId: null } } }, { detalles: { every: { compraId: null } } }] }
-        ],
+        empresa_id: String(empresa_id),
+        eliminado: false
       },
       include: {
         detalles: {

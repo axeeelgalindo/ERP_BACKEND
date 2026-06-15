@@ -1264,9 +1264,19 @@ export const importVentasCSV = async (request, reply) => {
             isNewCot = true;
           }
 
+          // Get next Venta numero
+          const maxVenta = await tx.venta.findFirst({
+            where: { empresa_id: empresaId },
+            orderBy: { numero: "desc" },
+            select: { numero: true },
+          });
+          const nextVentaNumero = maxVenta ? maxVenta.numero + 1 : 1;
+
           // 4) Crear Venta
           await tx.venta.create({
             data: {
+              empresa_id: empresaId,
+              numero: nextVentaNumero,
               ordenVentaId: cot.id,
               clienteId: cliente.id,
               fecha: fechaDocto || new Date(),

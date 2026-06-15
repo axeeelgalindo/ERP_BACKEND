@@ -9,41 +9,9 @@ export const listVentas = async (request, reply) => {
 
     const ventas = await prisma.venta.findMany({
       where: {
-        AND: [
-          { eliminado: false },
-          { folio: null }
-        ],
-        OR: [
-          // 1) Por OV/Cotización
-          { ordenVenta: { empresa_id: String(empresaId), eliminado: false } },
-
-          // 2) Por HHEmpleado (empresa)
-          {
-            detalles: {
-              some: { hhEmpleado: { empresa_id: String(empresaId) } },
-            },
-          },
-
-          // 3) Por compraItem -> compra -> empresa
-          {
-            detalles: {
-              some: {
-                compras: {
-                  compra: { empresa_id: String(empresaId), eliminado: false },
-                },
-              },
-            },
-          },
-
-          // 4) Ventas manuales/huérfanas
-          {
-            AND: [
-              { ordenVentaId: null },
-              { detalles: { every: { hhEmpleadoId: null } } },
-              { detalles: { every: { compraId: null } } },
-            ],
-          },
-        ],
+        empresa_id: String(empresaId),
+        eliminado: false,
+        folio: null,
       },
       orderBy: { createdAt: "desc" },
       include: {
@@ -617,8 +585,17 @@ export const createVenta = async (request, reply) => {
 
       const baseToSave = base === "VENTA_ACTUAL" ? "VENTA" : base;
 
+      const maxVenta = await tx.venta.findFirst({
+        where: { empresa_id: String(empresaId) },
+        orderBy: { numero: "desc" },
+        select: { numero: true },
+      });
+      const nextNumero = maxVenta ? maxVenta.numero + 1 : 1;
+
       const nuevaVentaHeader = await tx.venta.create({
         data: {
+          empresa_id: String(empresaId),
+          numero: nextNumero,
           ordenVentaId: ordenVentaId ?? null,
           descripcion: descripcion ?? null,
           isFeriado: ventaIsFeriado,
