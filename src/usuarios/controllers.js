@@ -63,10 +63,13 @@ export const listUsuarios = async (request, reply) => {
   const { q, page = 1, pageSize = 20, empresaId } = request.query;
   const { scope } = request;
 
-  // si no es master, fuerza empresaId del scope
+  // si no es master o superadmin, fuerza empresaId del scope
+  const isSuper = scope?.rolCodigo === "SUPERADMIN" || scope?.rolCodigo === "MASTER";
+  const targetEmpresaId = isSuper ? (empresaId ?? scope?.empresaId) : scope?.empresaId;
+
   const where = {
     ...(q ? { OR: [{ nombre: { contains: q, mode: "insensitive" } }, { correo: { contains: q, mode: "insensitive" } }] } : {}),
-    empresa_id: empresaId ?? scope.empresaId,
+    empresa_id: targetEmpresaId,
   };
 
   const total = await prisma.usuario.count({ where });
@@ -101,8 +104,10 @@ export const getUsuario = async (request, reply) => {
 
 export const createUsuario = async (request, reply) => {
   const body = request.body;
-  // si no es master, fuerza empresa del scope
-  const empresa_id = request.scope?.empresaId ?? body.empresa_id;
+  
+  // si no es master o superadmin, fuerza empresa del scope
+  const isSuper = request.scope?.rolCodigo === "SUPERADMIN" || request.scope?.rolCodigo === "MASTER";
+  const empresa_id = isSuper ? (body.empresa_id ?? request.scope?.empresaId) : (request.scope?.empresaId ?? body.empresa_id);
 
   const hashedPassword = await bcrypt.hash(body.contrasena, 10);
 

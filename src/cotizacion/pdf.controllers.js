@@ -796,8 +796,17 @@ export const importCotizacionFromPdf = async (request, reply) => {
       if (!subtotal || subtotal <= 0)
         throw new Error("No se pudo calcular subtotal desde el PDF");
 
+      // Obtener el número correlativo para la empresa
+      const maxCotizacion = await tx.cotizacion.findFirst({
+        where: { empresa_id: empresaId },
+        orderBy: { numero: "desc" },
+        select: { numero: true },
+      });
+      const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+
       return tx.cotizacion.create({
         data: {
+          numero: nextNumero,
           empresa_id: empresaId,
           proyecto_id: null,
           cliente_id: cliente_id_final,
@@ -1056,8 +1065,17 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
         if (!subtotal || subtotal <= 0)
           throw new Error("No se pudo calcular subtotal desde el PDF");
 
+        // Obtener el número correlativo para la empresa
+        const maxCotizacion = await tx.cotizacion.findFirst({
+          where: { empresa_id: empresaId },
+          orderBy: { numero: "desc" },
+          select: { numero: true },
+        });
+        const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+
         return tx.cotizacion.create({
           data: {
+            numero: nextNumero,
             empresa_id: empresaId,
             proyecto_id: null,
             cliente_id: cliente_id_final,

@@ -3,648 +3,1009 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // o "mysql"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-/**
- * =========================
- * EMPRESA / ESTRUCTURA BASE
- * =========================
- */
-model Empresa {
-  id             String    @id @default(cuid())
-  nombre         String
-  rut            String?   @db.VarChar(40)
-  correo         String?
-  telefono       String?
-  activa         Boolean   @default(true)
-  creada_en      DateTime  @default(now())
-  actualizada_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  usuarios    Usuario[]
-  clientes    Cliente[]
-  proveedores Proveedor[]
-  productos   Producto[]
-  proyectos   Proyecto[]
-  Cotizacion  Cotizacion[]
-  Compra      Compra[]
-  auditLogs   AuditLog[]
-  epicas      Epica[]
-  tareas      Tarea[]
-
-  // 👇 previsión
-  afpConfigs   AFPConfig[]
-  saludConfigs SaludConfig[]
-
-  // 👇 HH por empleado (resultado del Excel + cálculos)
-  hhEmpleados HHEmpleado[]
-
-  cifs CIF[] // ✅ lado inverso
-
-  // 👇 catálogos admin (por empresa)
-  tipoItems      TipoItem[]
-  tipoDias       TipoDia[]
-  unidadItems    UnidadItem[]
-  compraCosteos  CompraCosteo[]
-  TareaHistorial TareaHistorial[]
-}
-
-/**
- * =========================
- * ROLES DE USUARIO
- * =========================
- */
-model RolUsuario {
-  id             String    @id @default(cuid())
-  nombre         String    @unique
-  codigo         String?   @unique
-  descripcion    String?
-  orden          Int?
-  activo         Boolean   @default(true)
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  usuarios Usuario[]
-}
-
-/**
- * =========================
- * USUARIOS / RRHH
- * =========================
- */
-model Usuario {
-  id         String     @id @default(cuid())
-  empresa_id String
-  empresa    Empresa    @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  rol_id     String
-  rol        RolUsuario @relation(fields: [rol_id], references: [id], onDelete: Cascade)
-
-  nombre     String
-  correo     String
-  contrasena String
-
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  // ✅ inversa de Empleado.usuario
-  empleado Empleado?
-
-  rendiciones_revisadas Rendicion[] @relation("RendicionRevisadaPor")
-
-  // ✅ inversa de AuditLog.usuario
-  auditLogs AuditLog[]
-
-  // ✅ inversa de Cotizacion.vendedor
-  cotizaciones_creadas Cotizacion[] @relation("CotizacionVendedor")
-  rendicions           Rendicion[]
-
-  @@unique([correo, eliminado])
-}
-
-model Empleado {
-  id         String   @id @default(cuid())
-  usuario_id String?  @unique
-  usuario    Usuario? @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
-
-  // 👇 para matchear con Excel
-  rut String? @db.VarChar(40)
-
-  cargo          String?
-  telefono       String?
-  fecha_ingreso  DateTime?
-  sueldo_base    Int?
-  activo         Boolean   @default(true)
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  // previsión
-  afp_id String?
-  afp    AFPConfig? @relation(fields: [afp_id], references: [id], onDelete: SetNull)
-
-  salud_id String?
-  salud    SaludConfig? @relation(fields: [salud_id], references: [id], onDelete: SetNull)
-
-  Rendicion Rendicion[]
-  proyectos ProyectoMiembro[]
-
-  // Responsable principal de tareas
-  tareas Tarea[]
-
-  // Responsable de subtareas
-  detalles TareaDetalle[] @relation("EmpleadoTareaDetalle")
-
-  // Responsable de epicas
-  epicas Epica[] @relation("EmpleadoEpica")
-
-  // 👇 HH ya calculadas por periodo (derivado del Excel)
-  hhRegistros   HHEmpleado[]
-  detalleVentas detalleVenta[]
-  documentos    EmpleadoDocumento[]
-  asistencias   Asistencia[]
-
-  @@index([afp_id])
-  @@index([salud_id])
-}
-
-model EmpleadoDocumento {
-  id          String   @id @default(cuid())
-  empleado_id String
-  empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
-  
-  nombre      String
-  es_carpeta  Boolean  @default(false)
-  url         String?
-  tamano      String?
-  subido_por  String?
-  
-  parent_id   String?
-  parent      EmpleadoDocumento?  @relation("JerarquiaDocumental", fields: [parent_id], references: [id], onDelete: Cascade)
-  children    EmpleadoDocumento[] @relation("JerarquiaDocumental")
-  
-  creado_en   DateTime @default(now())
-
-  @@index([empleado_id])
-  @@index([parent_id])
-}
-
-model Asistencia {
-  id             String    @id @default(cuid())
-  empleado_id    String
-  empleado       Empleado  @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
-  fecha          DateTime  @db.Date
-  estado         String    @default("AUSENTE") // AUSENTE, PRESENTE, JUSTIFICADO, PERMISO
-  observacion    String?   @db.Text
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-
-  @@unique([empleado_id, fecha])
-  @@index([empleado_id])
-  @@index([fecha])
-}
-
 model AFPConfig {
-  id         String  @id @default(cuid())
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  nombre String
-  codigo String? @unique
-  tasa   Float
-
-  activo         Boolean  @default(true)
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  empleados Empleado[]
+  id             String     @id
+  empresa_id     String
+  nombre         String
+  codigo         String?    @unique
+  tasa           Float
+  activo         Boolean    @default(true)
+  creado_en      DateTime   @default(now())
+  actualizado_en DateTime
+  Empresa        Empresa    @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Empleado       Empleado[]
 
   @@index([empresa_id])
 }
 
-model SaludConfig {
-  id         String  @id @default(cuid())
+model AuditLog {
+  id          String   @id
+  empresa_id  String?
+  usuario_id  String?
+  entidad     String
+  registro_id String
+  accion      String
+  detalles    Json?
+  ip          String?
+  user_agent  String?
+  creado_en   DateTime @default(now())
+  Empresa     Empresa? @relation(fields: [empresa_id], references: [id])
+  Usuario     Usuario? @relation(fields: [usuario_id], references: [id])
+
+  @@index([accion])
+  @@index([creado_en])
+  @@index([empresa_id])
+  @@index([entidad, registro_id])
+  @@index([usuario_id])
+}
+
+model CIF {
+  id         String       @id
   empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  anio       Int?
+  mes        Int?
+  valor      Float        @default(0)
+  nota       String?
+  creado_en  DateTime     @default(now())
+  Empresa    Empresa      @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  HHEmpleado HHEmpleado[]
 
-  tipo   String
-  nombre String
-  tasa   Float
-
-  activo         Boolean  @default(true)
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  empleados Empleado[]
-
+  @@index([empresa_id, anio, mes])
+  @@index([empresa_id, creado_en])
   @@index([empresa_id])
 }
 
-/**
- * =========================
- * CLIENTES / PROVEEDORES
- * =========================
- */
 model Cliente {
-  id         String  @id @default(cuid())
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  nombre   String
-  rut      String? @db.VarChar(40)
-  correo   String?
-  telefono String?
-  notas    String?
-
-  // ✅ logo
-  logo_url       String?
-  logo_public_id String?
-
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  // soft delete
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  cotizaciones Cotizacion[]
-  ventas       Venta[] // <- si en tu sistema existe relación Cliente -> Venta
-
-  // ✅ cuentas bancarias (lista)
-  cuentas_bancarias ClienteCuentaBancaria[] @relation("ClienteCuentas")
-
-  // ✅ cuenta principal (1 opcional)
-  cuenta_principal_id String?
-  cuenta_principal    ClienteCuentaBancaria? @relation("ClienteCuentaPrincipal", fields: [cuenta_principal_id], references: [id], onDelete: SetNull)
-
-  // ✅ responsables (lista)
-  responsables ClienteResponsable[]
+  id                                                                       String                  @id
+  empresa_id                                                               String
+  nombre                                                                   String
+  rut                                                                      String?                 @db.VarChar(40)
+  correo                                                                   String?
+  telefono                                                                 String?
+  notas                                                                    String?
+  creado_en                                                                DateTime                @default(now())
+  actualizado_en                                                           DateTime
+  eliminado                                                                Boolean                 @default(false)
+  eliminado_en                                                             DateTime?
+  cuenta_principal_id                                                      String?
+  logo_public_id                                                           String?
+  logo_url                                                                 String?
+  ClienteCuentaBancaria_Cliente_cuenta_principal_idToClienteCuentaBancaria ClienteCuentaBancaria?  @relation("Cliente_cuenta_principal_idToClienteCuentaBancaria", fields: [cuenta_principal_id], references: [id])
+  Empresa                                                                  Empresa                 @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  ClienteCuentaBancaria_ClienteCuentaBancaria_cliente_idToCliente          ClienteCuentaBancaria[] @relation("ClienteCuentaBancaria_cliente_idToCliente")
+  ClienteResponsable                                                       ClienteResponsable[]
+  Cotizacion                                                               Cotizacion[]
+  Venta                                                                    Venta[]
 
   @@unique([correo, eliminado])
   @@index([empresa_id])
 }
 
 model ClienteCuentaBancaria {
-  id String @id @default(cuid())
-
-  // ✅ relación normal (cliente -> muchas cuentas)
-  cliente_id String
-  cliente    Cliente @relation("ClienteCuentas", fields: [cliente_id], references: [id], onDelete: Cascade)
-
-  // ✅ inversa de cuenta_principal (cliente -> 1 cuenta principal)
-  clientes_principal Cliente[] @relation("ClienteCuentaPrincipal")
-
-  banco       String
-  tipo_cuenta String?
-  numero      String
-  titular     String?
-  rut_titular String?
-  correo_pago String?
-  swift       String?
-  iban        String?
-
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
+  id                                                         String    @id
+  cliente_id                                                 String
+  banco                                                      String
+  tipo_cuenta                                                String?
+  numero                                                     String
+  titular                                                    String?
+  rut_titular                                                String?
+  correo_pago                                                String?
+  swift                                                      String?
+  iban                                                       String?
+  creado_en                                                  DateTime  @default(now())
+  actualizado_en                                             DateTime
+  eliminado                                                  Boolean   @default(false)
+  eliminado_en                                               DateTime?
+  Cliente_Cliente_cuenta_principal_idToClienteCuentaBancaria Cliente[] @relation("Cliente_cuenta_principal_idToClienteCuentaBancaria")
+  Cliente_ClienteCuentaBancaria_cliente_idToCliente          Cliente   @relation("ClienteCuentaBancaria_cliente_idToCliente", fields: [cliente_id], references: [id], onDelete: Cascade)
 
   @@index([cliente_id])
 }
 
 model ClienteResponsable {
-  id String @id @default(cuid())
-
-  cliente_id String
-  cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
-
-  nombre       String
-  correo       String?
-  telefono     String?
-  cargo        String?
-  area         String?
-  es_principal Boolean @default(false)
-
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  cotizaciones Cotizacion[]
+  id             String       @id
+  cliente_id     String
+  nombre         String
+  correo         String?
+  telefono       String?
+  cargo          String?
+  area           String?
+  es_principal   Boolean      @default(false)
+  creado_en      DateTime     @default(now())
+  actualizado_en DateTime
+  eliminado      Boolean      @default(false)
+  eliminado_en   DateTime?
+  Cliente        Cliente      @relation(fields: [cliente_id], references: [id], onDelete: Cascade)
+  Cotizacion     Cotizacion[]
 
   @@index([cliente_id])
 }
 
-model Proveedor {
-  id             String    @id @default(cuid())
-  empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  nombre         String
-  rut            String?   @db.VarChar(40)
-  correo         String?
-  telefono       String?
-  notas          String?
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
+model Compra {
+  id              String         @id
+  numero          Int            @unique @default(autoincrement())
+  empresa_id      String
+  proyecto_id     String?
+  estado          estadoCompra   @default(ORDEN_COMPRA)
+  total           Float
+  creada_en       DateTime       @default(now())
+  actualizado_en  DateTime
+  eliminado       Boolean        @default(false)
+  eliminado_en    DateTime?
+  cotizacionId    String?
+  proveedorId     String?
+  tipo_doc        Int?
+  folio           String?        @db.VarChar(50)
+  rut_proveedor   String?        @db.VarChar(40)
+  razon_social    String?        @db.VarChar(255)
+  fecha_docto     DateTime?
+  fecha_recepcion DateTime?
+  factura_url     String?
+  factura_numero  String?        @db.VarChar(50)
+  factura_fecha   DateTime?
+  factura_monto   Float?
+  centro_costo    CentroCosto?
+  destino         CompraDestino  @default(PROYECTO)
+  rendicion_id    String?
+  Cotizacion      Cotizacion?    @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  Empresa         Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Proveedor       Proveedor?     @relation(fields: [proveedorId], references: [id])
+  Proyecto        Proyecto?      @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  Rendicion       Rendicion?     @relation(fields: [rendicion_id], references: [id])
+  CompraCosteo    CompraCosteo[]
+  CompraItem      CompraItem[]
 
-  compras     Compra[]
-  compraItems CompraItem[]
-
-  @@unique([correo, eliminado])
+  @@index([destino, centro_costo])
   @@index([empresa_id])
+  @@index([proyecto_id])
+  @@index([rendicion_id])
 }
 
-/**
- * =========================
- * PRODUCTOS
- * =========================
- */
-model Producto {
-  id             String    @id @default(cuid())
+model CompraCosteo {
+  id             String   @id
   empresa_id     String
-  empresa        Empresa   @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  compra_id      String
+  venta_id       String
+  monto          Float    @default(0)
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime
+  Compra         Compra   @relation(fields: [compra_id], references: [id], onDelete: Cascade)
+  Empresa        Empresa  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Venta          Venta    @relation(fields: [venta_id], references: [id], onDelete: Cascade)
+
+  @@unique([compra_id, venta_id])
+  @@index([compra_id])
+  @@index([empresa_id])
+  @@index([venta_id])
+}
+
+model CompraItem {
+  id           String         @id
+  compra_id    String?
+  producto_id  String?
+  proveedor_id String?
+  item         String?
+  cantidad     Int
+  precio_unit  Float?
+  total        Float
+  tipoItemId   String?
+  Compra       Compra?        @relation(fields: [compra_id], references: [id], onDelete: Cascade)
+  Producto     Producto?      @relation(fields: [producto_id], references: [id], onDelete: Cascade)
+  Proveedor    Proveedor?     @relation(fields: [proveedor_id], references: [id], onDelete: Cascade)
+  TipoItem     TipoItem?      @relation(fields: [tipoItemId], references: [id])
+  detalleVenta detalleVenta[]
+
+  @@index([compra_id])
+  @@index([tipoItemId])
+}
+
+model Cotizacion {
+  id                     String              @id
+  numero                 Int
+  empresa_id             String
+  proyecto_id            String?
+  cliente_id             String
+  subtotal               Float               @default(0)
+  iva                    Float               @default(0)
+  total                  Float               @default(0)
+  terminos_condiciones   String?
+  acuerdo_pago           String?
+  creada_en              DateTime            @default(now())
+  actualizado_en         DateTime
+  eliminado              Boolean             @default(false)
+  eliminado_en           DateTime?
+  estado                 EstadoCotizacion    @default(COTIZACION)
+  asunto                 String?
+  vendedor_id            String?
+  vigencia_dias          Int                 @default(15)
+  fecha_documento        DateTime?
+  vencimiento_documento  DateTime?
+  motivo_rechazo         String?
+  cliente_responsable_id String?
+  descuento_monto        Float               @default(0)
+  descuento_pct          Float               @default(0)
+  fecha_facturada        DateTime?
+  fecha_ov               DateTime?
+  doc_comprobante_url    String?
+  doc_fac_url            String?
+  doc_gd_url             String?
+  doc_hes_url            String?
+  doc_oc_url             String?
+  fecha_aceptada         DateTime?
+  fecha_entregado        DateTime?
+  fecha_pagada           DateTime?
+  fecha_por_facturar     DateTime?
+  fecha_rechazada        DateTime?
+  Compra                 Compra[]
+  Cliente                Cliente             @relation(fields: [cliente_id], references: [id])
+  ClienteResponsable     ClienteResponsable? @relation(fields: [cliente_responsable_id], references: [id])
+  Empresa                Empresa             @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Proyecto               Proyecto?           @relation(fields: [proyecto_id], references: [id])
+  Usuario                Usuario?            @relation(fields: [vendedor_id], references: [id], onDelete: Restrict)
+  CotizacionAdjunto      CotizacionAdjunto[]
+  CotizacionGlosa        CotizacionGlosa[]
+  CotizacionPago         CotizacionPago[]
+  Venta                  Venta[]
+
+  @@index([cliente_id])
+  @@index([cliente_responsable_id])
+  @@index([empresa_id])
+  @@index([proyecto_id])
+  @@index([vendedor_id])
+  @@unique([empresa_id, numero])
+}
+
+model CotizacionGlosa {
+  id              String     @id
+  cotizacion_id   String
+  descripcion     String
+  monto           Float      @default(0)
+  manual          Boolean    @default(false)
+  orden           Int        @default(0)
+  descuento_pct   Float      @default(0)
+  cantidad        Int        @default(1)
+  precio_unitario Float?
+  Cotizacion      Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
+
+  @@index([cotizacion_id])
+}
+
+model CotizacionPago {
+  id                 String     @id
+  cotizacion_id      String
+  monto              Float
+  fecha              DateTime   @default(now())
+  comprobante_url    String?
+  comprobante_nombre String?
+  creado_en          DateTime   @default(now())
+  actualizado_en     DateTime
+  eliminado          Boolean    @default(false)
+  eliminado_en       DateTime?
+  Cotizacion         Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
+
+  @@index([cotizacion_id])
+}
+
+model Empleado {
+  id                String              @id
+  usuario_id        String?             @unique
+  rut               String?             @db.VarChar(40)
+  cargo             String?
+  telefono          String?
+  fecha_ingreso     DateTime?
+  sueldo_base       Int?
+  activo            Boolean             @default(true)
+  creado_en         DateTime            @default(now())
+  actualizado_en    DateTime
+  eliminado         Boolean             @default(false)
+  eliminado_en      DateTime?
+  afp_id            String?
+  salud_id          String?
+  Asistencia        Asistencia[]
+  AFPConfig         AFPConfig?          @relation(fields: [afp_id], references: [id])
+  SaludConfig       SaludConfig?        @relation(fields: [salud_id], references: [id])
+  Usuario           Usuario?            @relation(fields: [usuario_id], references: [id])
+  EmpleadoDocumento EmpleadoDocumento[]
+  Epica             Epica[]
+  HHEmpleado        HHEmpleado[]
+  ProyectoMiembro   ProyectoMiembro[]
+  Rendicion         Rendicion[]
+  Tarea             Tarea[]
+  TareaDetalle      TareaDetalle[]
+  detalleVenta      detalleVenta[]
+
+  @@index([afp_id])
+  @@index([salud_id])
+}
+
+model Empresa {
+  id             String           @id
+  nombre         String
+  rut            String?          @db.VarChar(40)
+  correo         String?
+  telefono       String?
+  activa         Boolean          @default(true)
+  creada_en      DateTime         @default(now())
+  actualizada_en DateTime
+  eliminado      Boolean          @default(false)
+  eliminado_en   DateTime?
+  logo_public_id String?
+  logo_url       String?
+  direccion      String?
+  AFPConfig      AFPConfig[]
+  AuditLog       AuditLog[]
+  CIF            CIF[]
+  Cliente        Cliente[]
+  Compra         Compra[]
+  CompraCosteo   CompraCosteo[]
+  Cotizacion     Cotizacion[]
+  Epica          Epica[]
+  HHEmpleado     HHEmpleado[]
+  Producto       Producto[]
+  Proveedor      Proveedor[]
+  Proyecto       Proyecto[]
+  SaludConfig    SaludConfig[]
+  Tarea          Tarea[]
+  TareaHistorial TareaHistorial[]
+  TipoDia        TipoDia[]
+  TipoItem       TipoItem[]
+  UnidadItem     UnidadItem[]
+  Usuario        Usuario[]
+}
+
+model Epica {
+  id                String    @id
+  proyecto_id       String?
+  nombre            String
+  descripcion       String?
+  estado            String    @default("pendiente")
+  avance            Int       @default(0)
+  orden             Int?
+  fecha_inicio_plan DateTime?
+  fecha_fin_plan    DateTime?
+  dias_plan         Int?
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+  source            String    @default("MANUAL")
+  jira_key          String?
+  jira_estado       String?
+  jira_sprint       String?
+  jira_issue_color  String?
+  creado_en         DateTime  @default(now())
+  actualizado_en    DateTime
+  eliminado         Boolean   @default(false)
+  es_planificado    Boolean   @default(true)
+  responsable_id    String?
+  centro_costo      String?
+  destino           String    @default("PROYECTO")
+  empresa_id        String?
+  Empresa           Empresa?  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Proyecto          Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  Empleado          Empleado? @relation(fields: [responsable_id], references: [id])
+  Tarea             Tarea[]
+
+  @@unique([proyecto_id, jira_key])
+  @@index([proyecto_id])
+  @@index([responsable_id])
+}
+
+model HHEmpleado {
+  id              String         @id
+  empresa_id      String
+  empleado_id     String?
+  anio            Int
+  mes             Int
+  nombre_periodo  String?
+  nombre          String?
+  rut             String?        @db.VarChar(40)
+  dias_trabajados Int?
+  sueldo_base     Float?
+  extras          Float?
+  gratificacion   Float?
+  imponible1      Float?
+  imponible2      Float?
+  movilizacion    Float?
+  colacion        Float?
+  imponible3      Float?
+  imponible4      Float?
+  haberes         Float?
+  afp             Float?
+  unico           Float?
+  previsional     Float?
+  salud           Float?
+  antiguo         Float?
+  anticipos       Float?
+  prestamos       Float?
+  apv             Float?
+  desctos1        Float?
+  desctos2        Float?
+  liquido         Float?
+  empleador       Float?
+  pagado          Float?
+  feriado         Float?
+  indemnizacion   Float?
+  total           Float?
+  costoHH         Float?
+  horasMensuales  Float?
+  horasEfectivas  Float?
+  raw             Json?
+  creado_en       DateTime       @default(now())
+  actualizado_en  DateTime
+  cif_id          String?
+  CIF             CIF?           @relation(fields: [cif_id], references: [id])
+  Empleado        Empleado?      @relation(fields: [empleado_id], references: [id])
+  Empresa         Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  detalleVenta    detalleVenta[]
+
+  @@index([empleado_id])
+  @@index([empresa_id, anio, mes])
+  @@index([rut])
+}
+
+model Producto {
+  id             String       @id
+  empresa_id     String
   nombre         String
   sku            String?
   precio         Float
-  stock          Int       @default(0)
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  // soft delete
-  eliminado      Boolean   @default(false)
+  stock          Int          @default(0)
+  creado_en      DateTime     @default(now())
+  actualizado_en DateTime
+  eliminado      Boolean      @default(false)
   eliminado_en   DateTime?
-
-  //cotizaciones CotizacionItem[]
-  compras CompraItem[]
+  CompraItem     CompraItem[]
+  Empresa        Empresa      @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
   @@unique([sku, eliminado])
   @@index([empresa_id])
 }
 
-/**
- * =========================
- * PROYECTOS
- * =========================
- */
-model Proyecto {
-  id          String  @id @default(cuid())
-  empresa_id  String
-  empresa     Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  nombre      String
-  descripcion String?
-  presupuesto Float?
-  estado      String  @default("activo")
-
-  // ✅ NUEVO: planificación del proyecto
-  fecha_inicio_plan DateTime?
-  fecha_fin_plan    DateTime?
-  dias_plan         Int?
-
-  // ✅ ejecución real
-  fecha_inicio_real DateTime?
-  fecha_fin_real    DateTime?
-  dias_reales       Int?
-  motivo_retraso    String?   @db.Text
-
-  creada_en      DateTime         @default(now())
-  actualizado_en DateTime         @updatedAt
-  // soft delete
-  eliminado      Boolean          @default(false)
+model Proveedor {
+  id             String       @id
+  empresa_id     String
+  nombre         String
+  rut            String?      @db.VarChar(40)
+  correo         String?
+  telefono       String?
+  notas          String?
+  creado_en      DateTime     @default(now())
+  actualizado_en DateTime
+  eliminado      Boolean      @default(false)
   eliminado_en   DateTime?
-  tareaHistorial TareaHistorial[]
-  cotizaciones   Cotizacion[]
-  compras        Compra[]
-  rendiciones    Rendicion[]
+  Compra         Compra[]
+  CompraItem     CompraItem[]
+  Empresa        Empresa      @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
-  tareas   Tarea[]
-  miembros ProyectoMiembro[]
-  epicas   Epica[]
-  retrasos ProyectoRetraso[]
+  @@unique([correo, eliminado])
+  @@index([empresa_id])
+}
+
+model Proyecto {
+  id                String            @id
+  empresa_id        String
+  nombre            String
+  descripcion       String?
+  presupuesto       Float?
+  estado            String            @default("activo")
+  creada_en         DateTime          @default(now())
+  actualizado_en    DateTime
+  eliminado         Boolean           @default(false)
+  eliminado_en      DateTime?
+  dias_plan         Int?
+  dias_reales       Int?
+  fecha_fin_plan    DateTime?
+  fecha_fin_real    DateTime?
+  fecha_inicio_plan DateTime?
+  fecha_inicio_real DateTime?
+  motivo_retraso    String?
+  Compra            Compra[]
+  Cotizacion        Cotizacion[]
+  Epica             Epica[]
+  Empresa           Empresa           @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  ProyectoMiembro   ProyectoMiembro[]
+  ProyectoRetraso   ProyectoRetraso[]
+  Rendicion         Rendicion[]
+  Tarea             Tarea[]
+  TareaHistorial    TareaHistorial[]
 
   @@index([empresa_id])
 }
 
-model ProyectoRetraso {
-  id          String   @id @default(cuid())
-  proyecto_id String
-  proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  
-  comentario  String   @db.Text
-  actor_id    String?  // Who made the comment
-  creado_en   DateTime @default(now())
-
-  @@index([proyecto_id])
-}
-
 model ProyectoMiembro {
-  id          String   @id @default(cuid())
+  id          String   @id
   proyecto_id String
   empleado_id String
   rol         String?
   creado_en   DateTime @default(now())
-
-  proyecto Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  empleado Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  Empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  Proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
 
   @@unique([proyecto_id, empleado_id])
   @@index([empleado_id])
 }
 
-/**
- * =========================
- * TAREAS CON ÉPICAS
- * =========================
- */
-model Epica {
-  id           String    @id @default(cuid())
-  empresa_id   String?
-  empresa      Empresa?  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  proyecto_id  String?
-  proyecto     Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  destino      String    @default("PROYECTO")
-  centro_costo String?
+model ProyectoRetraso {
+  id          String   @id
+  proyecto_id String
+  comentario  String
+  actor_id    String?
+  creado_en   DateTime @default(now())
+  Proyecto    Proyecto @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
 
-  nombre      String
-  descripcion String?
-
-  estado String @default("pendiente")
-  avance Int    @default(0)
-  orden  Int?
-
-  fecha_inicio_plan DateTime?
-  fecha_fin_plan    DateTime?
-  dias_plan         Int?
-
-  fecha_inicio_real DateTime?
-  fecha_fin_real    DateTime?
-  dias_reales       Int?
-
-  source           String  @default("MANUAL")
-  jira_key         String?
-  es_planificado   Boolean @default(true) // Indica si se creó en la planificación inicial
-  jira_estado      String?
-  jira_sprint      String?
-  jira_issue_color String?
-
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  tareas Tarea[]
-
-  responsable_id String?
-  responsable    Empleado? @relation("EmpleadoEpica", fields: [responsable_id], references: [id], onDelete: SetNull)
-
-  @@unique([proyecto_id, jira_key])
   @@index([proyecto_id])
-  @@index([responsable_id])
+}
+
+model Rendicion {
+  id                                         String              @id
+  empleado_id                                String
+  proyecto_id                                String?
+  descripcion                                String?
+  monto_total                                Float               @default(0)
+  estado                                     String              @default("pendiente")
+  actualizado_en                             DateTime
+  revisada_por_id                            String?
+  eliminado                                  Boolean             @default(false)
+  eliminado_en                               DateTime?
+  creado_en                                  DateTime            @default(now())
+  empresa_id                                 String
+  usuarioId                                  String?
+  centro_costo                               String?
+  destino                                    String
+  monto_pagado                               Float               @default(0)
+  doc_entrega_url                            String?
+  doc_reembolso_url                          String?
+  monto_entregado                            Float               @default(0)
+  Compra                                     Compra[]
+  Empleado                                   Empleado            @relation(fields: [empleado_id], references: [id])
+  Proyecto                                   Proyecto?           @relation(fields: [proyecto_id], references: [id])
+  Usuario_Rendicion_revisada_por_idToUsuario Usuario?            @relation("Rendicion_revisada_por_idToUsuario", fields: [revisada_por_id], references: [id])
+  Usuario_Rendicion_usuarioIdToUsuario       Usuario?            @relation("Rendicion_usuarioIdToUsuario", fields: [usuarioId], references: [id])
+  RendicionAnticipo                          RendicionAnticipo[]
+  RendicionItem                              RendicionItem[]
+}
+
+model RendicionItem {
+  id              String    @id
+  rendicion_id    String
+  linea           Int
+  fecha           DateTime
+  descripcion     String
+  monto           Float
+  categoria       String?
+  comprobante_url String?
+  creado_en       DateTime  @default(now())
+  Rendicion       Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
+
+  @@unique([rendicion_id, linea])
+  @@index([rendicion_id])
+}
+
+model RolUsuario {
+  id             String    @id
+  nombre         String    @unique
+  codigo         String?   @unique
+  descripcion    String?
+  orden          Int?
+  activo         Boolean   @default(true)
+  creado_en      DateTime  @default(now())
+  actualizado_en DateTime
+  eliminado      Boolean   @default(false)
+  eliminado_en   DateTime?
+  Usuario        Usuario[]
+}
+
+model SaludConfig {
+  id             String     @id
+  empresa_id     String
+  tipo           String
+  nombre         String
+  tasa           Float
+  activo         Boolean    @default(true)
+  creado_en      DateTime   @default(now())
+  actualizado_en DateTime
+  Empleado       Empleado[]
+  Empresa        Empresa    @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  @@index([empresa_id])
 }
 
 model Tarea {
-  id           String    @id @default(cuid())
-  empresa_id   String?
-  empresa      Empresa?  @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-  proyecto_id  String?
-  proyecto     Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-  destino      String    @default("PROYECTO")
-  centro_costo String?
-  requisito_texto String?
-
-  nombre         String
-  descripcion    String?
-  responsable_id String?
-  responsable    Empleado? @relation(fields: [responsable_id], references: [id], onDelete: SetNull)
-
-  epica_id String?
-  epica    Epica?  @relation(fields: [epica_id], references: [id], onDelete: SetNull)
-
-  prioridad Int?
-  estado    String  @default("pendiente")
-  avance    Int     @default(0)
-  es_hito   Boolean @default(false)
-  orden     Int?
-
-  fecha_inicio_plan DateTime
-  fecha_fin_plan    DateTime
-  dias_plan         Int?
-
-  fecha_inicio_real DateTime?
-  fecha_fin_real    DateTime?
-  dias_reales       Int?
-
-  total_dias_plan    Int?
-  total_dias_reales  Int?
-  total_horas_plan   Float?
-  total_horas_reales Float?
-  total_costo_plan   Float?
-  total_costo_real   Float?
-  total_responsables Int?
-
-  source           String  @default("MANUAL")
-  jira_key         String?
-  es_planificado   Boolean @default(true)
-  jira_tipo        String?
-  jira_estado      String?
-  jira_sprint      String?
-  jira_issue_color String?
-
-  parent_id      String?
-  parent         Tarea?           @relation("TareaParent", fields: [parent_id], references: [id], onDelete: SetNull)
-  children       Tarea[]          @relation("TareaParent")
-  historial      TareaHistorial[]
-  creado_en      DateTime         @default(now())
-  actualizado_en DateTime         @updatedAt
-  eliminado      Boolean          @default(false)
-  eliminado_en   DateTime?
-
-  dependencias TareaDependencia[] @relation("TareaDependencias")
-  sucesoras    TareaDependencia[] @relation("TareaPredecesoras")
-
-  detalles TareaDetalle[]
-  evidencias TareaEvidencia[]
-  requisitos       TareaRequisito[] @relation("TareaRequisitos")
-  como_requisito   TareaRequisito[] @relation("PredecesoraRequisitos")
-
-  dias_desviacion Int?
+  id                                                      String             @id
+  proyecto_id                                             String?
+  nombre                                                  String
+  descripcion                                             String?
+  responsable_id                                          String?
+  prioridad                                               Int?
+  estado                                                  String             @default("pendiente")
+  avance                                                  Int                @default(0)
+  es_hito                                                 Boolean            @default(false)
+  orden                                                   Int?
+  fecha_inicio_plan                                       DateTime
+  fecha_fin_plan                                          DateTime
+  dias_plan                                               Int?
+  fecha_inicio_real                                       DateTime?
+  fecha_fin_real                                          DateTime?
+  dias_reales                                             Int?
+  total_dias_plan                                         Int?
+  total_dias_reales                                       Int?
+  total_horas_plan                                        Float?
+  total_horas_reales                                      Float?
+  total_costo_plan                                        Float?
+  total_costo_real                                        Float?
+  total_responsables                                      Int?
+  source                                                  String             @default("MANUAL")
+  jira_key                                                String?
+  jira_tipo                                               String?
+  jira_estado                                             String?
+  jira_sprint                                             String?
+  jira_issue_color                                        String?
+  parent_id                                               String?
+  creado_en                                               DateTime           @default(now())
+  actualizado_en                                          DateTime
+  eliminado                                               Boolean            @default(false)
+  eliminado_en                                            DateTime?
+  dias_desviacion                                         Int?
+  epica_id                                                String?
+  es_planificado                                          Boolean            @default(true)
+  centro_costo                                            String?
+  destino                                                 String             @default("PROYECTO")
+  empresa_id                                              String?
+  requisito_texto                                         String?
+  Empresa                                                 Empresa?           @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Epica                                                   Epica?             @relation(fields: [epica_id], references: [id])
+  Tarea                                                   Tarea?             @relation("TareaToTarea", fields: [parent_id], references: [id])
+  other_Tarea                                             Tarea[]            @relation("TareaToTarea")
+  Proyecto                                                Proyecto?          @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  Empleado                                                Empleado?          @relation(fields: [responsable_id], references: [id])
+  TareaDependencia_TareaDependencia_predecesora_idToTarea TareaDependencia[] @relation("TareaDependencia_predecesora_idToTarea")
+  TareaDependencia_TareaDependencia_tarea_idToTarea       TareaDependencia[] @relation("TareaDependencia_tarea_idToTarea")
+  TareaDetalle                                            TareaDetalle[]
+  TareaEvidencia                                          TareaEvidencia[]
+  TareaHistorial                                          TareaHistorial[]
+  TareaRequisito_TareaRequisito_predecesora_idToTarea     TareaRequisito[]   @relation("TareaRequisito_predecesora_idToTarea")
+  TareaRequisito_TareaRequisito_tarea_idToTarea           TareaRequisito[]   @relation("TareaRequisito_tarea_idToTarea")
 
   @@unique([proyecto_id, jira_key])
   @@index([epica_id])
+  @@index([estado])
   @@index([proyecto_id])
   @@index([responsable_id])
-  @@index([estado])
-}
-
-model TareaDetalle {
-  id       String @id @default(cuid())
-  tarea_id String
-  tarea    Tarea  @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
-
-  titulo      String
-  descripcion String?
-
-  responsable_id String?
-  responsable    Empleado? @relation("EmpleadoTareaDetalle", fields: [responsable_id], references: [id], onDelete: SetNull)
-
-  estado String @default("pendiente")
-  avance Int    @default(0)
-
-  fecha_inicio_plan DateTime
-  fecha_fin_plan    DateTime
-  dias_plan         Int
-
-  fecha_inicio_real DateTime?
-  fecha_fin_real    DateTime?
-  dias_reales       Int?
-
-  horas_plan Float?
-  horas_real Float?
-
-  valor_hora Float?
-  costo_plan Float?
-  costo_real Float?
-
-  dias_desviacion Int?
-
-  source           String  @default("MANUAL")
-  jira_key         String?
-  es_planificado   Boolean @default(true)
-  jira_tipo        String?
-  jira_estado      String?
-  jira_sprint      String?
-  jira_issue_color String?
-
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  evidencias TareaEvidencia[]
-
-  @@unique([tarea_id, jira_key])
 }
 
 model TareaDependencia {
-  id             String  @id @default(cuid())
-  tarea_id       String
-  predecesora_id String
-  tipo           String?
-
-  tarea       Tarea @relation("TareaDependencias", fields: [tarea_id], references: [id], onDelete: Cascade)
-  predecesora Tarea @relation("TareaPredecesoras", fields: [predecesora_id], references: [id], onDelete: Cascade)
+  id                                           String  @id
+  tarea_id                                     String
+  predecesora_id                               String
+  tipo                                         String?
+  Tarea_TareaDependencia_predecesora_idToTarea Tarea   @relation("TareaDependencia_predecesora_idToTarea", fields: [predecesora_id], references: [id], onDelete: Cascade)
+  Tarea_TareaDependencia_tarea_idToTarea       Tarea   @relation("TareaDependencia_tarea_idToTarea", fields: [tarea_id], references: [id], onDelete: Cascade)
 
   @@unique([tarea_id, predecesora_id])
   @@index([predecesora_id])
 }
 
+model TareaDetalle {
+  id                String           @id
+  tarea_id          String
+  titulo            String
+  descripcion       String?
+  responsable_id    String?
+  estado            String           @default("pendiente")
+  avance            Int              @default(0)
+  fecha_inicio_plan DateTime
+  fecha_fin_plan    DateTime
+  dias_plan         Int
+  fecha_inicio_real DateTime?
+  fecha_fin_real    DateTime?
+  dias_reales       Int?
+  horas_plan        Float?
+  horas_real        Float?
+  valor_hora        Float?
+  costo_plan        Float?
+  costo_real        Float?
+  dias_desviacion   Int?
+  source            String           @default("MANUAL")
+  jira_key          String?
+  jira_tipo         String?
+  jira_estado       String?
+  jira_sprint       String?
+  jira_issue_color  String?
+  creado_en         DateTime         @default(now())
+  actualizado_en    DateTime
+  eliminado         Boolean          @default(false)
+  eliminado_en      DateTime?
+  es_planificado    Boolean          @default(true)
+  Empleado          Empleado?        @relation(fields: [responsable_id], references: [id])
+  Tarea             Tarea            @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
+  TareaEvidencia    TareaEvidencia[]
+
+  @@unique([tarea_id, jira_key])
+}
+
 model TareaEvidencia {
-  id              String   @id @default(cuid())
-  
-  tarea_id        String?
-  tarea           Tarea?   @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
-  
-  subtarea_id     String?
-  subtarea        TareaDetalle? @relation(fields: [subtarea_id], references: [id], onDelete: Cascade)
+  id             String        @id
+  tarea_id       String?
+  subtarea_id    String?
+  archivo_url    String
+  archivo_nombre String?
+  comentario     String?
+  creado_en      DateTime      @default(now())
+  TareaDetalle   TareaDetalle? @relation(fields: [subtarea_id], references: [id], onDelete: Cascade)
+  Tarea          Tarea?        @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
 
-  archivo_url     String
-  archivo_nombre  String?
-  comentario      String?  @db.Text
-  
-  creado_en       DateTime @default(now())
-
-  @@index([tarea_id])
   @@index([subtarea_id])
+  @@index([tarea_id])
+}
+
+model TareaHistorial {
+  id               String             @id
+  empresa_id       String
+  proyecto_id      String?
+  tarea_id         String
+  tipo             TareaHistorialTipo
+  from_estado      String?
+  to_estado        String?
+  from_avance      Int?
+  to_avance        Int?
+  from_inicio_real DateTime?
+  to_inicio_real   DateTime?
+  from_fin_real    DateTime?
+  to_fin_real      DateTime?
+  source           String?
+  actor_id         String?
+  metadata         Json?
+  occurred_at      DateTime           @default(now())
+  Empresa          Empresa            @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  Proyecto         Proyecto?          @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
+  Tarea            Tarea              @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
+
+  @@index([empresa_id, proyecto_id, occurred_at])
+  @@index([proyecto_id, occurred_at])
+  @@index([tarea_id, occurred_at])
+}
+
+model TipoDia {
+  id           String         @id
+  empresa_id   String
+  nombre       String
+  valor        Float          @default(0)
+  eliminado    Boolean        @default(false)
+  eliminado_en DateTime?
+  Empresa      Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  detalleVenta detalleVenta[]
+
+  @@unique([empresa_id, nombre, eliminado])
+  @@index([empresa_id])
+}
+
+model TipoItem {
+  id                 String         @id
+  empresa_id         String
+  nombre             String
+  codigo             String?
+  porcentajeUtilidad Float          @default(0)
+  unidadItemId       String?
+  eliminado          Boolean        @default(false)
+  eliminado_en       DateTime?
+  CompraItem         CompraItem[]
+  Empresa            Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  UnidadItem         UnidadItem?    @relation(fields: [unidadItemId], references: [id])
+  detalleVenta       detalleVenta[]
+
+  @@unique([empresa_id, codigo, eliminado])
+  @@unique([empresa_id, nombre, eliminado])
+  @@index([empresa_id])
+  @@index([unidadItemId])
+}
+
+model UnidadItem {
+  id           String     @id
+  empresa_id   String
+  nombre       String
+  eliminado    Boolean    @default(false)
+  eliminado_en DateTime?
+  TipoItem     TipoItem[]
+  Empresa      Empresa    @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+
+  @@unique([empresa_id, nombre, eliminado])
+  @@index([empresa_id])
+}
+
+model Usuario {
+  id                                           String       @id
+  empresa_id                                   String
+  rol_id                                       String
+  nombre                                       String
+  correo                                       String
+  contrasena                                   String
+  creado_en                                    DateTime     @default(now())
+  actualizado_en                               DateTime
+  eliminado                                    Boolean      @default(false)
+  eliminado_en                                 DateTime?
+  AuditLog                                     AuditLog[]
+  Cotizacion                                   Cotizacion[]
+  Empleado                                     Empleado?
+  Rendicion_Rendicion_revisada_por_idToUsuario Rendicion[]  @relation("Rendicion_revisada_por_idToUsuario")
+  Rendicion_Rendicion_usuarioIdToUsuario       Rendicion[]  @relation("Rendicion_usuarioIdToUsuario")
+  Empresa                                      Empresa      @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
+  RolUsuario                                   RolUsuario   @relation(fields: [rol_id], references: [id], onDelete: Cascade)
+
+  @@unique([correo, eliminado])
+}
+
+model Venta {
+  id                   String         @id
+  numero               Int            @unique @default(autoincrement())
+  fecha                DateTime       @default(now())
+  ordenVentaId         String?
+  descripcion          String?
+  createdAt            DateTime       @default(now())
+  factorKAplicado      Float?
+  utilidadObjetivoBase UtilidadBase?  @default(COSTO)
+  utilidadObjetivoPct  Float?
+  eliminado            Boolean        @default(false)
+  eliminado_en         DateTime?
+  clienteId            String?
+  isFeriado            Boolean        @default(false)
+  isUrgencia           Boolean        @default(false)
+  descuentoPct         Float?         @default(0)
+  fecha_docto          DateTime?
+  folio                String?        @db.VarChar(50)
+  razon_social         String?        @db.VarChar(255)
+  rut_cliente          String?        @db.VarChar(40)
+  tipo_doc             Int?
+  total                Float?
+  CompraCosteo         CompraCosteo[]
+  Cliente              Cliente?       @relation(fields: [clienteId], references: [id])
+  Cotizacion           Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
+  detalleVenta         detalleVenta[]
+}
+
+model detalleVenta {
+  id                 String           @id
+  ventaId            String
+  descripcion        String
+  cantidad           Int
+  total              Float
+  fecha              DateTime         @default(now())
+  modo               DetalleVentaModo @default(HH)
+  tipoItemId         String?
+  compraId           String?
+  costoUnitario      Float?
+  costoTotal         Float?
+  empleadoId         String?
+  hhEmpleadoId       String?
+  costoHH            Float?
+  ventaUnitario      Float?
+  ventaTotal         Float?
+  utilidad           Float?
+  porcentajeUtilidad Float?
+  alpha              Float?
+  tipoDiaId          String?
+  isFeriado          Boolean          @default(false)
+  isUrgencia         Boolean          @default(false)
+  isFinSemana        Boolean          @default(false)
+  eliminado          Boolean          @default(false)
+  eliminado_en       DateTime?
+  descuentoPct       Float?           @default(0)
+  ventaTotalBruto    Float?
+  CompraItem         CompraItem?      @relation(fields: [compraId], references: [id])
+  Empleado           Empleado?        @relation(fields: [empleadoId], references: [id])
+  HHEmpleado         HHEmpleado?      @relation(fields: [hhEmpleadoId], references: [id])
+  TipoDia            TipoDia?         @relation(fields: [tipoDiaId], references: [id])
+  TipoItem           TipoItem?        @relation(fields: [tipoItemId], references: [id])
+  Venta              Venta            @relation(fields: [ventaId], references: [id], onDelete: Cascade)
+
+  @@index([compraId])
+  @@index([empleadoId])
+  @@index([hhEmpleadoId])
+  @@index([modo])
+  @@index([tipoItemId])
+  @@index([ventaId])
+}
+
+model Asistencia {
+  id             String   @id
+  empleado_id    String
+  fecha          DateTime @db.Date
+  estado         String   @default("AUSENTE")
+  observacion    String?
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime
+  Empleado       Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+
+  @@unique([empleado_id, fecha])
+  @@index([empleado_id])
+  @@index([fecha])
+}
+
+model CotizacionAdjunto {
+  id            String     @id
+  cotizacion_id String
+  tipo          String
+  url           String
+  nombre        String?
+  creado_en     DateTime   @default(now())
+  porcentaje    Float      @default(0)
+  Cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
+
+  @@index([cotizacion_id])
+}
+
+model EmpleadoDocumento {
+  id                      String              @id
+  empleado_id             String
+  nombre                  String
+  es_carpeta              Boolean             @default(false)
+  url                     String?
+  tamano                  String?
+  parent_id               String?
+  creado_en               DateTime            @default(now())
+  subido_por              String?
+  Empleado                Empleado            @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+  EmpleadoDocumento       EmpleadoDocumento?  @relation("EmpleadoDocumentoToEmpleadoDocumento", fields: [parent_id], references: [id], onDelete: Cascade)
+  other_EmpleadoDocumento EmpleadoDocumento[] @relation("EmpleadoDocumentoToEmpleadoDocumento")
+
+  @@index([empleado_id])
+  @@index([parent_id])
+}
+
+model RendicionAnticipo {
+  id           String    @id
+  rendicion_id String
+  monto        Float
+  fecha        DateTime  @default(now())
+  doc_url      String?
+  creado_en    DateTime  @default(now())
+  Rendicion    Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
+
+  @@index([rendicion_id])
+}
+
+model TareaRequisito {
+  id                                         String   @id
+  tarea_id                                   String
+  predecesora_id                             String?
+  nombre                                     String
+  completado                                 Boolean  @default(false)
+  creado_en                                  DateTime @default(now())
+  Tarea_TareaRequisito_predecesora_idToTarea Tarea?   @relation("TareaRequisito_predecesora_idToTarea", fields: [predecesora_id], references: [id])
+  Tarea_TareaRequisito_tarea_idToTarea       Tarea    @relation("TareaRequisito_tarea_idToTarea", fields: [tarea_id], references: [id], onDelete: Cascade)
+
+  @@index([predecesora_id])
+  @@index([tarea_id])
+}
+
+enum CentroCosto {
+  PMC
+  PUQ
+}
+
+enum CompraDestino {
+  PROYECTO
+  ADMINISTRACION
+  TALLER
+}
+
+enum DetalleVentaModo {
+  HH
+  COMPRA
+}
+
+enum EstadoCotizacion {
+  COTIZACION
+  ORDEN_VENTA
+  FACTURADA
+  PAGADA
+  ACEPTADA
+  RECHAZADA
+  ENTREGADO
+  POR_FACTURAR
 }
 
 enum TareaHistorialTipo {
@@ -655,731 +1016,13 @@ enum TareaHistorialTipo {
   IMPORT
 }
 
-model TareaHistorial {
-  id String @id @default(cuid())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  proyecto_id String?
-  proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-
-  tarea_id String
-  tarea    Tarea  @relation(fields: [tarea_id], references: [id], onDelete: Cascade)
-
-  tipo TareaHistorialTipo
-
-  from_estado String?
-  to_estado   String?
-
-  from_avance Int?
-  to_avance   Int?
-
-  from_inicio_real DateTime?
-  to_inicio_real   DateTime?
-  from_fin_real    DateTime?
-  to_fin_real      DateTime?
-
-  source   String? // "JIRA" | "ERP" | "SYSTEM"
-  actor_id String? // usuario que cambió (opcional)
-  metadata Json?
-
-  occurred_at DateTime @default(now())
-
-  @@index([empresa_id, proyecto_id, occurred_at])
-  @@index([tarea_id, occurred_at])
-  @@index([proyecto_id, occurred_at])
-}
-
-/**
- * =========================
- * COTIZACIONES
- * =========================
- */
-enum EstadoCotizacion {
-  COTIZACION
-  ACEPTADA
-  ORDEN_VENTA
-  ENTREGADO
-  POR_FACTURAR
-  FACTURADA
-  PAGADA
-  RECHAZADA
-}
-
-/**
- * Cotización principal:
- * - cliente obligatorio
- * - proyecto opcional (se asigna después)
- * - glosas = líneas descriptivas con monto
- */
-model Cotizacion {
-  id     String @id @default(cuid())
-  numero Int    @unique @default(autoincrement())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  proyecto_id String?
-  proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: SetNull)
-
-  cliente_id String
-  cliente    Cliente @relation(fields: [cliente_id], references: [id], onDelete: Restrict)
-
-  cliente_responsable_id String?
-  cliente_responsable    ClienteResponsable? @relation(fields: [cliente_responsable_id], references: [id], onDelete: SetNull)
-
-  // ✅ temporalmente opcional
-  vendedor_id String?
-  vendedor    Usuario? @relation("CotizacionVendedor", fields: [vendedor_id], references: [id], onDelete: Restrict)
-
-  asunto String?
-
-  vigencia_dias Int @default(15)
-
-  subtotal             Float   @default(0)
-  iva                  Float   @default(0)
-  total                Float   @default(0)
-  terminos_condiciones String?
-  acuerdo_pago         String?
-
-  creada_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  fecha_documento       DateTime?
-  vencimiento_documento DateTime?
-
-  fecha_ov        DateTime?
-  fecha_facturada DateTime?
-  fecha_aceptada        DateTime?
-  fecha_entregado       DateTime?
-  fecha_por_facturar    DateTime?
-  fecha_pagada          DateTime?
-  fecha_rechazada       DateTime?
-
-  motivo_rechazo String?
-
-  // ✅ NUEVO: descuento general de la cotización (porcentaje 0..99.99)
-  descuento_pct   Float @default(0)
-  descuento_monto Float @default(0) // monto descontado calculado (opcional pero útil)
-
-  // ✅ NUEVO: Documentos adjuntos
-  doc_oc_url          String?
-  doc_hes_url         String?
-  doc_fac_url         String?
-  doc_comprobante_url String?
-  doc_gd_url          String?
-
-  estado EstadoCotizacion @default(COTIZACION)
-
-  glosas CotizacionGlosa[]
-  pagos  CotizacionPago[]
-  adjuntos CotizacionAdjunto[]
-
-  ventas  Venta[]
-  compras Compra[]
-
-  @@index([cliente_responsable_id])
-  @@index([empresa_id])
-  @@index([proyecto_id])
-  @@index([cliente_id])
-  @@index([vendedor_id])
-}
-
-/**
- * Glosa:
- * - descripcion: texto que verá el cliente ("Desarrollo sistema web")
- * - monto: monto asignado a esa glosa
- * - manual: true si el usuario la editó manualmente
- * - orden: para mantener el orden en UI/PDF
- */
-model CotizacionGlosa {
-  id            String     @id @default(cuid())
-  cotizacion_id String
-  cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
-
-  descripcion String
-  monto       Float   @default(0)
-  manual      Boolean @default(false)
-  orden       Int     @default(0)
-
-  // Campos para soportar extracción de items exactos en Pdfs
-  cantidad        Int    @default(1)
-  precio_unitario Float?
-
-  descuento_pct Float @default(0)
-
-  @@index([cotizacion_id])
-}
-
-/**
- * =========================
- * PAGOS DE COTIZACIONES
- * =========================
- */
-model CotizacionPago {
-  id            String     @id @default(cuid())
-  cotizacion_id String
-  cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
-  
-  monto         Float
-  fecha         DateTime   @default(now())
-  comprobante_url String?
-  comprobante_nombre String?
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-  
-  @@index([cotizacion_id])
-}
-
-model CotizacionAdjunto {
-  id            String     @id @default(cuid())
-  cotizacion_id String
-  cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
-  
-  tipo          String     // "hes", "fac", "comprobante", "gd"
-  url           String
-  nombre        String?    // nombre original del archivo
-  porcentaje    Float      @default(0)
-  
-  creado_en     DateTime   @default(now())
-  
-  @@index([cotizacion_id])
-}
-
-/**
- * OPCIONAL (si quieres mantener el modelo antiguo para cotizar productos/servicios):
- * Si NO lo vas a usar, bórralo. Si lo mantienes, no lo uses para "glosas".
- * enum cotizacionItemTipo {
- * PRODUCTO
- * SERVICIO
- * }
- * model CotizacionItem {
- * id            String     @id @default(cuid())
- * cotizacion_id String
- * cotizacion    Cotizacion @relation(fields: [cotizacion_id], references: [id], onDelete: Cascade)
- * tipo          cotizacionItemTipo
- * producto_id    String?
- * producto       Producto? @relation(fields: [producto_id], references: [id], onDelete: SetNull)
- * item           String?
- * descripcion    String?
- * cantidad       Int
- * precioUnitario Float
- * total          Float
- * @@index([cotizacion_id])
- * }
- */
-
-/**
- * =========================
- * VENTAS
- * =========================
- */
-enum DetalleVentaModo {
-  HH
-  COMPRA
-}
-
 enum UtilidadBase {
-  COSTO // (venta - costo) / costo   -> permite 130%, 180%, etc.
-  VENTA // (venta - costo) / venta   -> debe ser < 100
-}
-
-model Venta {
-  id                  String         @id @default(cuid())
-  numero              Int            @unique @default(autoincrement())
-  fecha               DateTime       @default(now())
-  ordenVentaId        String?
-  descripcion         String?
-  ordenVenta          Cotizacion?    @relation(fields: [ordenVentaId], references: [id], onDelete: Cascade)
-  detalles            detalleVenta[]
-  asignaciones_costeo CompraCosteo[]
-
-  descuentoPct Float? @default(0) // ✅ descuento general (0-100)
-
-  // ✅ NUEVO (opcional, no rompe)
-  utilidadObjetivoBase UtilidadBase? @default(COSTO)
-  utilidadObjetivoPct  Float?
-  factorKAplicado      Float?
-
-  // ✅ NUEVO: flags por costeo
-  isFeriado  Boolean @default(false)
-  isUrgencia Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  
-  // === RCV (opcionales)
-  tipo_doc        Int?
-  folio           String?   @db.VarChar(50)
-  rut_cliente     String?   @db.VarChar(40)
-  razon_social    String?   @db.VarChar(255)
-  fecha_docto     DateTime?
-  total           Float?    // total bruto para facilitar RCV
-
-  // ✅ soft delete (AGREGAR)
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-  Cliente      Cliente?  @relation(fields: [clienteId], references: [id])
-  clienteId    String?
-}
-
-model detalleVenta {
-  id String @id @default(cuid())
-
-  ventaId     String
-  descripcion String
-  cantidad    Int
-  total       Float
-  fecha       DateTime @default(now())
-
-  descuentoPct    Float? @default(0) // ✅ descuento por ítem (0-100)
-  ventaTotalBruto Float? // ✅ opcional: venta antes de descuentos (post-k)
-
-  modo DetalleVentaModo @default(HH)
-
-  tipoItemId String?
-
-  compraId      String?
-  costoUnitario Float?
-  costoTotal    Float?
-
-  empleadoId   String?
-  hhEmpleadoId String?
-  costoHH      Float?
-
-  ventaUnitario      Float?
-  ventaTotal         Float?
-  utilidad           Float?
-  porcentajeUtilidad Float?
-  alpha              Float?
-
-  tipoDiaId String?
-
-  isFeriado   Boolean @default(false)
-  isUrgencia  Boolean @default(false)
-  isFinSemana Boolean @default(false)
-
-  // ✅ catálogos admin: SetNull para no romper históricos
-  tipoDia  TipoDia?  @relation(fields: [tipoDiaId], references: [id], onDelete: SetNull)
-  tipoItem TipoItem? @relation(fields: [tipoItemId], references: [id], onDelete: SetNull)
-
-  compras CompraItem? @relation(fields: [compraId], references: [id], onDelete: SetNull)
-
-  venta Venta @relation(fields: [ventaId], references: [id], onDelete: Cascade)
-
-  hhEmpleado HHEmpleado? @relation(fields: [hhEmpleadoId], references: [id], onDelete: SetNull)
-  empleado   Empleado?   @relation(fields: [empleadoId], references: [id], onDelete: SetNull)
-
-  // ✅ soft delete (AGREGAR)
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  @@index([ventaId])
-  @@index([modo])
-  @@index([tipoItemId])
-  @@index([compraId])
-  @@index([empleadoId])
-  @@index([hhEmpleadoId])
-}
-
-/**
- * =========================
- * CATÁLOGOS ADMIN (FK, no enum)
- * =========================
- */
-model TipoDia {
-  id         String  @id @default(cuid())
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  nombre String
-  valor  Float  @default(0)
-
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  detalleVentas detalleVenta[]
-
-  @@unique([empresa_id, nombre, eliminado])
-  @@index([empresa_id])
-}
-
-model UnidadItem {
-  id         String  @id @default(cuid())
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  nombre String
-
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  tipoItems TipoItem[]
-
-  @@unique([empresa_id, nombre, eliminado])
-  @@index([empresa_id])
-}
-
-model TipoItem {
-  id         String  @id @default(cuid())
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  nombre             String
-  codigo             String? // "HH", "MATERIAL"... (recomendado)
-  porcentajeUtilidad Float   @default(0)
-
-  unidadItemId String?
-  unidadItem   UnidadItem? @relation(fields: [unidadItemId], references: [id], onDelete: SetNull)
-
-  eliminado    Boolean   @default(false)
-  eliminado_en DateTime?
-
-  ventas      detalleVenta[]
-  compraItems CompraItem[]
-
-  @@unique([empresa_id, codigo, eliminado])
-  @@unique([empresa_id, nombre, eliminado])
-  @@index([empresa_id])
-  @@index([unidadItemId])
-}
-
-/**
- * =========================
- * COMPRAS
- * =========================
- */
-
-enum CompraDestino {
-  PROYECTO
-  ADMINISTRACION
-  TALLER
-}
-
-enum CentroCosto {
-  PMC
-  PUQ
+  COSTO
+  VENTA
 }
 
 enum estadoCompra {
   ORDEN_COMPRA
   FACTURADA
   PAGADA
-}
-
-model Compra {
-  id     String @id @default(cuid())
-  numero Int    @unique @default(autoincrement())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  // ✅ NUEVO: imputación (no solo proyecto)
-  destino      CompraDestino @default(PROYECTO) // PROYECTO | ADMINISTRACION | TALLER
-  centro_costo CentroCosto? // PMC | PUQ (solo ADMINISTRACION/TALLER)
-
-  // ✅ Proyecto opcional (solo cuando destino = PROYECTO)
-  proyecto_id String?
-  proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)
-
-  rendicion_id String? // ✅
-  rendicion    Rendicion? @relation(fields: [rendicion_id], references: [id])
-
-  estado         estadoCompra @default(ORDEN_COMPRA)
-  total          Float
-  creada_en      DateTime     @default(now())
-  actualizado_en DateTime     @updatedAt
-  eliminado      Boolean      @default(false)
-  eliminado_en   DateTime?
-
-  cotizacionId String?
-  cotizacion   Cotizacion? @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
-
-  items               CompraItem[]
-  asignaciones_costeo CompraCosteo[]
-
-  proveedor   Proveedor? @relation(fields: [proveedorId], references: [id])
-  proveedorId String?
-
-  // === RCV (opcionales)
-  tipo_doc        Int?
-  folio           String?   @db.VarChar(50)
-  rut_proveedor   String?   @db.VarChar(40)
-  razon_social    String?   @db.VarChar(255)
-  fecha_docto     DateTime?
-  fecha_recepcion DateTime?
-
-  // ✅ factura PDF
-  factura_url    String?
-  factura_numero String?   @db.VarChar(50)
-  factura_fecha  DateTime?
-  factura_monto  Float?
-
-  @@index([empresa_id])
-  @@index([proyecto_id])
-  @@index([rendicion_id])
-  @@index([destino, centro_costo])
-}
-
-model CompraItem {
-  id           String  @id @default(cuid())
-  compra_id    String?
-  producto_id  String?
-  proveedor_id String?
-  item         String?
-  cantidad     Int
-  precio_unit  Float?
-  total        Float
-
-  // categoría (admin)
-  tipoItemId String?
-  tipoItem   TipoItem? @relation(fields: [tipoItemId], references: [id], onDelete: SetNull)
-
-  detalleVentas detalleVenta[]
-
-  compra    Compra?    @relation(fields: [compra_id], references: [id], onDelete: Cascade)
-  producto  Producto?  @relation(fields: [producto_id], references: [id], onDelete: Cascade)
-  proveedor Proveedor? @relation(fields: [proveedor_id], references: [id], onDelete: Cascade)
-
-  @@index([compra_id])
-  @@index([tipoItemId])
-}
-
-model CompraCosteo {
-  id String @id @default(cuid())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  compra_id String
-  compra    Compra @relation(fields: [compra_id], references: [id], onDelete: Cascade)
-
-  venta_id String
-  venta    Venta  @relation(fields: [venta_id], references: [id], onDelete: Cascade)
-
-  monto          Float    @default(0)
-  creado_en      DateTime @default(now())
-  actualizado_en DateTime @updatedAt
-
-  @@unique([compra_id, venta_id])
-  @@index([empresa_id])
-  @@index([compra_id])
-  @@index([venta_id])
-}
-
-/**
- * =========================
- * RENDICIONES
- * =========================
- */
-model Rendicion {
-  id           String  @id @default(cuid())
-  empresa_id   String
-  empleado_id  String
-  proyecto_id  String? // ✅ AHORA OPCIONAL
-  destino      String
-  centro_costo String?
-  descripcion  String?
-  monto_total    Float   @default(0)
-  monto_entregado Float  @default(0) // ✅ Nuevo: Anticipo entregado
-  monto_pagado   Float   @default(0) // ✅ Reembolso real realizado
-  estado         String  @default("pendiente")
-
-  doc_entrega_url   String? // ✅ Comprobante de anticipo
-  doc_reembolso_url String? // ✅ Comprobante de pago final/devolución
-
-  creado_en      DateTime  @default(now())
-  actualizado_en DateTime  @updatedAt
-  eliminado      Boolean   @default(false)
-  eliminado_en   DateTime?
-
-  revisada_por_id String?
-  revisada_por    Usuario? @relation("RendicionRevisadaPor", fields: [revisada_por_id], references: [id])
-
-  proyecto Proyecto? @relation(fields: [proyecto_id], references: [id])
-  empleado Empleado  @relation(fields: [empleado_id], references: [id])
-
-  items     RendicionItem[]
-  anticipos RendicionAnticipo[] // ✅ Múltiples transferencias
-  compras   Compra[] // ✅ 1 rendición -> muchas compras (relación por Compra.rendicion_id)
-  usuario   Usuario?        @relation(fields: [usuarioId], references: [id])
-  usuarioId String?
-}
-
-model RendicionAnticipo {
-  id           String    @id @default(cuid())
-  rendicion_id String
-  rendicion    Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
-  
-  monto        Float
-  fecha        DateTime  @default(now())
-  doc_url      String?   // Comprobante específico de esta transferencia
-  
-  creado_en    DateTime  @default(now())
-
-  @@index([rendicion_id])
-}
-
-model RendicionItem {
-  id           String    @id @default(cuid())
-  rendicion_id String
-  rendicion    Rendicion @relation(fields: [rendicion_id], references: [id], onDelete: Cascade)
-
-  linea           Int
-  fecha           DateTime
-  descripcion     String
-  monto           Float
-  categoria       String?
-  comprobante_url String?
-
-  creado_en DateTime @default(now())
-
-  @@unique([rendicion_id, linea])
-  @@index([rendicion_id])
-}
-
-/**
- * =========================
- * AUDITORÍA / HISTORIAL
- * =========================
- */
-model AuditLog {
-  id String @id @default(cuid())
-
-  empresa_id String?
-  empresa    Empresa? @relation(fields: [empresa_id], references: [id], onDelete: SetNull)
-
-  usuario_id String?
-  usuario    Usuario? @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
-
-  entidad     String
-  registro_id String
-  accion      String
-
-  detalles   Json?
-  ip         String?
-  user_agent String?
-
-  creado_en DateTime @default(now())
-
-  @@index([empresa_id])
-  @@index([usuario_id])
-  @@index([entidad, registro_id])
-  @@index([accion])
-  @@index([creado_en])
-}
-
-/**
- * =========================
- * HH EMPLEADO
- * =========================
- */
-
-model CIF {
-  id String @id @default(cuid())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  // opcional: si quieres que el CIF “aplique” a un periodo específico
-  anio Int?
-  mes  Int?
-
-  valor     Float    @default(0)
-  nota      String? // ej: "CIF Enero", "Actualización arriendo", etc.
-  creado_en DateTime @default(now())
-
-  // relación inversa
-  hhempleados HHEmpleado[]
-
-  @@index([empresa_id])
-  @@index([empresa_id, creado_en])
-  @@index([empresa_id, anio, mes])
-}
-
-model HHEmpleado {
-  id String @id @default(cuid())
-
-  empresa_id String
-  empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
-
-  empleado_id String?
-  empleado    Empleado? @relation(fields: [empleado_id], references: [id], onDelete: SetNull)
-
-  anio           Int
-  mes            Int
-  nombre_periodo String?
-
-  nombre String?
-  rut    String? @db.VarChar(40)
-
-  dias_trabajados Int?
-
-  sueldo_base   Float?
-  extras        Float?
-  gratificacion Float?
-
-  imponible1   Float?
-  imponible2   Float?
-  movilizacion Float?
-  colacion     Float?
-  imponible3   Float?
-  imponible4   Float?
-
-  haberes Float?
-
-  afp         Float?
-  unico       Float?
-  previsional Float?
-  salud       Float?
-  antiguo     Float?
-  anticipos   Float?
-  prestamos   Float?
-  apv         Float?
-
-  desctos1 Float?
-  desctos2 Float?
-
-  liquido   Float?
-  empleador Float?
-
-  pagado        Float?
-  feriado       Float?
-  indemnizacion Float?
-  total         Float?
-  costoHH       Float?
-
-  horasMensuales Float?
-  horasEfectivas Float?
-
-  raw Json?
-
-  cif_id String?
-  cif    CIF?    @relation(fields: [cif_id], references: [id], onDelete: SetNull)
-
-  creado_en      DateTime       @default(now())
-  actualizado_en DateTime       @updatedAt
-  ventas         detalleVenta[]
-
-  @@index([empresa_id, anio, mes])
-  @@index([empleado_id])
-  @@index([rut])
-}
-
-model TareaRequisito {
-  id              String   @id @default(cuid())
-  tarea_id        String
-  tarea           Tarea    @relation("TareaRequisitos", fields: [tarea_id], references: [id], onDelete: Cascade)
-  predecesora_id  String?
-  predecesora     Tarea?   @relation("PredecesoraRequisitos", fields: [predecesora_id], references: [id], onDelete: SetNull)
-  nombre          String
-  completado      Boolean  @default(false)
-  creado_en       DateTime @default(now())
-
-  @@index([tarea_id])
-  @@index([predecesora_id])
 }

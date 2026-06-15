@@ -8,6 +8,9 @@ export const EmpresaCreateBody = Type.Object({
   correo: Type.Optional(Type.String({ format: "email" })),
   telefono: Type.Optional(Type.String()),
   activa: Type.Optional(Type.Boolean()),
+  logo_url: Type.Optional(Type.String()),
+  logo_public_id: Type.Optional(Type.String()),
+  direccion: Type.Optional(Type.String()),
 });
 
 export const EmpresaUpdateBody = Type.Partial(EmpresaCreateBody);

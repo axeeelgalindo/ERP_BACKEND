@@ -184,6 +184,7 @@ export const getCotizacion = async (request, reply) => {
         eliminado: false,
       },
       include: {
+        empresa: true,
         proyecto: true,
         cliente: true,
         cliente_responsable: true,
@@ -394,9 +395,18 @@ export const createCotizacion = async (request, reply) => {
       const vencimientoDocumento = new Date(fechaDocumento);
       vencimientoDocumento.setDate(vencimientoDocumento.getDate() + vigenciaDias);
 
+      // Obtener el número correlativo para la empresa
+      const maxCotizacion = await tx.cotizacion.findFirst({
+        where: { empresa_id: empresaId },
+        orderBy: { numero: "desc" },
+        select: { numero: true },
+      });
+      const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+
       // Crear cotización
       const cot = await tx.cotizacion.create({
         data: {
+          numero: nextNumero,
           empresa_id: empresaId,
           proyecto_id: proyecto_id || null,
           cliente_id,
@@ -1222,8 +1232,17 @@ export const importVentasCSV = async (request, reply) => {
             const neto = Math.round(montoTotal / 1.19);
             const iva = montoTotal - neto;
 
+            // Obtener el número correlativo para la empresa
+            const maxCotizacion = await tx.cotizacion.findFirst({
+              where: { empresa_id: empresaId },
+              orderBy: { numero: "desc" },
+              select: { numero: true },
+            });
+            const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+
             cot = await tx.cotizacion.create({
               data: {
+                numero: nextNumero,
                 empresa_id: empresaId,
                 cliente_id: cliente.id,
                 vendedor_id: userId,

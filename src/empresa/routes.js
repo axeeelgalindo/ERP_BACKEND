@@ -6,6 +6,7 @@ import {
   deleteEmpresa,
   disableEmpresa,
   restoreEmpresa,
+  uploadEmpresaLogo,
 } from "./controllers.js";
 
 import {
@@ -33,6 +34,13 @@ export default async function empresaRoutes(server) {
     "/empresa/update/:id",
     { ...guard, schema: { params: EmpresaIdParam, body: EmpresaUpdateBody } },
     updateEmpresa
+  );
+
+  // Subir logo de empresa
+  server.post(
+    "/empresa/logo/:id",
+    { ...guard, schema: { params: EmpresaIdParam } },
+    uploadEmpresaLogo
   );
 
   // Soft-delete

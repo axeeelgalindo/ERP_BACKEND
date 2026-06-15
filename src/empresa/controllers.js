@@ -26,12 +26,20 @@ export async function listEmpresas(request, reply) {
       ...(showDeleted ? {} : { eliminado: false }),
     };
 
-    const total = await prisma.empresa.count({ where });
+        const total = await prisma.empresa.count({ where });
     const data = await prisma.empresa.findMany({
       where,
       skip: (page - 1) * pageSize,
       take: pageSize,
       orderBy: { creada_en: "desc" },
+      include: {
+        usuarios: {
+          where: { eliminado: false },
+          include: {
+            rol: true,
+          },
+        },
+      },
     });
 
     return reply.send({ total, data });
@@ -183,4 +191,71 @@ export async function restoreEmpresa(request, reply) {
   });
 
   return reply.send({ success: true, empresa: upd });
+}
+
+/* ========== SUBIR LOGO DE LA EMPRESA ========== */
+import fs from "fs";
+import path from "path";
+import { pipeline } from "stream/promises";
+
+function ensureDir(p) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+
+function safeExt(filename = "") {
+  const ext = path.extname(filename).toLowerCase();
+  const ok = [".png", ".jpg", ".jpeg", ".webp"];
+  return ok.includes(ext) ? ext : ".png";
+}
+
+function sanitizeDirName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_")
+    .replace(/__+/g, "_");
+}
+
+export async function uploadEmpresaLogo(request, reply) {
+  try {
+    const { id } = request.params;
+
+    const empresa = await prisma.empresa.findUnique({
+      where: { id },
+    });
+    if (!empresa) return reply.notFound("Empresa no encontrada");
+
+    const sanitizedName = sanitizeDirName(empresa.nombre) || id;
+    const uploadDir = path.resolve(process.cwd(), "uploads", "empresas", sanitizedName, "logo");
+    ensureDir(uploadDir);
+
+    const file = await request.file();
+    if (!file) {
+      return reply.code(400).send({ message: "Archivo requerido (field: file)" });
+    }
+
+    const ext = safeExt(file.filename);
+    const filename = `logo_${Date.now()}${ext}`;
+    const filepath = path.join(uploadDir, filename);
+
+    await pipeline(file.file, fs.createWriteStream(filepath));
+
+    const logo_url = `/api/uploads/empresas/${sanitizedName}/logo/${filename}`;
+
+    const updated = await prisma.empresa.update({
+      where: { id },
+      data: {
+        logo_url,
+        logo_public_id: filename,
+      },
+    });
+
+    return reply.send({
+      logo_url: updated.logo_url,
+      logo_public_id: updated.logo_public_id,
+    });
+  } catch (error) {
+    console.error("❌ uploadEmpresaLogo", error);
+    return reply.status(500).send({ error: "Error al subir logo de empresa" });
+  }
 }
