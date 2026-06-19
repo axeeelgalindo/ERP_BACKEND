@@ -9,6 +9,9 @@ import fsp from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 
+import { analizarCotizacionConOllama } from "../modules/ia/ollama.service.js";
+import { extraerTextoDeDocumento } from "../modules/documentos/document-parser.service.js";
+
 const prisma = new PrismaClient();
 
 const DEFAULT_PAGE = 1;
@@ -258,8 +261,7 @@ export async function importComprasCSV(request, reply) {
 
             if (!rutProv || !folio || montoTotal <= 0) {
               throw new Error(
-                `Fila inválida: rutProv=${rutProv || "-"} folio=${
-                  folio || "-"
+                `Fila inválida: rutProv=${rutProv || "-"} folio=${folio || "-"
                 } montoTotal=${montoTotal}`
               );
             }
@@ -296,7 +298,7 @@ export async function importComprasCSV(request, reply) {
               skipped++;
               continue;
             }
-            
+
             // 4) crear compra
             await tx.compra.create({
               data: {
@@ -425,6 +427,7 @@ export async function listCompras(request, reply) {
         proveedor: { select: { id: true, nombre: true, rut: true } },
         proyecto: { select: { id: true, nombre: true } },
         cotizacion: { select: { id: true, numero: true, estado: true } },
+        empresa: true,
 
         // ✅ NUEVO: para mostrar en tabla / modal
         rendicion: {
@@ -501,6 +504,7 @@ export async function getCompra(request, reply) {
       proveedor: true,
       proyecto: true,
       cotizacion: true,
+      empresa: true,
 
       // ✅ NUEVO
       rendicion: {
@@ -534,140 +538,140 @@ export async function createCompra(request, reply) {
   try {
     const empresa_id = scope.isMaster ? body.empresa_id || scope.empresaId : scope.empresaId;
 
-  const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
+    const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
-  // ✅ NUEVO
-  const destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
-  const centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
-  const rendicion_id = body.rendicion_id ?? null;
+    // ✅ NUEVO
+    const destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
+    const centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
+    const rendicion_id = body.rendicion_id ?? null;
 
-  // normalizar items/total
-  const items = Array.isArray(body.items) ? body.items : [];
-  const total = body.total != null ? Number(body.total) : calcTotal(items);
+    // normalizar items/total
+    const items = Array.isArray(body.items) ? body.items : [];
+    const total = body.total != null ? Number(body.total) : calcTotal(items);
 
-  // ✅ VALIDACIONES (imputación)
-  const isProyecto = destino === "PROYECTO";
-  const isAdminOTaller = destino === "ADMINISTRACION" || destino === "TALLER";
+    // ✅ VALIDACIONES (imputación)
+    const isProyecto = destino === "PROYECTO";
+    const isAdminOTaller = destino === "ADMINISTRACION" || destino === "TALLER";
 
-  if (!isProyecto && !isAdminOTaller) {
-    return reply.code(400).send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
-  }
-
-  if (isProyecto) {
-    if (!body.proyecto_id) {
-      return reply.code(400).send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
-    }
-    if (centro_costo) {
-      return reply.code(400).send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
-    }
-  }
-
-  if (isAdminOTaller) {
-    if (!centro_costo || (centro_costo !== "PMC" && centro_costo !== "PUQ")) {
-      return reply.code(400).send({ error: "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER" });
-    }
-    if (body.proyecto_id) {
-      return reply.code(400).send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
-    }
-  }
-
-  const created = await prisma.$transaction(async (tx) => {
-    // ✅ Antes validabas siempre proyecto; ahora depende del destino
-    if (isProyecto) await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
-
-    await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
-    await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
-
-    // Validar productos/proveedores de items
-    for (const it of items) {
-      if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
-      if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
+    if (!isProyecto && !isAdminOTaller) {
+      return reply.code(400).send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
     }
 
-    if (rendicion_id) {
-      const r = await tx.rendicion.findFirst({
-        where: { id: rendicion_id, eliminado: false, proyecto: { empresa_id, eliminado: false } },
-        select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
-      });
-      if (!r) {
-        const err = new Error("Rendición no existe o no pertenece a la empresa");
-        err.statusCode = 404;
-        throw err;
+    if (isProyecto) {
+      if (!body.proyecto_id) {
+        return reply.code(400).send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
       }
-
-      // destino debe coincidir
-      if (String(r.destino) !== destino) {
-        const err = new Error("La rendición tiene un destino distinto a la compra");
-        err.statusCode = 400;
-        throw err;
-      }
-      // centro debe coincidir
-      if ((r.centro_costo || null) !== (centro_costo || null)) {
-        const err = new Error("La rendición tiene un centro_costo distinto a la compra");
-        err.statusCode = 400;
-        throw err;
-      }
-      // si es proyecto, proyecto_id debe coincidir
-      if (destino === "PROYECTO" && r.proyecto_id !== body.proyecto_id) {
-        const err = new Error("La compra debe usar el mismo proyecto_id de la rendición");
-        err.statusCode = 400;
-        throw err;
+      if (centro_costo) {
+        return reply.code(400).send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
       }
     }
 
-    return tx.compra.create({
-      data: {
-        empresa_id,
+    if (isAdminOTaller) {
+      if (!centro_costo || (centro_costo !== "PMC" && centro_costo !== "PUQ")) {
+        return reply.code(400).send({ error: "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER" });
+      }
+      if (body.proyecto_id) {
+        return reply.code(400).send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
+      }
+    }
 
-        // ✅ NUEVO
-        destino,
-        centro_costo: centro_costo ?? null,
-        rendicion_id: rendicion_id ?? null,
+    const created = await prisma.$transaction(async (tx) => {
+      // ✅ Antes validabas siempre proyecto; ahora depende del destino
+      if (isProyecto) await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
 
-        proyecto_id: isProyecto ? body.proyecto_id : null,
+      await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
+      await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
 
-        proveedorId: body.proveedorId ?? null,
-        cotizacionId: body.cotizacionId ?? null,
+      // Validar productos/proveedores de items
+      for (const it of items) {
+        if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
+        if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
+      }
 
-        estado: estadoNorm,
-        total: Number(total || 0),
+      if (rendicion_id) {
+        const r = await tx.rendicion.findFirst({
+          where: { id: rendicion_id, eliminado: false, proyecto: { empresa_id, eliminado: false } },
+          select: { id: true, proyecto_id: true, destino: true, centro_costo: true },
+        });
+        if (!r) {
+          const err = new Error("Rendición no existe o no pertenece a la empresa");
+          err.statusCode = 404;
+          throw err;
+        }
 
-        tipo_doc: body.tipo_doc ?? null,
-        folio: body.folio ?? null,
-        rut_proveedor: body.rut_proveedor ?? null,
-        razon_social: body.razon_social ?? null,
-        fecha_docto: body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null,
-        fecha_recepcion: body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null,
+        // destino debe coincidir
+        if (String(r.destino) !== destino) {
+          const err = new Error("La rendición tiene un destino distinto a la compra");
+          err.statusCode = 400;
+          throw err;
+        }
+        // centro debe coincidir
+        if ((r.centro_costo || null) !== (centro_costo || null)) {
+          const err = new Error("La rendición tiene un centro_costo distinto a la compra");
+          err.statusCode = 400;
+          throw err;
+        }
+        // si es proyecto, proyecto_id debe coincidir
+        if (destino === "PROYECTO" && r.proyecto_id !== body.proyecto_id) {
+          const err = new Error("La compra debe usar el mismo proyecto_id de la rendición");
+          err.statusCode = 400;
+          throw err;
+        }
+      }
 
-        factura_url: body.factura_url ?? null,
-        factura_numero: body.factura_numero ?? null,
-        factura_fecha: body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null,
-        factura_monto: body.factura_monto != null ? Number(body.factura_monto) : null,
+      return tx.compra.create({
+        data: {
+          empresa_id,
 
-        items: {
-          create: items.map((it) => {
-            const cantidad = Number(it.cantidad || 0);
-            const precio_unit = Number(it.precio_unit ?? it.precio_unitario ?? 0);
-            return {
-              producto_id: it.producto_id ?? null,
-              proveedor_id: it.proveedor_id ?? null,
-              item: it.item ?? null,
-              cantidad,
-              precio_unit,
-              total: cantidad * precio_unit,
-              tipoItemId: it.tipoItemId ?? null,
-            };
-          }),
+          // ✅ NUEVO
+          destino,
+          centro_costo: centro_costo ?? null,
+          rendicion_id: rendicion_id ?? null,
+
+          proyecto_id: isProyecto ? body.proyecto_id : null,
+
+          proveedorId: body.proveedorId ?? null,
+          cotizacionId: body.cotizacionId ?? null,
+
+          estado: estadoNorm,
+          total: Number(total || 0),
+
+          tipo_doc: body.tipo_doc ?? null,
+          folio: body.folio ?? null,
+          rut_proveedor: body.rut_proveedor ?? null,
+          razon_social: body.razon_social ?? null,
+          fecha_docto: body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null,
+          fecha_recepcion: body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null,
+
+          factura_url: body.factura_url ?? null,
+          factura_numero: body.factura_numero ?? null,
+          factura_fecha: body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null,
+          factura_monto: body.factura_monto != null ? Number(body.factura_monto) : null,
+
+          items: {
+            create: items.map((it) => {
+              const cantidad = Number(it.cantidad || 0);
+              const precio_unit = Number(it.precio_unit ?? it.precio_unitario ?? 0);
+              return {
+                producto_id: it.producto_id ?? null,
+                proveedor_id: it.proveedor_id ?? null,
+                item: it.item ?? null,
+                cantidad,
+                precio_unit,
+                total: cantidad * precio_unit,
+                tipoItemId: it.tipoItemId ?? null,
+              };
+            }),
+          },
         },
-      },
-      include: {
-        proveedor: { select: { id: true, nombre: true } },
-        proyecto: { select: { id: true, nombre: true } },
-        cotizacion: { select: { id: true, numero: true } },
-        rendicion: { select: { id: true, destino: true, centro_costo: true, proyecto_id: true } },
-        items: { include: { producto: true, proveedor: true, tipoItem: true } },
-      },
-    }); // cierra tx.compra.create
+        include: {
+          proveedor: { select: { id: true, nombre: true } },
+          proyecto: { select: { id: true, nombre: true } },
+          cotizacion: { select: { id: true, numero: true } },
+          rendicion: { select: { id: true, destino: true, centro_costo: true, proyecto_id: true } },
+          items: { include: { producto: true, proveedor: true, tipoItem: true } },
+        },
+      }); // cierra tx.compra.create
     }); // cierra transaction
 
     return reply.code(201).send(created);
@@ -771,122 +775,122 @@ export async function updateCompra(request, reply) {
 
   try {
     const exists = await prisma.compra.findUnique({
-    where: { id },
-    include: { items: true },
-  });
-  if (!exists) return httpError(reply, 404, "Compra no encontrada");
-  if (!scope.isMaster && exists.empresa_id !== scope.empresaId)
-    return httpError(reply, 403, "Compra fuera de tu empresa");
+      where: { id },
+      include: { items: true },
+    });
+    if (!exists) return httpError(reply, 404, "Compra no encontrada");
+    if (!scope.isMaster && exists.empresa_id !== scope.empresaId)
+      return httpError(reply, 403, "Compra fuera de tu empresa");
 
-  const empresa_id = exists.empresa_id;
+    const empresa_id = exists.empresa_id;
 
-  // ===== Normalizaciones / “next state”
-  const estadoNorm = normalizeEstadoCompra(body.estado);
+    // ===== Normalizaciones / “next state”
+    const estadoNorm = normalizeEstadoCompra(body.estado);
 
-  const nextDestino =
-    body.destino !== undefined
-      ? String(body.destino || "PROYECTO").toUpperCase()
-      : String(exists.destino || "PROYECTO").toUpperCase();
+    const nextDestino =
+      body.destino !== undefined
+        ? String(body.destino || "PROYECTO").toUpperCase()
+        : String(exists.destino || "PROYECTO").toUpperCase();
 
-  const nextCentroCosto =
-    body.centro_costo !== undefined
-      ? body.centro_costo
-        ? String(body.centro_costo).toUpperCase()
+    const nextCentroCosto =
+      body.centro_costo !== undefined
+        ? body.centro_costo
+          ? String(body.centro_costo).toUpperCase()
+          : null
+        : exists.centro_costo
+          ? String(exists.centro_costo).toUpperCase()
+          : null;
+
+    const nextProyectoId =
+      body.proyecto_id !== undefined ? body.proyecto_id || null : exists.proyecto_id || null;
+
+    // OJO: updateCompra (PUT) normalmente puede venir con rendicion_id o no.
+    // Si no viene, NO lo tocamos.
+    const wantsChangeRendicion = body.rendicion_id !== undefined;
+    const nextRendicionId = wantsChangeRendicion
+      ? body.rendicion_id
+        ? String(body.rendicion_id)
         : null
-      : exists.centro_costo
-        ? String(exists.centro_costo).toUpperCase()
+      : exists.rendicion_id
+        ? String(exists.rendicion_id)
         : null;
 
-  const nextProyectoId =
-    body.proyecto_id !== undefined ? body.proyecto_id || null : exists.proyecto_id || null;
+    // items
+    const hasItems = Array.isArray(body.items);
+    const nextItems = hasItems ? body.items : null;
 
-  // OJO: updateCompra (PUT) normalmente puede venir con rendicion_id o no.
-  // Si no viene, NO lo tocamos.
-  const wantsChangeRendicion = body.rendicion_id !== undefined;
-  const nextRendicionId = wantsChangeRendicion
-    ? body.rendicion_id
-      ? String(body.rendicion_id)
-      : null
-    : exists.rendicion_id
-      ? String(exists.rendicion_id)
-      : null;
+    // ===== Validaciones imputación (idénticas a CREATE)
+    const isProyecto = nextDestino === "PROYECTO";
+    const isAdminOTaller = nextDestino === "ADMINISTRACION" || nextDestino === "TALLER";
 
-  // items
-  const hasItems = Array.isArray(body.items);
-  const nextItems = hasItems ? body.items : null;
-
-  // ===== Validaciones imputación (idénticas a CREATE)
-  const isProyecto = nextDestino === "PROYECTO";
-  const isAdminOTaller = nextDestino === "ADMINISTRACION" || nextDestino === "TALLER";
-
-  if (!isProyecto && !isAdminOTaller) {
-    return reply
-      .code(400)
-      .send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
-  }
-
-  if (isProyecto) {
-    if (!nextProyectoId) {
+    if (!isProyecto && !isAdminOTaller) {
       return reply
         .code(400)
-        .send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
-    }
-    if (nextCentroCosto) {
-      return reply
-        .code(400)
-        .send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
-    }
-  }
-
-  if (isAdminOTaller) {
-    if (!nextCentroCosto || (nextCentroCosto !== "PMC" && nextCentroCosto !== "PUQ")) {
-      return reply.code(400).send({
-        error:
-          "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER",
-      });
-    }
-    if (nextProyectoId) {
-      return reply
-        .code(400)
-        .send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
-    }
-  }
-
-  // ===== Transaction
-  const updated = await prisma.$transaction(async (tx) => {
-    // Validar entidades si cambiaron (y si aplican)
-    if (isProyecto && nextProyectoId && nextProyectoId !== exists.proyecto_id) {
-      await assertEntidadEmpresa(tx, "proyecto", nextProyectoId, empresa_id);
+        .send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
     }
 
-    if (body.proveedorId !== undefined && body.proveedorId && body.proveedorId !== exists.proveedorId) {
-      await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
-    }
-
-    if (body.cotizacionId !== undefined && body.cotizacionId && body.cotizacionId !== exists.cotizacionId) {
-      await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
-    }
-
-    // Validar productos/proveedores de items (si vienen)
-    if (hasItems) {
-      for (const it of nextItems) {
-        if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
-        if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
+    if (isProyecto) {
+      if (!nextProyectoId) {
+        return reply
+          .code(400)
+          .send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
+      }
+      if (nextCentroCosto) {
+        return reply
+          .code(400)
+          .send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
       }
     }
 
-    // ===== Validación rendición: si se cambia rendicion_id o si hay rendición y cambió imputación
-    const imputacionChanged =
-      (body.destino !== undefined && String(exists.destino || "").toUpperCase() !== nextDestino) ||
-      (body.centro_costo !== undefined &&
-        (exists.centro_costo ? String(exists.centro_costo).toUpperCase() : null) !== nextCentroCosto) ||
-      (body.proyecto_id !== undefined && (exists.proyecto_id || null) !== nextProyectoId);
+    if (isAdminOTaller) {
+      if (!nextCentroCosto || (nextCentroCosto !== "PMC" && nextCentroCosto !== "PUQ")) {
+        return reply.code(400).send({
+          error:
+            "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER",
+        });
+      }
+      if (nextProyectoId) {
+        return reply
+          .code(400)
+          .send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
+      }
+    }
 
-    const mustRevalidateRendicion =
-      // si viene rendicion_id en el body (cambio explícito)
-      wantsChangeRendicion ||
-      // o si cambió imputación y la compra ya tenía rendición
-      (imputacionChanged && !!exists.rendicion_id);
+    // ===== Transaction
+    const updated = await prisma.$transaction(async (tx) => {
+      // Validar entidades si cambiaron (y si aplican)
+      if (isProyecto && nextProyectoId && nextProyectoId !== exists.proyecto_id) {
+        await assertEntidadEmpresa(tx, "proyecto", nextProyectoId, empresa_id);
+      }
+
+      if (body.proveedorId !== undefined && body.proveedorId && body.proveedorId !== exists.proveedorId) {
+        await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
+      }
+
+      if (body.cotizacionId !== undefined && body.cotizacionId && body.cotizacionId !== exists.cotizacionId) {
+        await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
+      }
+
+      // Validar productos/proveedores de items (si vienen)
+      if (hasItems) {
+        for (const it of nextItems) {
+          if (it.producto_id) await assertEntidadEmpresa(tx, "producto", it.producto_id, empresa_id);
+          if (it.proveedor_id) await assertEntidadEmpresa(tx, "proveedor", it.proveedor_id, empresa_id);
+        }
+      }
+
+      // ===== Validación rendición: si se cambia rendicion_id o si hay rendición y cambió imputación
+      const imputacionChanged =
+        (body.destino !== undefined && String(exists.destino || "").toUpperCase() !== nextDestino) ||
+        (body.centro_costo !== undefined &&
+          (exists.centro_costo ? String(exists.centro_costo).toUpperCase() : null) !== nextCentroCosto) ||
+        (body.proyecto_id !== undefined && (exists.proyecto_id || null) !== nextProyectoId);
+
+      const mustRevalidateRendicion =
+        // si viene rendicion_id en el body (cambio explícito)
+        wantsChangeRendicion ||
+        // o si cambió imputación y la compra ya tenía rendición
+        (imputacionChanged && !!exists.rendicion_id);
 
       if (mustRevalidateRendicion && nextRendicionId) {
         const r = await tx.rendicion.findFirst({
@@ -927,86 +931,86 @@ export async function updateCompra(request, reply) {
         }
       }
 
-    // ===== Construir data update
-    const data = {};
+      // ===== Construir data update
+      const data = {};
 
-    // imputación (NUEVO)
-    data.destino = nextDestino;
-    data.centro_costo = isProyecto ? null : nextCentroCosto;
-    data.proyecto_id = isProyecto ? nextProyectoId : null;
+      // imputación (NUEVO)
+      data.destino = nextDestino;
+      data.centro_costo = isProyecto ? null : nextCentroCosto;
+      data.proyecto_id = isProyecto ? nextProyectoId : null;
 
-    // rendición (solo si vino en body, o si cambió imputación y quieres forzar que se mantenga compatible)
-    // Aquí lo dejamos: si NO vino rendicion_id, no lo tocamos.
-    if (wantsChangeRendicion) data.rendicion_id = nextRendicionId;
+      // rendición (solo si vino en body, o si cambió imputación y quieres forzar que se mantenga compatible)
+      // Aquí lo dejamos: si NO vino rendicion_id, no lo tocamos.
+      if (wantsChangeRendicion) data.rendicion_id = nextRendicionId;
 
-    // resto campos existentes
-    if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
-    if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
-    if (estadoNorm) data.estado = estadoNorm;
-    if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado);
+      // resto campos existentes
+      if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
+      if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
+      if (estadoNorm) data.estado = estadoNorm;
+      if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado);
 
-    if (body.tipo_doc !== undefined) data.tipo_doc = body.tipo_doc ?? null;
-    if (body.folio !== undefined) data.folio = body.folio ?? null;
-    if (body.rut_proveedor !== undefined) data.rut_proveedor = body.rut_proveedor ?? null;
-    if (body.razon_social !== undefined) data.razon_social = body.razon_social ?? null;
-    if (body.fecha_docto !== undefined)
-      data.fecha_docto = body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null;
-    if (body.fecha_recepcion !== undefined)
-      data.fecha_recepcion = body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null;
+      if (body.tipo_doc !== undefined) data.tipo_doc = body.tipo_doc ?? null;
+      if (body.folio !== undefined) data.folio = body.folio ?? null;
+      if (body.rut_proveedor !== undefined) data.rut_proveedor = body.rut_proveedor ?? null;
+      if (body.razon_social !== undefined) data.razon_social = body.razon_social ?? null;
+      if (body.fecha_docto !== undefined)
+        data.fecha_docto = body.fecha_docto ? new Date(`${String(body.fecha_docto).slice(0, 10)}T12:00:00`) : null;
+      if (body.fecha_recepcion !== undefined)
+        data.fecha_recepcion = body.fecha_recepcion ? new Date(`${String(body.fecha_recepcion).slice(0, 10)}T12:00:00`) : null;
 
-    if (body.factura_url !== undefined) data.factura_url = body.factura_url ?? null;
-    if (body.factura_numero !== undefined) data.factura_numero = body.factura_numero ?? null;
-    if (body.factura_fecha !== undefined)
-      data.factura_fecha = body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null;
-    if (body.factura_monto !== undefined)
-      data.factura_monto = body.factura_monto != null ? Number(body.factura_monto) : null;
+      if (body.factura_url !== undefined) data.factura_url = body.factura_url ?? null;
+      if (body.factura_numero !== undefined) data.factura_numero = body.factura_numero ?? null;
+      if (body.factura_fecha !== undefined)
+        data.factura_fecha = body.factura_fecha ? new Date(`${String(body.factura_fecha).slice(0, 10)}T12:00:00`) : null;
+      if (body.factura_monto !== undefined)
+        data.factura_monto = body.factura_monto != null ? Number(body.factura_monto) : null;
 
-    // total + items
-    if (hasItems) {
-      const newTotal = body.total != null ? Number(body.total) : calcTotal(nextItems);
-      data.total = Number(newTotal || 0);
+      // total + items
+      if (hasItems) {
+        const newTotal = body.total != null ? Number(body.total) : calcTotal(nextItems);
+        data.total = Number(newTotal || 0);
 
-      await tx.compraItem.deleteMany({ where: { compra_id: id } });
+        await tx.compraItem.deleteMany({ where: { compra_id: id } });
 
-      if (nextItems.length) {
-        await tx.compraItem.createMany({
-          data: nextItems.map((it) => {
-            const cantidad = Number(it.cantidad || 0);
-            const precio_unit = Number(it.precio_unit ?? it.precio_unitario ?? 0);
-            return {
-              compra_id: id,
-              producto_id: it.producto_id ?? null,
-              proveedor_id: it.proveedor_id ?? null,
-              item: it.item ?? null,
-              cantidad,
-              precio_unit,
-              total: cantidad * precio_unit,
-              tipoItemId: it.tipoItemId ?? null,
-            };
-          }),
-        });
+        if (nextItems.length) {
+          await tx.compraItem.createMany({
+            data: nextItems.map((it) => {
+              const cantidad = Number(it.cantidad || 0);
+              const precio_unit = Number(it.precio_unit ?? it.precio_unitario ?? 0);
+              return {
+                compra_id: id,
+                producto_id: it.producto_id ?? null,
+                proveedor_id: it.proveedor_id ?? null,
+                item: it.item ?? null,
+                cantidad,
+                precio_unit,
+                total: cantidad * precio_unit,
+                tipoItemId: it.tipoItemId ?? null,
+              };
+            }),
+          });
+        }
+      } else if (body.total != null) {
+        data.total = Number(body.total || 0);
       }
-    } else if (body.total != null) {
-      data.total = Number(body.total || 0);
-    }
 
-    // Ejecutar update
-    await tx.compra.update({ where: { id }, data });
+      // Ejecutar update
+      await tx.compra.update({ where: { id }, data });
 
-    // devolver compra con includes (agrega rendicion)
-    const row = await tx.compra.findUnique({
-      where: { id },
-      include: {
-        proveedor: true,
-        proyecto: true,
-        cotizacion: true,
-        rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
-        items: { include: { producto: true, proveedor: true, tipoItem: true } },
-      },
+      // devolver compra con includes (agrega rendicion)
+      const row = await tx.compra.findUnique({
+        where: { id },
+        include: {
+          proveedor: true,
+          proyecto: true,
+          cotizacion: true,
+          rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
+          items: { include: { producto: true, proveedor: true, tipoItem: true } },
+        },
+      });
+
+      return row;
     });
-
-    return row;
-  });
 
     const [withPct] = await attachVinculadoPct(empresa_id, [updated]);
     return reply.send(withPct);
@@ -1244,7 +1248,7 @@ export async function setCompraCosteos(req, reply) {
       where: { id: { in: items.map(it => String(it?.venta_id ?? it?.ventaId ?? it?.venta?.id)) } },
       include: { ordenVenta: { select: { proyecto_id: true } } }
     });
-    
+
     const linkedProyectoId = ventasConProyecto.find(v => v.ordenVenta?.proyecto_id)?.ordenVenta?.proyecto_id;
 
     if (linkedProyectoId && (!compra.proyecto_id || compra.proyecto_id !== linkedProyectoId)) {
@@ -1277,4 +1281,221 @@ export async function setCompraCosteos(req, reply) {
     compra.total > 0 ? Math.min(1, vinculadoMonto / Number(compra.total)) : 0;
 
   return reply.send({ ok: true, inserted, vinculadoMonto, vinculadoPct });
+}
+
+export async function listItemsCosteoDisponibles(request, reply) {
+  const scope = resolveScope(request);
+  const { cotizacionIds, currentCompraId } = request.query || {};
+
+  try {
+    const empresa_id = scope.empresaId;
+    if (!cotizacionIds) {
+      return reply.send([]);
+    }
+
+    const ids = String(cotizacionIds).split(",").filter(Boolean);
+    if (ids.length === 0) {
+      return reply.send([]);
+    }
+
+    let currentCompraItemIds = [];
+    if (currentCompraId) {
+      const items = await prisma.compraItem.findMany({
+        where: { compra_id: currentCompraId },
+        select: { id: true },
+      });
+      currentCompraItemIds = items.map((it) => it.id);
+    }
+
+    const items = await prisma.detalleVenta.findMany({
+      where: {
+        modo: "COMPRA",
+        eliminado: false,
+        venta: {
+          ordenVentaId: { in: ids },
+          eliminado: false,
+          empresa_id: empresa_id,
+        },
+        OR: [
+          { compraId: null },
+          ...(currentCompraItemIds.length > 0 ? [{ compraId: { in: currentCompraItemIds } }] : []),
+        ],
+      },
+      include: {
+        venta: {
+          select: {
+            id: true,
+            numero: true,
+          },
+        },
+      },
+    });
+
+    return reply.send(items);
+  } catch (error) {
+    console.error("Error al listar items de costeo:", error);
+    return reply.code(500).send({ error: error.message });
+  }
+}
+
+export async function analizarCotizacionProveedor(request, reply) {
+  const scope = resolveScope(request);
+  
+  if (!request.isMultipart()) {
+    return reply.code(400).send({ error: "Debe enviar multipart/form-data" });
+  }
+
+  try {
+    const file = await request.file({ limits: { fileSize: 20 * 1024 * 1024 } });
+    if (!file) {
+      return reply.code(400).send({ error: "No se encontró el archivo con nombre de campo 'file'" });
+    }
+
+    const fileBuffer = await file.toBuffer();
+    if (file.file.truncated) {
+      return reply.code(400).send({ error: "El archivo es demasiado grande (máximo 20MB)" });
+    }
+
+    const filename = file.filename;
+    const mimetype = file.mimetype;
+
+    // 1. Extraer texto del documento
+    const text = await extraerTextoDeDocumento(fileBuffer, filename, mimetype);
+
+    // 2. Analizar con Ollama
+    const ollamaResult = await analizarCotizacionConOllama(text);
+
+    // 3. Guardar el archivo en uploads para posterior confirmación
+    const uniqueFilename = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${filename.replace(/\s+/g, "_")}`;
+    const uploadPath = path.join(process.cwd(), "uploads", uniqueFilename);
+    await fsp.writeFile(uploadPath, fileBuffer);
+    const fileUrl = `/api/uploads/${uniqueFilename}`;
+
+    return reply.send({
+      ...ollamaResult,
+      archivoUrl: fileUrl,
+      archivoNombre: filename,
+    });
+  } catch (error) {
+    console.error("Error al analizar cotización:", error);
+    return reply.code(500).send({
+      error: "Error procesando cotización",
+      detalle: error.message || "Error interno del servidor",
+    });
+  }
+}
+
+export async function createOrdenCompraProveedor(request, reply) {
+  const scope = resolveScope(request);
+  const body = request.body || {};
+
+  try {
+    const empresa_id = scope.isMaster ? body.empresa_id || scope.empresaId : scope.empresaId;
+    const {
+      proveedorId,
+      destino,
+      centro_costo,
+      proyecto_id,
+      cotizacionId,
+      tipo_doc,
+      folio,
+      fecha_docto,
+      fecha_entrega_esperada,
+      moneda,
+      subtotal,
+      descuento,
+      impuestos,
+      total,
+      estado_oc,
+      observaciones,
+      terminos_condiciones,
+      archivo_original,
+      json_original_ollama,
+      condicion_pago,
+      condicion_entrega,
+      items,
+    } = body;
+
+    if (!proveedorId) {
+      return reply.code(400).send({ error: "El proveedorId es obligatorio" });
+    }
+    if (!destino) {
+      return reply.code(400).send({ error: "El destino es obligatorio" });
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
+      if (proyecto_id) await assertEntidadEmpresa(tx, "proyecto", proyecto_id, empresa_id);
+      await assertEntidadEmpresa(tx, "proveedor", proveedorId, empresa_id);
+      if (cotizacionId) await assertEntidadEmpresa(tx, "cotizacion", cotizacionId, empresa_id);
+
+      const compra = await tx.compra.create({
+        data: {
+          empresa_id,
+          destino: destino || "PROYECTO",
+          centro_costo: destino !== "PROYECTO" ? centro_costo : null,
+          proyecto_id: destino === "PROYECTO" ? proyecto_id : null,
+          proveedorId: proveedorId || null,
+          cotizacionId: cotizacionId || null,
+          estado: "ORDEN_COMPRA", // default mapping
+          estado_oc: estado_oc || "CONFIRMADA",
+          total: Number(total || 0),
+          subtotal: Number(subtotal || 0),
+          descuento: Number(descuento || 0),
+          impuestos: Number(impuestos || 0),
+          tipo_doc: tipo_doc ? Number(tipo_doc) : 99,
+          folio: folio ? String(folio) : null,
+          fecha_docto: fecha_docto ? new Date(fecha_docto) : new Date(),
+          fecha_entrega_esperada: fecha_entrega_esperada ? new Date(fecha_entrega_esperada) : null,
+          moneda: moneda || "CLP",
+          observaciones: observaciones || null,
+          terminos_condiciones: terminos_condiciones || null,
+          archivo_original: archivo_original || null,
+          json_original_ollama: json_original_ollama || null,
+          condicion_pago: condicion_pago || null,
+          condicion_entrega: condicion_entrega || null,
+        },
+      });
+
+      if (Array.isArray(items)) {
+        for (const it of items) {
+          const itemTotal = Number(it.totalLinea ?? (Number(it.cantidad || 0) * Number(it.precio_unit ?? it.precioUnitario ?? 0)));
+          const compItem = await tx.compraItem.create({
+            data: {
+              compra_id: compra.id,
+              item: it.item || it.descripcion || "—",
+              cantidad: Number(it.cantidad || 1),
+              precio_unit: Number(it.precio_unit ?? it.precioUnitario ?? 0),
+              total: itemTotal,
+              codigo: it.codigo ? String(it.codigo) : null,
+              unidad: it.unidad || null,
+              descuento: it.descuento ? Number(it.descuento) : null,
+              impuesto: it.impuesto ? Number(it.impuesto) : null,
+            },
+          });
+
+          if (it.detalleVentaId) {
+            await tx.detalleVenta.update({
+              where: { id: it.detalleVentaId },
+              data: { compraId: compItem.id },
+            });
+          }
+        }
+      }
+
+      return tx.compra.findUnique({
+        where: { id: compra.id },
+        include: {
+          proveedor: { select: { id: true, nombre: true } },
+          proyecto: { select: { id: true, nombre: true } },
+          cotizacion: { select: { id: true, numero: true } },
+          items: true,
+        },
+      });
+    });
+
+    return reply.code(201).send(created);
+  } catch (error) {
+    console.error("Error creando orden de compra desde proveedor:", error);
+    return reply.code(error.statusCode || 500).send({ error: error.message });
+  }
 }

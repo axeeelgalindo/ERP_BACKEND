@@ -74,7 +74,7 @@ await server.register(cors, {
 
 // multipart ANTES de rutas que lo usan
 await server.register(fastifyMultipart, {
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: 500 * 1024 * 1024 },
 });
 
 // auth (crea server.authenticate)

@@ -1129,6 +1129,21 @@ model Compra {
   factura_fecha  DateTime?
   factura_monto  Float?
 
+  // ✅ Campos nuevos para flujo de cotización proveedor / Ollama
+  cotizacion_proveedor_ref String?
+  fecha_entrega_esperada   DateTime?
+  moneda                   String?   @default("CLP")
+  subtotal                 Float?
+  descuento                Float?
+  impuestos                Float?
+  observaciones            String?   @db.Text
+  terminos_condiciones     String?   @db.Text
+  archivo_original         String?
+  json_original_ollama     Json?
+  condicion_pago           String?
+  condicion_entrega        String?
+  estado_oc                String?   @default("CONFIRMADA")
+
   @@index([empresa_id])
   @@index([proyecto_id])
   @@index([rendicion_id])
@@ -1144,6 +1159,12 @@ model CompraItem {
   cantidad     Int
   precio_unit  Float?
   total        Float
+
+  // ✅ Campos nuevos para flujo de cotización proveedor / Ollama
+  codigo       String?
+  unidad       String?
+  descuento    Float?
+  impuesto     Float?
 
   // categoría (admin)
   tipoItemId String?

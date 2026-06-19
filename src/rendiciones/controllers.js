@@ -548,11 +548,7 @@ export async function deleteRendicion(request, reply) {
     where: {
       id,
       eliminado: false,
-      proyecto: {
-        empresa_id: scope.empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      empresa_id: scope.empresaId,
     },
     select: { id: true },
   });

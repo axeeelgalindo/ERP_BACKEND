@@ -14,9 +14,29 @@ import {
   getCompraCosteos,
   setCompraCosteos,
   asignarRendicionACompra,
+  
+  // ✅ OLLAMA & Workflow
+  listItemsCosteoDisponibles,
+  analizarCotizacionProveedor,
+  createOrdenCompraProveedor,
 } from "./controllers.js";
 
 export default async function compraRoutes(server) {
+  // ✅ Protege todas las rutas de compras
+  server.addHook("preHandler", async (request, reply) => {
+    await request.jwtVerify();
+    const u = request.user || {};
+    request.scope = {
+      userId: u.userId ?? u.sub ?? u.id ?? null,
+      empresaId: u.empresaId ?? u.empresa?.id ?? null,
+      rolCodigo: (u.rol?.codigo ?? u.rolCodigo ?? "").toString().toUpperCase(),
+    };
+  });
+
+  // workflow items
+  server.get("/compras/items-costeo-disponibles", listItemsCosteoDisponibles);
+  server.post("/compras/ordenes-compra/analizar-cotizacion", analizarCotizacionProveedor);
+  server.post("/compras/ordenes-compra", createOrdenCompraProveedor);
   // upload csv
   server.post("/compras/import-csv", importComprasCSV);
 
