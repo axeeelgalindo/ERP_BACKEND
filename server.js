@@ -1,4 +1,5 @@
 // server.js
+import 'dotenv/config';
 import Fastify from "fastify";
 import sensible from "@fastify/sensible";
 import cors from "@fastify/cors";

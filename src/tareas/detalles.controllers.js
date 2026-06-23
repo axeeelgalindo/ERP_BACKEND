@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
+import { notifyTaskAssignment } from "./notification.js";
 
 const prisma = new PrismaClient();
 
@@ -289,6 +290,14 @@ export async function createTareaDetalle(request, reply) {
     return created;
   });
 
+  if (row.responsable_id) {
+    notifyTaskAssignment({
+      tareaId: row.id,
+      responsableId: row.responsable_id,
+      isSubtask: true
+    });
+  }
+
   return reply.code(201).send({ ok: true, row });
 }
 
@@ -306,6 +315,8 @@ export async function updateTareaDetalle(request, reply) {
 
   const comentarioRevision = data.comentario_revision;
   delete data.comentario_revision;
+
+  let oldResponsableId = null;
 
   const row = await prisma.$transaction(async (tx) => {
     const current = await tx.tareaDetalle.findFirst({
@@ -329,6 +340,8 @@ export async function updateTareaDetalle(request, reply) {
       throw Object.assign(new Error("Detalle de tarea no encontrado"), {
         statusCode: 404,
       });
+
+    oldResponsableId = current.responsable_id;
 
     const tareaId = current.tarea_id;
 
@@ -495,6 +508,14 @@ export async function updateTareaDetalle(request, reply) {
 
     return updated;
   });
+
+  if (row.responsable_id && row.responsable_id !== oldResponsableId) {
+    notifyTaskAssignment({
+      tareaId: row.id,
+      responsableId: row.responsable_id,
+      isSubtask: true
+    });
+  }
 
   return reply.send({ ok: true, row });
 }

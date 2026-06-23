@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
+import { notifyTaskAssignment } from "./notification.js";
 
 const prisma = new PrismaClient();
 const PAGE = 1,
@@ -239,6 +240,7 @@ export async function getTarea(request, reply) {
 export async function createTarea(request, reply) {
   const scope = resolveScope(request);
   const body = request.body || {};
+  let subtasksToNotify = [];
   const {
     proyecto_id,
     nombre,
@@ -471,7 +473,7 @@ export async function createTarea(request, reply) {
             ? ddiasReales - ddiasPlan
             : null;
 
-        await tx.tareaDetalle.create({
+        const sub = await tx.tareaDetalle.create({
           data: {
             tarea_id: tarea.id,
             titulo: d.titulo,
@@ -488,6 +490,9 @@ export async function createTarea(request, reply) {
             dias_desviacion: diasDesviacionDet,
           },
         });
+        if (sub.responsable_id) {
+          subtasksToNotify.push({ id: sub.id, responsable_id: sub.responsable_id });
+        }
       }
     }
 
@@ -513,6 +518,22 @@ export async function createTarea(request, reply) {
     return fullTarea;
   });
 
+  if (row.responsable_id) {
+    notifyTaskAssignment({
+      tareaId: row.id,
+      responsableId: row.responsable_id,
+      isSubtask: false
+    });
+  }
+
+  for (const s of subtasksToNotify) {
+    notifyTaskAssignment({
+      tareaId: s.id,
+      responsableId: s.responsable_id,
+      isSubtask: true
+    });
+  }
+
   return reply.code(201).send({ ok: true, row });
 }
 
@@ -527,6 +548,8 @@ export async function updateTarea(request, reply) {
 
   const predecesora_id = data.predecesora_id;
   delete data.predecesora_id;
+
+  let oldResponsableId = null;
 
   const row = await prisma.$transaction(async (tx) => {
     const tarea = await tx.tarea.findFirst({
@@ -760,6 +783,14 @@ export async function updateTarea(request, reply) {
 
     return updated;
   });
+
+  if (row.responsable_id && row.responsable_id !== oldResponsableId) {
+    notifyTaskAssignment({
+      tareaId: row.id,
+      responsableId: row.responsable_id,
+      isSubtask: false
+    });
+  }
 
   return reply.send({ ok: true, row });
 }
@@ -1125,6 +1156,16 @@ export async function createTareasBatch(request, reply) {
     return created;
   });
 
+  for (const r of rows) {
+    if (r.responsable_id) {
+      notifyTaskAssignment({
+        tareaId: r.id,
+        responsableId: r.responsable_id,
+        isSubtask: false
+      });
+    }
+  }
+
   return reply.code(201).send({ ok: true, rows });
 }
 
@@ -1262,6 +1303,16 @@ export async function addDetallesToTarea(request, reply) {
 
     return created;
   });
+
+  for (const r of rows) {
+    if (r.responsable_id) {
+      notifyTaskAssignment({
+        tareaId: r.id,
+        responsableId: r.responsable_id,
+        isSubtask: true
+      });
+    }
+  }
 
   return reply.code(201).send({ ok: true, rows });
 }
