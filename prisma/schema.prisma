@@ -352,6 +352,18 @@ model Proveedor {
   @@index([empresa_id])
 }
 
+enum TipoProducto {
+  FISICO
+  SERVICIO
+  SUSCRIPCION_INTANGIBLE
+}
+
+enum MonedaBase {
+  CLP
+  UF
+  USD
+}
+
 /**
  * =========================
  * PRODUCTOS
@@ -373,6 +385,13 @@ model Producto {
 
   //cotizaciones CotizacionItem[]
   compras CompraItem[]
+
+  // Nuevos campos para servicios/arriendos recurrentes
+  precio_uf      Float?
+  tipo           TipoProducto @default(FISICO)
+  moneda         MonedaBase   @default(CLP)
+  es_recurrente  Boolean      @default(false)
+  periodo_meses  Int          @default(1)
 
   @@unique([sku, eliminado])
   @@index([empresa_id])
@@ -744,6 +763,7 @@ model Cotizacion {
   subtotal             Float   @default(0)
   iva                  Float   @default(0)
   total                Float   @default(0)
+  sin_iva              Boolean @default(false)
   terminos_condiciones String?
   acuerdo_pago         String?
 
@@ -776,6 +796,19 @@ model Cotizacion {
   doc_comprobante_url String?
   doc_gd_url          String?
 
+  // ✅ NUEVO: Campos para servicios/arriendos recurrentes
+  moneda             MonedaBase        @default(CLP)
+  valor_uf_documento Float?
+  es_suscripcion     Boolean           @default(false)
+  ciclos_mensuales   Int               @default(12)
+
+  fecha_inicio_plan DateTime?
+  fecha_fin_plan    DateTime?
+
+  parent_id    String?
+  parent       Cotizacion?  @relation("SuscripcionQuotes", fields: [parent_id], references: [id], onDelete: SetNull)
+  child_quotes Cotizacion[] @relation("SuscripcionQuotes")
+
   estado EstadoCotizacion @default(COTIZACION)
 
   glosas CotizacionGlosa[]
@@ -790,6 +823,7 @@ model Cotizacion {
   @@index([proyecto_id])
   @@index([cliente_id])
   @@index([vendedor_id])
+  @@index([parent_id])
   @@unique([empresa_id, numero])
 }
 
@@ -813,8 +847,10 @@ model CotizacionGlosa {
   // Campos para soportar extracción de items exactos en Pdfs
   cantidad        Int    @default(1)
   precio_unitario Float?
+  monto_uf        Float?
 
   descuento_pct Float @default(0)
+  comentario    String?
 
   @@index([cotizacion_id])
 }

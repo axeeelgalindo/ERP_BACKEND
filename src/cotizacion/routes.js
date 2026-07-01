@@ -11,6 +11,7 @@ import {
   addPago,
   deletePago,
   uploadPagoDoc,
+  getUFActual,
 } from "./controllers.js";
 
 import {
@@ -34,6 +35,7 @@ export default async function cotizacionesRoutes(server) {
   });
 
   server.get("/cotizaciones", listCotizaciones);
+  server.get("/cotizaciones/uf-actual", getUFActual);
   server.get("/cotizaciones/:id", getCotizacion);
   server.post("/cotizaciones/add", createCotizacion);
   server.put("/cotizaciones/update/:id", updateCotizacion);

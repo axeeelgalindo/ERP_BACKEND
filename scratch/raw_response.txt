@@ -1,0 +1,76 @@
+{
+  "proveedor": {
+    "nombre": "BLUE INGENIERIA",
+    "rut": null,
+    "direccion": null,
+    "telefono": null,
+    "email": null,
+    "sitioWeb": null
+  },
+  "documentoProveedor": {
+    "numeroCotizacion": "07/11/2025",
+    "referencia": "VARIABLE",
+    "fechaCotizacion": "2025-11-07",
+    "fechaEntregaEsperada": null,
+    "moneda": "CLP",
+    "condicionPago": "100% volumétrico y 90% eficiencia mecánica",
+    "condicionEntrega": "100% volumétrico y 90% eficiencia mecánica"
+  },
+  "montos": {
+    "subtotal": null,
+    "descuento": null,
+    "impuestos": null,
+    "total": null
+  },
+  "items": [
+    {
+      "codigo": "8880.15038.1G",
+      "descripcion": "MANG. 8/8H 15M M/M 9/16" 
+        },
+      {
+        "codigo": "8560.05012.16",
+        "descripcion": "MANG. 5/6H 5M M/M 3/8" 
+          },
+      {
+        "codigo": "1000.00163.1 PISTOLA DE HIDROJATEAMENTO PENTA BC 2800BAR 3,00",
+        "descripcion": "PISTA DE HIDROJATEAMENTO PENTA BC 2800BAR 3,00"
+      },
+      {
+        "codigo": "1000.00232.5 POWER BOX 2800BAR 3/8" 
+          },
+      {
+        "codigo": "1000.00242.0 DESTORCEDOR DE MANGUEIRA 5/6H - 3/4" 
+          },
+      {
+        "codigo": "3000.00210.0L LACO DE SEGURANCA 20,00",
+        "descripcion": "LACO DE SEGURANCA 20,00"
+      },
+      {
+        "codigo": "2320.00368.0 ANILHA 9/16" 
+          },
+      {
+        "codigo": "2320.00345.0 MANG. PU AZUL 6X4 10BAR 35,00",
+        "descripcion": "MANG. PU AZUL 6X4 10BAR 35,00"
+      },
+      {
+        "codigo": "2380.02345.0 MANG. PU AZUL 8X5.5 10BAR 35,00",
+        "descripcion": "MANG. PU AZUL 8X5.5 10BAR 35,00"
+      },
+      {
+        "codigo": "2320.00687.0 DISTR. Y 1X M26X1,5 HIP 2X M26X1.5HIP 3000BAR LM 2,00",
+        "descripcion": "DISTR. Y 1X M26X1,5 HIP 2X M26X1.5HIP 3000BAR LM 2,00"
+      },
+      {
+        "codigo": "192.000,00 USDTOTAL",
+        "descripcion": "Total"
+      }
+    ],
+    "terminosCondiciones": [],
+    "observaciones": null,
+    "confianza": {
+      "general": 0.0,
+      "camposDetectados": [],
+      "camposFaltantes": [],
+      "advertencias": []
+    }
+}

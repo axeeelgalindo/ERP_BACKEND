@@ -82,6 +82,7 @@ function normalizeGlosas(glosas) {
       manual: !!g?.manual,
       orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
       descuento_pct: clampPct(g?.descuento_pct ?? 0),
+      comentario: g?.comentario ? String(g.comentario).trim() : null,
     }))
     .filter((g) => g.descripcion);
 }
@@ -102,9 +103,9 @@ function calcDescuentoGlosasMonto(glosas) {
   );
 }
 
-function calcFromSubtotal(subtotalNeto, ivaRate) {
+function calcFromSubtotal(subtotalNeto, ivaRate, sinIva = false) {
   const sub = round0(subtotalNeto);
-  const iva = round0(sub * Number(ivaRate || 0));
+  const iva = sinIva ? 0 : round0(sub * Number(ivaRate || 0));
   const total = round0(sub + iva);
   return { subtotal: sub, iva, total };
 }
@@ -250,6 +251,99 @@ export const getCotizacion = async (request, reply) => {
 // =========================
 // CREATE
 // =========================
+async function obtenerValorUFDia() {
+  // Plan A: Banco Central de Chile (SieteRestWS)
+  try {
+    const today = new Date();
+    const fiveDaysAgo = new Date();
+    fiveDaysAgo.setDate(today.getDate() - 5);
+
+    const fmt = (d) => d.toISOString().split("T")[0];
+    const user = "soporte@blueinge.com";
+    const pass = "Blue2026!";
+    const timeseries = "F073.UFF.PRE.Z.D";
+    const func = "GetSeries";
+    const url = `https://si3.bcentral.cl/SieteRestWS/SieteRestWS.ashx?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&function=${func}&timeseries=${timeseries}&firstdate=${fmt(fiveDaysAgo)}&lastdate=${fmt(today)}`;
+
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.Codigo === 0 || data?.Codigo === "0") {
+        const obsList = data?.Series?.Obs;
+        if (Array.isArray(obsList) && obsList.length > 0) {
+          for (let i = obsList.length - 1; i >= 0; i--) {
+            const val = Number(obsList[i]?.value);
+            if (!isNaN(val) && val > 0) {
+              console.log("[UF API] [PLAN A] Valor UF obtenido del Banco Central:", val);
+              return val;
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[UF API] Error obteniendo valor UF del Banco Central:", error);
+  }
+
+  // Plan B: mindicador.cl
+  try {
+    const res = await fetch("https://mindicador.cl/api/uf");
+    if (res.ok) {
+      const data = await res.json();
+      const valor = data?.serie?.[0]?.valor;
+      if (valor) {
+        console.log("[UF API] [PLAN B] Valor UF obtenido de mindicador.cl:", valor);
+        return Number(valor);
+      }
+    }
+  } catch (error) {
+    console.error("[UF API] Error obteniendo valor UF de mindicador.cl:", error);
+  }
+
+  // Plan C: Último valor UF registrado en la base de datos
+  try {
+    const lastCot = await prisma.cotizacion.findFirst({
+      where: {
+        valor_uf_documento: {
+          gt: 0,
+        },
+      },
+      orderBy: {
+        creada_en: "desc",
+      },
+      select: {
+        valor_uf_documento: true,
+      },
+    });
+
+    if (lastCot?.valor_uf_documento) {
+      const dbVal = Number(lastCot.valor_uf_documento);
+      console.log("[UF API] [PLAN C] Usando última UF registrada en base de datos:", dbVal);
+      return dbVal;
+    }
+  } catch (dbError) {
+    console.error("[UF API] Error consultando última UF en base de datos:", dbError);
+  }
+
+  // Plan D: Fallback estático extremo (sin internet y base de datos vacía)
+  console.warn("[UF API] [PLAN D] Usando valor UF estático base (sin internet y sin historial):", 37700);
+  return 37700;
+}
+
+export const getUFActual = async (request, reply) => {
+  try {
+    const valor = await obtenerValorUFDia();
+    return reply.send({ valor });
+  } catch (e) {
+    request.log?.error?.(e);
+    return reply.code(500).send({
+      error: "Error al obtener UF actual",
+      detalle: e.message,
+    });
+  }
+};
+
+
 export const createCotizacion = async (request, reply) => {
   try {
     const { empresaId, userId } = getScope(request);
@@ -271,16 +365,27 @@ export const createCotizacion = async (request, reply) => {
 
       ventaIds = [],
       glosas = [],
+
+      // Nuevos campos para servicios/arriendos recurrentes
+      es_suscripcion = false,
+      moneda = "CLP",
+      ciclos_mensuales = 12,
+      valor_uf_manual,
+      sin_iva = false,
+      parent_id,
     } = request.body || {};
 
     if (!cliente_id) {
       return reply.code(400).send({ error: "cliente_id es obligatorio" });
     }
 
-    if (!Array.isArray(ventaIds) || ventaIds.length === 0) {
+    const isSusc = !!es_suscripcion;
+    const hasVentas = Array.isArray(ventaIds) && ventaIds.length > 0;
+
+    if (!isSusc && !hasVentas && (!Array.isArray(glosas) || glosas.length === 0)) {
       return reply
         .code(400)
-        .send({ error: "Debes enviar ventaIds (al menos 1 venta)" });
+        .send({ error: "Debes enviar ventaIds o glosas para cotizaciones estándar" });
     }
 
     const ivaRateNum = Number(ivaRate);
@@ -294,6 +399,15 @@ export const createCotizacion = async (request, reply) => {
     }
 
     const descGeneralPct = clampPct(descuento_pct);
+
+    let valorUF = null;
+    if (moneda === "UF") {
+      if (valor_uf_manual) {
+        valorUF = Number(valor_uf_manual);
+      } else {
+        valorUF = await obtenerValorUFDia();
+      }
+    }
 
     const created = await prisma.$transaction(async (tx) => {
       // Validar cliente dentro de la empresa
@@ -319,45 +433,90 @@ export const createCotizacion = async (request, reply) => {
         }
       }
 
-      // Cargar ventas + detalles
-      const ventas = await tx.venta.findMany({
-        where: { id: { in: ventaIds } },
-        include: { detalles: true },
-      });
+      let subtotalBase = 0;
+      const useGlosasDirectly = isSusc || (!isSusc && !hasVentas);
 
-      if (ventas.length !== ventaIds.length) {
-        throw new Error("Una o más ventas no existen");
-      }
+      if (!isSusc && hasVentas) {
+        // Cargar ventas + detalles
+        const ventas = await tx.venta.findMany({
+          where: { id: { in: ventaIds } },
+          include: { detalles: true },
+        });
 
-      // Subtotal base desde ventas (BRUTO)
-      const subtotalBase = round0(
-        ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0),
-      );
-      if (!subtotalBase || subtotalBase <= 0) {
-        throw new Error("El subtotal calculado desde ventas es 0");
+        if (ventas.length !== ventaIds.length) {
+          throw new Error("Una o más ventas no existen");
+        }
+
+        // Subtotal base desde ventas (BRUTO)
+        subtotalBase = round0(
+          ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0),
+        );
+        if (!subtotalBase || subtotalBase <= 0) {
+          throw new Error("El subtotal calculado desde ventas es 0");
+        }
       }
 
       // Normalizar glosas (BRUTO)
-      let glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+      let glosasFinal = [];
+      if (useGlosasDirectly) {
+        const parsedGlosas = Array.isArray(glosas) ? glosas : [];
+        glosasFinal = parsedGlosas.map((g, idx) => {
+          const desc = String(g?.descripcion || "").trim().slice(0, 250);
+          const cantidad = Number(g?.cantidad || 1);
+          
+          let monto_uf = null;
+          let precio_unitario = 0;
+          let monto = 0;
 
-      if (glosasFinal.length === 0) {
-        glosasFinal = [
-          {
-            descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
-            monto: subtotalBase,
-            manual: true,
-            orden: 0,
-            descuento_pct: 0,
-          },
-        ];
+          if (moneda === "UF") {
+            monto_uf = Number(g?.monto_uf || 0);
+            precio_unitario = Math.round(monto_uf * (valorUF || 1));
+            monto = Math.round(precio_unitario * cantidad);
+          } else {
+            precio_unitario = Math.round(Number(g?.precio_unitario || g?.monto || 0));
+            monto = Math.round(precio_unitario * cantidad);
+          }
+
+          return {
+            descripcion: desc,
+            monto, // CLP bruto total de la linea
+            cantidad,
+            precio_unitario, // CLP bruto unitario
+            monto_uf,
+            manual: !!g?.manual,
+            orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
+            descuento_pct: clampPct(g?.descuento_pct ?? 0),
+            comentario: g?.comentario ? String(g.comentario).trim() : null,
+          };
+        }).filter(g => g.descripcion);
+
+        subtotalBase = sumBrutoGlosas(glosasFinal);
+      } else {
+        glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+
+        if (glosasFinal.length === 0) {
+          glosasFinal = [
+            {
+              descripcion: (String(asunto || "").trim() || "Servicios").slice(0, 250),
+              monto: subtotalBase,
+              manual: true,
+              orden: 0,
+              descuento_pct: 0,
+            },
+          ];
+        }
+
+        // ✅ VALIDACIÓN: glosas deben sumar subtotalBase (BRUTO)
+        const sumaBruto = sumBrutoGlosas(glosasFinal);
+        if (sumaBruto !== subtotalBase) {
+          throw new Error(
+            `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBase}`,
+          );
+        }
       }
 
-      // ✅ VALIDACIÓN: glosas deben sumar subtotalBase (BRUTO)
-      const sumaBruto = sumBrutoGlosas(glosasFinal);
-      if (sumaBruto !== subtotalBase) {
-        throw new Error(
-          `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBase}`,
-        );
+      if (glosasFinal.length === 0) {
+        throw new Error("Debes enviar al menos una glosa válida");
       }
 
       // =====================================================
@@ -388,20 +547,31 @@ export const createCotizacion = async (request, reply) => {
         throw new Error("El subtotal neto quedó negativo (revisa descuentos).");
       }
 
-      const { subtotal, iva, total } = calcFromSubtotal(subtotalNeto, ivaRateNum);
+      const finalSinIva = !!sin_iva;
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalNeto, ivaRateNum, finalSinIva);
 
       // Fechas
       const fechaDocumento = new Date();
       const vencimientoDocumento = new Date(fechaDocumento);
       vencimientoDocumento.setDate(vencimientoDocumento.getDate() + vigenciaDias);
 
-      // Obtener el número correlativo para la empresa
-      const maxCotizacion = await tx.cotizacion.findFirst({
-        where: { empresa_id: empresaId },
-        orderBy: { numero: "desc" },
-        select: { numero: true },
-      });
-      const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+      // Obtener el número correlativo para la empresa (secuencias separadas para suscripciones)
+      let nextNumero = 1;
+      if (isSusc) {
+        const maxCotizacion = await tx.cotizacion.findFirst({
+          where: { empresa_id: empresaId, es_suscripcion: true },
+          orderBy: { numero: "desc" },
+          select: { numero: true },
+        });
+        nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1000001;
+      } else {
+        const maxCotizacion = await tx.cotizacion.findFirst({
+          where: { empresa_id: empresaId, es_suscripcion: false },
+          orderBy: { numero: "desc" },
+          select: { numero: true },
+        });
+        nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+      }
 
       // Crear cotización
       const cot = await tx.cotizacion.create({
@@ -409,6 +579,7 @@ export const createCotizacion = async (request, reply) => {
           numero: nextNumero,
           empresa_id: empresaId,
           proyecto_id: proyecto_id || null,
+          parent_id: parent_id || null,
           cliente_id,
           cliente_responsable_id: cliente_responsable_id || null,
 
@@ -425,29 +596,39 @@ export const createCotizacion = async (request, reply) => {
           subtotal,
           iva,
           total,
+          sin_iva: finalSinIva,
 
           // ✅ descuento general guardado
           descuento_pct: descGeneralPct,
           descuento_monto: descGeneralMonto,
+
+          // ✅ Nuevos campos para servicios/arriendos recurrentes
+          moneda,
+          valor_uf_documento: valorUF,
+          es_suscripcion: isSusc,
+          ciclos_mensuales: Number(ciclos_mensuales || 12),
 
           estado: "COTIZACION",
 
           glosas: {
             create: glosasFinal.map((g, idx) => ({
               descripcion: g.descripcion,
-              monto: round0(g.monto || 0), // BRUTO
-              cantidad: Number(g.cantidad || 1),
-              precio_unitario: Number(g.precio_unitario || g.monto || 0),
-              manual: !!g.manual,
-              orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
-              // si hay general, esto igual debería venir 0, pero lo guardamos tal cual:
-              descuento_pct: clampPct(g.descuento_pct || 0),
+              monto: g.monto,
+              cantidad: g.cantidad,
+              precio_unitario: g.precio_unitario,
+              monto_uf: g.monto_uf,
+              manual: g.manual,
+              orden: g.orden,
+              descuento_pct: g.descuento_pct,
+              comentario: g.comentario || null,
             })),
           },
 
-          ventas: {
-            connect: ventaIds.map((id) => ({ id })),
-          },
+          ...(isSusc ? {} : {
+            ventas: {
+              connect: ventaIds.map((id) => ({ id })),
+            },
+          }),
         },
         include: {
           cliente: true,
@@ -513,6 +694,14 @@ export const updateCotizacion = async (request, reply) => {
 
       ventaIds, // puede ser [] o undefined
       glosas, // puede venir [] o undefined
+
+      // Nuevos campos para servicios/arriendos recurrentes
+      es_suscripcion,
+      moneda,
+      ciclos_mensuales,
+      valor_uf_manual,
+      sin_iva,
+      parent_id,
     } = request.body || {};
 
     // =========================
@@ -559,6 +748,21 @@ export const updateCotizacion = async (request, reply) => {
         ? clampPct(descuento_pct)
         : clampPct(existing.descuento_pct || 0);
 
+    const isSusc = es_suscripcion !== undefined ? !!es_suscripcion : !!existing.es_suscripcion;
+    const finalMoneda = moneda ?? existing.moneda;
+    const finalCiclosMensuales = ciclos_mensuales !== undefined ? Number(ciclos_mensuales) : existing.ciclos_mensuales;
+
+    let valorUF = existing.valor_uf_documento;
+    if (finalMoneda === "UF") {
+      if (valor_uf_manual !== undefined) {
+        valorUF = valor_uf_manual ? Number(valor_uf_manual) : null;
+      } else if (!valorUF) {
+        valorUF = await obtenerValorUFDia();
+      }
+    } else {
+      valorUF = null;
+    }
+
     // ventas:
     // - si viene ventaIds (aunque sea []) => se respeta exactamente
     // - si NO viene ventaIds => mantenemos las actuales
@@ -567,7 +771,7 @@ export const updateCotizacion = async (request, reply) => {
       ? ventaIds
       : (existing.ventas || []).map((v) => v.id);
 
-    const conVentas = Array.isArray(finalVentaIds) && finalVentaIds.length > 0;
+    const conVentas = !isSusc && Array.isArray(finalVentaIds) && finalVentaIds.length > 0;
 
     const updated = await prisma.$transaction(async (tx) => {
       // =========================
@@ -612,15 +816,73 @@ export const updateCotizacion = async (request, reply) => {
       }
 
       // =========================
-      // Normalizar glosas (BRUTO, igual create)
-      // - si el request NO manda glosas => usamos las existentes
-      // - si manda [] => queda auto (1 glosa)
+      // Normalizar glosas
       // =========================
       const glosasWasProvided = Array.isArray(glosas);
+      let glosasFinal = [];
 
-      let glosasFinal = glosasWasProvided
-        ? normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden)
-        : normalizeGlosas(existing.glosas || []).sort((a, b) => a.orden - b.orden);
+      if (glosasWasProvided) {
+        if (isSusc) {
+          glosasFinal = glosas.map((g, idx) => {
+            const desc = String(g?.descripcion || "").trim().slice(0, 250);
+            const cantidad = Number(g?.cantidad || 1);
+            
+            let monto_uf = null;
+            let precio_unitario = 0;
+            let monto = 0;
+
+            if (finalMoneda === "UF") {
+              monto_uf = g?.monto_uf !== undefined ? Number(g?.monto_uf || 0) : (g?.monto_uf ?? null);
+              precio_unitario = Math.round(Number(monto_uf || 0) * (valorUF || 1));
+              monto = Math.round(precio_unitario * cantidad);
+            } else {
+              precio_unitario = Math.round(Number(g?.precio_unitario || g?.monto || 0));
+              monto = Math.round(precio_unitario * cantidad);
+            }
+
+            return {
+              descripcion: desc,
+              monto,
+              cantidad,
+              precio_unitario,
+              monto_uf,
+              manual: !!g?.manual,
+              orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
+              descuento_pct: clampPct(g?.descuento_pct ?? 0),
+              comentario: g?.comentario ? String(g.comentario).trim() : null,
+            };
+          }).filter(g => g.descripcion);
+        } else {
+          glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+        }
+      } else {
+        // no se enviaron glosas, usamos las existentes
+        glosasFinal = existing.glosas.map((g, idx) => {
+          let precio_unitario = g.precio_unitario;
+          let monto = g.monto;
+          let monto_uf = g.monto_uf;
+
+          if (isSusc && finalMoneda === "UF") {
+            monto_uf = g.monto_uf !== null ? Number(g.monto_uf) : null;
+            if (monto_uf !== null) {
+              precio_unitario = Math.round(monto_uf * (valorUF || 1));
+              monto = Math.round(precio_unitario * g.cantidad);
+            }
+          }
+
+          return {
+            descripcion: g.descripcion,
+            monto,
+            cantidad: g.cantidad,
+            precio_unitario: precio_unitario ?? g.monto,
+            monto_uf,
+            manual: g.manual,
+            orden: g.orden !== null ? g.orden : idx,
+            descuento_pct: clampPct(g.descuento_pct || 0),
+            comentario: g.comentario,
+          };
+        });
+      }
 
       // Si no vienen glosas (o vienen vacías/filtradas) => 1 automática
       if (glosasFinal.length === 0) {
@@ -710,7 +972,8 @@ export const updateCotizacion = async (request, reply) => {
       }
 
       // ✅ totales netos
-      const { subtotal, iva, total } = calcFromSubtotal(subtotalNetoBase, ivaRateNum);
+      const finalSinIva = sin_iva !== undefined ? !!sin_iva : !!existing.sin_iva;
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalNetoBase, ivaRateNum, finalSinIva);
 
       // Si glosa auto venía con monto 0, la ajustamos al BRUTO base (solo si quedó 1 glosa)
       // (esto es útil cuando no mandan glosas y quieres que se rellene)
@@ -757,9 +1020,11 @@ export const updateCotizacion = async (request, reply) => {
           monto: round0(g.monto || 0), // ✅ BRUTO
           cantidad: Number(g.cantidad || 1),
           precio_unitario: Number(g.precio_unitario || g.monto || 0),
+          monto_uf: g.monto_uf,
           manual: !!g.manual,
           orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
           descuento_pct: clampPct(g.descuento_pct || 0),
+          comentario: g.comentario || null,
         })),
       });
 
@@ -791,10 +1056,21 @@ export const updateCotizacion = async (request, reply) => {
           subtotal,
           iva,
           total,
+          sin_iva: finalSinIva,
 
           // ✅ descuento general guardado
           descuento_pct: descGeneralPct,
           descuento_monto: descGeneralMonto,
+
+          // Nuevos campos
+          moneda: finalMoneda,
+          valor_uf_documento: valorUF,
+          es_suscripcion: isSusc,
+          ciclos_mensuales: finalCiclosMensuales,
+
+           fecha_inicio_plan: request.body.fecha_inicio_plan !== undefined ? (request.body.fecha_inicio_plan ? new Date(request.body.fecha_inicio_plan) : null) : undefined,
+          fecha_fin_plan: request.body.fecha_fin_plan !== undefined ? (request.body.fecha_fin_plan ? new Date(request.body.fecha_fin_plan) : null) : undefined,
+          ...(parent_id !== undefined ? { parent_id: parent_id || null } : {}),
         },
       });
 
@@ -803,12 +1079,12 @@ export const updateCotizacion = async (request, reply) => {
       // - si el request trajo ventaIds (aunque sea []) => hacemos set exacto
       // - si no trajo => NO tocamos relación
       // =========================
-      if (ventaIdsWasProvided) {
+      if (ventaIdsWasProvided || isSusc) {
         await tx.cotizacion.update({
           where: { id },
           data: {
             ventas: {
-              set: finalVentaIds.map((x) => ({ id: x })), // si [] => queda sin ventas ✅
+              set: isSusc ? [] : finalVentaIds.map((x) => ({ id: x })), // si [] o suscripción => queda sin ventas ✅
             },
           },
         });
@@ -872,7 +1148,7 @@ export const updateCotizacionEstado = async (request, reply) => {
 
     const allowed = {
       COTIZACION: ["ACEPTADA", "RECHAZADA"],
-      ACEPTADA: ["ORDEN_VENTA"],
+      ACEPTADA: ["ORDEN_VENTA", "RECHAZADA"],
       ORDEN_VENTA: ["FACTURADA"],
       FACTURADA: ["PAGADA"],
       PAGADA: [],
@@ -928,6 +1204,7 @@ export const updateCotizacionEstado = async (request, reply) => {
           estado: true,
           proyecto_id: true,
           empresa_id: true,
+          es_suscripcion: true,
           fecha_ov: true,
           fecha_facturada: true,
           fecha_aceptada: true,
@@ -954,57 +1231,64 @@ export const updateCotizacionEstado = async (request, reply) => {
 
       let proyectoIdFinal = cot.proyecto_id;
 
-      // ✅ crear proyecto al ACEPTAR
-      const isCotToAceptada =
-        cot.estado === "COTIZACION" && estado === "ACEPTADA";
-      if (isCotToAceptada && !proyectoIdFinal) {
-        const asunto = String(cot.asunto || "Sin asunto").trim();
-        const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
+      if (!cot.es_suscripcion) {
+        // ✅ crear proyecto al ACEPTAR (solo para cotizaciones que NO sean suscripciones/servicios)
+        const isCotToAceptada =
+          cot.estado === "COTIZACION" && estado === "ACEPTADA";
+        if (isCotToAceptada && !proyectoIdFinal) {
+          const asunto = String(cot.asunto || "Sin asunto").trim();
+          const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
 
-        const proyecto = await tx.proyecto.create({
-          data: {
-            empresa_id: cot.empresa_id,
-            nombre: nombreProyecto,
-            fecha_inicio_plan: inicioPlan,
-            fecha_fin_plan: finPlan,
-          },
-          select: { id: true },
-        });
+          const proyecto = await tx.proyecto.create({
+            data: {
+              empresa_id: cot.empresa_id,
+              nombre: nombreProyecto,
+              fecha_inicio_plan: inicioPlan,
+              fecha_fin_plan: finPlan,
+            },
+            select: { id: true },
+          });
 
-        proyectoIdFinal = proyecto.id;
-      }
+          proyectoIdFinal = proyecto.id;
+        }
 
-      // ✅ si ya existía proyecto y se vuelve a setear plan (por si acaso)
-      if (toAceptada && proyectoIdFinal) {
-        // Calcular presupuesto (suma de costoTotal de las ventas vinculadas)
-        const ventasParaPresupuesto = await tx.venta.findMany({
-          where: { ordenVentaId: id, eliminado: false },
-          include: { detalles: true },
-        });
+        // ✅ si ya existía proyecto y se vuelve a setear plan (por si acaso)
+        if (toAceptada && proyectoIdFinal) {
+          // Calcular presupuesto (suma de costoTotal de las ventas vinculadas)
+          const ventasParaPresupuesto = await tx.venta.findMany({
+            where: { ordenVentaId: id, eliminado: false },
+            include: { detalles: true },
+          });
 
-        const presupuestoTotal = ventasParaPresupuesto.reduce((accV, v) => {
-          return accV + (v.detalles || []).reduce((accD, d) => accD + (Number(d.costoTotal) || 0), 0);
-        }, 0);
+          const presupuestoTotal = ventasParaPresupuesto.reduce((accV, v) => {
+            return accV + (v.detalles || []).reduce((accD, d) => accD + (Number(d.costoTotal) || 0), 0);
+          }, 0);
 
-        await tx.proyecto.update({
-          where: { id: proyectoIdFinal },
-          data: {
-            fecha_inicio_plan: inicioPlan,
-            fecha_fin_plan: finPlan,
-            presupuesto: presupuestoTotal > 0 ? presupuestoTotal : undefined,
-          },
-        });
+          await tx.proyecto.update({
+            where: { id: proyectoIdFinal },
+            data: {
+              fecha_inicio_plan: inicioPlan,
+              fecha_fin_plan: finPlan,
+              presupuesto: presupuestoTotal > 0 ? presupuestoTotal : undefined,
+            },
+          });
+        }
       }
 
       const updateData = {
         estado,
-        proyecto_id: proyectoIdFinal ?? null,
+        proyecto_id: cot.es_suscripcion ? null : (proyectoIdFinal ?? null),
         motivo_rechazo: toRechazada
           ? motivo_rechazo
             ? String(motivo_rechazo).trim()
             : null
           : null,
       };
+
+      if (cot.es_suscripcion && toAceptada) {
+        updateData.fecha_inicio_plan = inicioPlan;
+        updateData.fecha_fin_plan = finPlan;
+      }
 
       const now = new Date();
       if (estado === "ACEPTADA") {
@@ -1234,7 +1518,7 @@ export const importVentasCSV = async (request, reply) => {
 
             // Obtener el número correlativo para la empresa
             const maxCotizacion = await tx.cotizacion.findFirst({
-              where: { empresa_id: empresaId },
+              where: { empresa_id: empresaId, es_suscripcion: false },
               orderBy: { numero: "desc" },
               select: { numero: true },
             });

@@ -153,8 +153,9 @@ function parseCleanNumber(val) {
   const str = String(val).trim();
   if (!str) return null;
 
-  // Limpiar simbolos de moneda y espacios en blanco
-  let cleanStr = str.replace(/[\$\s€]/g, "");
+  // Limpiar simbolos de moneda, textos y espacios (dejar solo digitos, comas, puntos y signos)
+  let cleanStr = str.replace(/[^\d.,+-]/g, "");
+  if (!cleanStr) return null;
 
   // Si tiene puntos y comas (ej: "1.234.567,89" o "1,234,567.89")
   if (cleanStr.includes(".") && cleanStr.includes(",")) {
@@ -198,6 +199,67 @@ function parseCleanNumber(val) {
 
   const num = Number(cleanStr);
   return isNaN(num) ? null : num;
+}
+
+/**
+ * Normaliza una cadena para comparaciones robustas de nombres e identificadores
+ * (remueve acentos, convierte a minúsculas y quita caracteres no alfanuméricos).
+ * @param {string} str Cadena a normalizar.
+ * @returns {string} Cadena normalizada.
+ */
+function normalizeStringForComparison(str) {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Quitar acentos
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, ""); // Quitar todo lo que no sea letras o números
+}
+
+/**
+ * Intenta adivinar el nombre del proveedor emisor a partir de las primeras líneas del texto plano
+ * de la cotización, omitiendo al comprador e información de contacto.
+ * @param {string} rawText Texto completo del documento.
+ * @returns {string|null} Nombre del proveedor adivinado o null.
+ */
+function guessSupplierFromText(rawText) {
+  if (!rawText) return null;
+  const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  
+  for (let i = 0; i < Math.min(5, lines.length); i++) {
+    const line = lines[i];
+    const normalized = normalizeStringForComparison(line);
+    
+    // Ignorar si es el comprador, correos, sitios web, teléfonos, etc.
+    if (normalized.includes("blueingenieria") || 
+        normalized.includes("victormorales") || 
+        normalized.includes("buyer") || 
+        normalized.includes("consignee") || 
+        normalized.includes("notify") ||
+        normalized.includes("client") || 
+        normalized.includes("comprador") ||
+        line.includes("@") || 
+        line.toLowerCase().includes("tel") || 
+        line.toLowerCase().includes("web:") ||
+        /^\d+$/.test(normalized)) {
+      continue;
+    }
+    
+    if (line.length > 3 && line.length < 100) {
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i+1].trim();
+        const nextNormalized = normalizeStringForComparison(nextLine);
+        if (nextNormalized.includes("ltda") || 
+            nextNormalized.includes("sa") || 
+            nextNormalized.includes("spa") ||
+            nextNormalized.includes("srl") ||
+            nextNormalized.includes("equipamentos")) {
+          return `${line} ${nextLine}`;
+        }
+      }
+      return line;
+    }
+  }
+  return null;
 }
 
 /**
@@ -327,34 +389,90 @@ function recalculateAndValidateTotals(parsedResponse) {
       calculatedSubtotal += item.totalLinea;
     }
   });
+
+  const hasItems = items.length > 0;
+  let allItemsZeroPrice = hasItems && items.every(item => {
+    if (!item) return true;
+    const price = Number(item.precioUnitario || 0);
+    return price === 0;
+  });
+
+  const tempTotalVal = parseCleanNumber(parsedResponse.montos.total) || 0;
+
+  // HEURÍSTICA: Si hay un único ítem y su precio unitario es 0 o nulo, pero el total general es mayor a 0,
+  // asignamos el total general al precio unitario del ítem (dividido por su cantidad si es mayor a 1).
+  if (items.length === 1 && allItemsZeroPrice && tempTotalVal > 0) {
+    const singleItem = items[0];
+    const qty = Number(singleItem.cantidad || 1);
+    singleItem.precioUnitario = tempTotalVal / qty;
+    singleItem.totalLinea = tempTotalVal;
+    calculatedSubtotal = tempTotalVal;
+    allItemsZeroPrice = false;
+  }
+
+  let useGlobalTotals = allItemsZeroPrice;
   
-  parsedResponse.montos.subtotal = calculatedSubtotal;
-  
-  // 2. Extraer o estimar impuestos (IVA 19% en Chile)
-  let impuestos = Number(parsedResponse.montos.impuestos || 0);
-  const isCLP = parsedResponse.documentoProveedor?.moneda === "CLP";
-  
-  if (isCLP) {
-    const expectedIVA = Math.round(calculatedSubtotal * 0.19);
-    // Si impuestos es 0, o es igual al subtotal/total debido a un error del LLM, usamos el IVA esperado
-    if (impuestos === 0 || impuestos === calculatedSubtotal || impuestos > calculatedSubtotal) {
-      impuestos = expectedIVA;
-    } else {
-      // Si difiere por más del 5% del IVA esperado, forzar el IVA esperado
-      const diffPercent = Math.abs(impuestos - expectedIVA) / expectedIVA;
-      if (diffPercent > 0.05) {
-        impuestos = expectedIVA;
-      }
+  if (hasItems && !allItemsZeroPrice && tempTotalVal > 0) {
+    const ratio = calculatedSubtotal / tempTotalVal;
+    if (ratio < 0.1 || ratio > 10) {
+      console.log(`[Ollama Service] Suma de items (${calculatedSubtotal}) es incongruente con el total general (${tempTotalVal}). Asumiendo cotización global y reseteando precios de items a 0.`);
+      items.forEach(item => {
+        if (item) {
+          item.precioUnitario = 0;
+          item.totalLinea = 0;
+        }
+      });
+      useGlobalTotals = true;
     }
   }
-  
-  parsedResponse.montos.impuestos = impuestos;
-  
-  const descuento = Number(parsedResponse.montos.descuento || 0);
-  parsedResponse.montos.descuento = descuento;
-  
-  // 3. El total general es subtotal + impuestos - descuento
-  parsedResponse.montos.total = calculatedSubtotal + impuestos - descuento;
+
+  if (hasItems && !useGlobalTotals) {
+    parsedResponse.montos.subtotal = calculatedSubtotal;
+    
+    // 2. Extraer o estimar impuestos (IVA 19% en Chile)
+    let impuestos = Number(parsedResponse.montos.impuestos || 0);
+    const isCLP = parsedResponse.documentoProveedor?.moneda === "CLP";
+    
+    if (isCLP) {
+      const expectedIVA = Math.round(calculatedSubtotal * 0.19);
+      if (impuestos === 0 || impuestos === calculatedSubtotal || impuestos > calculatedSubtotal) {
+        impuestos = expectedIVA;
+      } else {
+        const diffPercent = Math.abs(impuestos - expectedIVA) / expectedIVA;
+        if (diffPercent > 0.05) {
+          impuestos = expectedIVA;
+        }
+      }
+    }
+    
+    parsedResponse.montos.impuestos = impuestos;
+    
+    const descuento = Number(parsedResponse.montos.descuento || 0);
+    parsedResponse.montos.descuento = descuento;
+    
+    // 3. El total general es subtotal + impuestos - descuento
+    parsedResponse.montos.total = calculatedSubtotal + impuestos - descuento;
+  } else {
+    // Es una cotización global o de paquete (sin precios detallados por ítem)
+    // Preservar los totales extraídos por Ollama en lugar de sobreescribirlos con 0.
+    const subtotalVal = parseCleanNumber(parsedResponse.montos.subtotal) || 0;
+    const totalVal = parseCleanNumber(parsedResponse.montos.total) || 0;
+    const impuestoVal = parseCleanNumber(parsedResponse.montos.impuestos) || 0;
+    const descuentoVal = parseCleanNumber(parsedResponse.montos.descuento) || 0;
+
+    if (totalVal > 0 && subtotalVal === 0) {
+      parsedResponse.montos.subtotal = totalVal - impuestoVal + descuentoVal;
+      parsedResponse.montos.total = totalVal;
+    } else if (subtotalVal > 0 && totalVal === 0) {
+      parsedResponse.montos.subtotal = subtotalVal;
+      parsedResponse.montos.total = subtotalVal + impuestoVal - descuentoVal;
+    } else {
+      parsedResponse.montos.subtotal = subtotalVal;
+      parsedResponse.montos.total = totalVal;
+    }
+    parsedResponse.montos.impuestos = impuestoVal;
+    parsedResponse.montos.descuento = descuentoVal;
+  }
   
   // 4. Limpiar advertencias matemáticas si ya corregimos la consistencia
   if (parsedResponse.confianza && Array.isArray(parsedResponse.confianza.advertencias)) {
@@ -371,29 +489,40 @@ function recalculateAndValidateTotals(parsedResponse) {
  */
 export async function analizarCotizacionConOllama(rawText) {
   // Truncar el texto a un máximo de 6000 caracteres (~1500 tokens) para reducir sustancialmente el tiempo de prompt evaluation en CPU
-  const maxChars = 6000;
+  const maxChars = 15000;
   const truncatedText = (rawText || "").length > maxChars 
     ? rawText.substring(0, maxChars) + "\n\n[...Texto truncado por longitud excesiva...]" 
     : rawText;
 
-  console.log(`[Ollama Service] Iniciando análisis. Longitud texto original: ${rawText ? rawText.length : 0} caracteres. Texto procesado: ${truncatedText.length} caracteres.`);
+  // Sanitizar texto para evitar comillas dobles internas que rompen el formato JSON
+  const sanitizedText = truncatedText.replace(/"/g, "'").replace(/\\/g, "/");
 
-  const prompt = `Analiza el siguiente texto extraído de una cotización de proveedor y extrae la información en un formato JSON estructurado.
+  console.log(`[Ollama Service] Iniciando análisis. Longitud texto original: ${rawText ? rawText.length : 0} caracteres. Texto procesado: ${sanitizedText.length} caracteres.`);
+
+// Variables sugeridas para darle más contexto al modelo y evitar confusiones
+const miEmpresa = "BLUE INGENIERIA"; 
+const misRepresentantes = "Victor Morales"; 
+
+const prompt = `Actúa como un sistema experto de extracción de datos para integración con un ERP. 
+Tu tarea es analizar el texto de una cotización y extraer la información en un JSON estructurado.
 
 REGLAS CRÍTICAS DE EXTRACCIÓN:
-1. PROVEEDOR (quien vende): Identifica dinámicamente al emisor real de la cotización que figura en el documento (nombre, RUT, dirección, etc.). El cliente (quien compra) suele ser la empresa receptora (como BLUE INGENIERÍA SPA o la empresa del usuario).
-2. MONEDA: Debe ser "CLP" si hay símbolos "$" o montos en pesos. NUNCA extraigas "USD" o "Dólar" a menos que diga explícitamente "USD" o "Dólar".
-3. MONTOS DEL RESUMEN:
-   En la sección final de totales del texto:
-   - "Neto" (ej: Neto $ 837.200,00) es el "subtotal" del JSON (debe ser "837.200,00").
-   - "IVA" (ej: $ 159.068,00) es el "impuestos" del JSON (debe ser "159.068,00").
-   - "Total" (ej: $ 996.268,00) es el "total" del JSON (debe ser "996.268,00").
-   - "descuento" es siempre "0" o null, a menos que se indique explícitamente "Descuento". NUNCA pongas el IVA en la sección de descuento.
-4. Escribe todos los números (precios, subtotales, totales, cantidades) como strings (ejemplo: "837.200,00", "159.068,00", "996.268,00", "1,0", "284.050,00"). NUNCA envíes números puros sin comillas en el JSON.
-5. ITEMS DE LA TABLA: Cada producto tiene una descripción y luego una línea de valores: "[INDICE] [CANTIDAD] [PRECIO UNITARIO] [TOTAL LINEA] [DESCUENTO]" (ej: "001 1,0 $ 284.050,00 $ 284.050,00 0,00"). Extrae cada item con su cantidad, precio unitario y totalLinea individuales. No dupliques el total general en los items.
+1. PROVEEDOR (Emisor): Es la empresa que VENDE. NUNCA extraigas a "${miEmpresa}" o "${misRepresentantes}" como proveedor. Ignora los datos del cliente.
+2. MONEDA (Alta Prioridad): Analiza todo el texto (ej. "USD", "US$", "EXW TOTAL", "€", "CLP"). Si ves "USD" o "US$", la moneda es "USD".
+3. LÓGICA DE ÍTEMS Y DESPIECES TÉCNICOS:
+   - ATENCIÓN: Muchas cotizaciones incluyen listas inmensas de accesorios, repuestos o componentes que NO tienen precio (ej. cantidades de mangueras, tornillos, válvulas). IGNORA todas las tablas de accesorios técnicos que no tengan un precio asignado.
+   - Busca la sección de "PRESUPUESTO" o "RESUMEN" al final del documento.
+   - Si se cobra un equipo principal (ej. "Equipo de ultra alta presión") por un valor total, extrae ESE ítem como el producto principal con cantidad 1, y asigna el total global como su precio unitario.
+4. FORMATO DE NÚMEROS: Extrae montos como strings sin símbolos (ej: "192.000,00").
+5. FORMATO ESTRICTO: Solo devuelve JSON válido. 
 
-ESTRUCTURA DEL JSON ESPERADO:
+ESTRUCTURA JSON REQUERIDA:
 {
+  "razonamiento": {
+    "proveedor": "Explica a quién identificaste.",
+    "moneda": "Símbolos encontrados.",
+    "items": "Explica por qué ignoraste el despiece técnico y qué ítem principal elegiste."
+  },
   "proveedor": {
     "nombre": null,
     "rut": null,
@@ -406,10 +535,10 @@ ESTRUCTURA DEL JSON ESPERADO:
     "numeroCotizacion": null,
     "referencia": null,
     "fechaCotizacion": null,
-    "fechaEntregaEsperada": null,
+    "fechaVencimiento": null,
     "moneda": null,
     "condicionPago": null,
-    "condicionEntrega": null
+    "tiempoEntrega": null
   },
   "montos": {
     "subtotal": null,
@@ -430,20 +559,13 @@ ESTRUCTURA DEL JSON ESPERADO:
     }
   ],
   "terminosCondiciones": [],
-  "observaciones": null,
-  "confianza": {
-    "general": 0.0,
-    "camposDetectados": [],
-    "camposFaltantes": [],
-    "advertencias": []
-  }
+  "observaciones": null
 }
 
-TEXTO EXTRAÍDO DEL DOCUMENTO:
+TEXTO DE LA COTIZACIÓN:
 ---
-${truncatedText}
----
-`;
+${sanitizedText}
+---`;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 180000); // 180 segundos (3 minutos) de tiempo de espera máximo
@@ -463,14 +585,13 @@ ${truncatedText}
         format: "json",
         stream: false,
         options: {
-          temperature: 0.1, // temperatura baja para reducir alucinaciones
-          num_predict: 2048, // limitar longitud de generación para evitar bucles infinitos
-          num_ctx: 8192, // asegurar suficiente ventana de contexto
+          temperature: 0.0, // Báscalo a 0.0 para que sea estrictamente analítico
+          num_predict: 3000, // Aumenta el límite de salida por si hay muchos ítems
+          num_ctx: 8192, // VITAL: Aumenta la ventana de contexto para que lea los 15000 caracteres
         },
       }),
       signal: controller.signal,
     });
-
     clearTimeout(timeoutId);
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -505,11 +626,64 @@ ${truncatedText}
 
     // Normalizar montos e items numéricos desde los strings devueltos
     if (parsedResponse) {
+      // Sobreescribir moneda si detectamos USD/EUR via regex y Ollama devolvió CLP por error
+      if (parsedResponse.documentoProveedor) {
+        const textUpper = (rawText || "").toUpperCase();
+        let detectedCurrency = null;
+        if (textUpper.includes("USD") || textUpper.includes("US$") || textUpper.includes("USDTOTAL")) {
+          detectedCurrency = "USD";
+        } else if (textUpper.includes("EUR") || textUpper.includes("€")) {
+          detectedCurrency = "EUR";
+        }
+        
+        if (detectedCurrency && parsedResponse.documentoProveedor.moneda !== detectedCurrency) {
+          console.log(`[Ollama Service] Corrigiendo moneda de ${parsedResponse.documentoProveedor.moneda} a ${detectedCurrency} basado en detección de texto.`);
+          parsedResponse.documentoProveedor.moneda = detectedCurrency;
+        }
+      }
+
+      // Corregir proveedor si Ollama extrajo al cliente por error
+      if (parsedResponse.proveedor && parsedResponse.proveedor.nombre) {
+        const provName = String(parsedResponse.proveedor.nombre).toUpperCase();
+        const normName = normalizeStringForComparison(parsedResponse.proveedor.nombre);
+        if (normName.includes("blueingenieria") || normName.includes("victormorales")) {
+          console.log(`[Ollama Service] Corrigiendo proveedor erróneo (cliente extraído como proveedor): ${parsedResponse.proveedor.nombre}`);
+          const textUpper = (rawText || "").toUpperCase();
+          if (textUpper.includes("COMET DO BRASIL")) {
+            parsedResponse.proveedor.nombre = "COMET DO BRASIL INDÚSTRIA E COMÉRCIO DE EQUIPAMENTOS LTDA";
+            parsedResponse.proveedor.rut = "21.571.621/0001-03";
+          } else if (textUpper.includes("LEMASA")) {
+            parsedResponse.proveedor.nombre = "LEMASA";
+          } else {
+            const guessed = guessSupplierFromText(rawText);
+            if (guessed) {
+              console.log(`[Ollama Service] Proveedor guessed de las primeras líneas del texto: ${guessed}`);
+              parsedResponse.proveedor.nombre = guessed;
+            } else {
+              parsedResponse.proveedor.nombre = null;
+            }
+          }
+        }
+      }
+
       if (parsedResponse.montos) {
         parsedResponse.montos.subtotal = parseCleanNumber(parsedResponse.montos.subtotal);
         parsedResponse.montos.descuento = parseCleanNumber(parsedResponse.montos.descuento);
         parsedResponse.montos.impuestos = parseCleanNumber(parsedResponse.montos.impuestos);
         parsedResponse.montos.total = parseCleanNumber(parsedResponse.montos.total);
+
+        // Corregir o rellenar totales usando extractor de respaldo si Ollama extrajo montos erróneos o nulos
+        const progTotals = extractTotalsFromText(rawText);
+        if (progTotals.foundTotal && (!parsedResponse.montos.total || parsedResponse.montos.total === 0 || Math.abs(parsedResponse.montos.total - progTotals.foundTotal) > 0.01)) {
+          console.log(`[Ollama Service] Corrigiendo total general de ${parsedResponse.montos.total} a ${progTotals.foundTotal} usando extractor de respaldo.`);
+          parsedResponse.montos.total = progTotals.foundTotal;
+          if (progTotals.foundSubtotal) {
+            parsedResponse.montos.subtotal = progTotals.foundSubtotal;
+          } else {
+            parsedResponse.montos.subtotal = progTotals.foundTotal - (progTotals.foundImpuestos || 0);
+          }
+          parsedResponse.montos.impuestos = progTotals.foundImpuestos || 0;
+        }
       }
 
       if (Array.isArray(parsedResponse.items)) {
@@ -586,4 +760,49 @@ ${truncatedText}
     
     throw new Error(`Error en servicio Ollama: ${detailMsg}`);
   }
+}
+
+/**
+ * Extractor determinístico de respaldo para montos totales, subtotales e impuestos.
+ * @param {string} rawText Texto plano extraído del documento.
+ * @returns {object} Montos detectados.
+ */
+function extractTotalsFromText(rawText) {
+  if (!rawText) return { foundTotal: null, foundSubtotal: null, foundImpuestos: null };
+
+  const lines = rawText.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const prevLine = lines[i-1].trim();
+    const currLine = lines[i].trim();
+    if (/^(?:USDTOTAL|TOTAL|EXW TOTAL)$/i.test(currLine) && /^[$\s€]*[\d\.,]+$/.test(prevLine)) {
+      lines[i-1] = prevLine + " " + currLine;
+      lines[i] = "";
+    }
+  }
+  const cleanText = lines.filter(l => l.trim() !== "").join("\n");
+
+  let foundTotal = null;
+  let foundSubtotal = null;
+  let foundImpuestos = null;
+
+  // Regex para TOTAL (horizontal-only spacing)
+  const totalMatch = cleanText.match(/(?:(?:TOTAL GENERAL|USDTOTAL|EXW TOTAL|TOTAL)[ \t]*:?[ \t]*[ \t$€]*([\d\.,]+)|([\d\.,]+)[ \t]*[ \t$€]*(?:USDTOTAL|TOTAL|EXW TOTAL))/i);
+  if (totalMatch) {
+    const valStr = totalMatch[1] || totalMatch[2];
+    foundTotal = parseCleanNumber(valStr);
+  }
+
+  // Neto / Subtotal (horizontal-only spacing)
+  const subtotalMatch = cleanText.match(/(?:SUBTOTAL|NETO|VALOR NETO)[ \t]*:?[ \t]*[ \t$€]*([\d\.,]+)/i);
+  if (subtotalMatch) {
+    foundSubtotal = parseCleanNumber(subtotalMatch[1]);
+  }
+
+  // IVA / Impuestos (horizontal-only spacing)
+  const impuestoMatch = cleanText.match(/(?:IVA|IMPUESTOS?|IMPTO)[ \t]*:?[ \t]*[ \t$€]*([\d\.,]+)/i);
+  if (impuestoMatch) {
+    foundImpuestos = parseCleanNumber(impuestoMatch[1]);
+  }
+
+  return { foundTotal, foundSubtotal, foundImpuestos };
 }

@@ -47,7 +47,7 @@ export const makeLogin = (server) => async (request, reply) => {
     empresa: user.empresa,
   };
 
-  const token = server.jwt.sign(payload, { expiresIn: "8h" });
+  const token = server.jwt.sign(payload, { expiresIn: "24h" });
 
   return reply.send({ token, user: payload });
 };

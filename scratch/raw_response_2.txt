@@ -1,0 +1,129 @@
+{
+  "proveedor": {
+    "nombre": "Blue Ingeniería",
+    "rut": null,
+    "direccion": null,
+    "telefono": null,
+    "email": null,
+    "sitioWeb": null
+  },
+  "documentoProveedor": {
+    "numeroCotizacion": "1000.00163.1",
+    "referencia": "L-300/4 UAP",
+    "fechaCotizacion": "2025-11-07",
+    "fechaEntregaEsperada": null,
+    "moneda": "CLP",
+    "condicionPago": null,
+    "condicionEntrega": null
+  },
+  "montos": {
+    "subtotal": "192.000,00",
+    "descuento": "0,00",
+    "impuestos": "0,00",
+    "total": "192.000,00"
+  },
+  "items": [
+    {
+      "codigo": "8880.15038.1G MANG.",
+      "descripcion": "MANG. 8/8H 15M M/M 9/16'UNF ESQ CRIS 3000BAR 7,00",
+      "cantidad": null,
+      "unidad": "MANG.",
+      "precioUnitario": "7,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "8560.05012.16 MANG.",
+      "descripcion": "MANG. 5/6H 5M M/M 3/8'UNF/3/8'UNF CRIS 2800BAR 4,00",
+      "cantidad": null,
+      "unidad": "MANG.",
+      "precioUnitario": "4,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "1000.00163.1 PISTOLA DE HIDROJATEAMENTO PENTA BC 2800BAR 3/8'BSP 3,00",
+      "descripcion": "PISTA DE HIDROJATEAMENTO PENTA BC 2800BAR 3/8'BSP 3,00",
+      "cantidad": null,
+      "unidad": "PISTOLA",
+      "precioUnitario": "3,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "1000.00232.5 POWER BOX 2800BAR 3/8'BSP 3,00",
+      "descripcion": "POWER BOX 2800BAR 3/8'BSP 3,00",
+      "cantidad": null,
+      "unidad": "POWER BOX",
+      "precioUnitario": "3,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "1000.00242.0 DESTORCEDOR DE MANGUEIRA 5/6H - 3/4' UNF 3,00",
+      "descripcion": "DESTORCEDOR DE MANGUEIRA 5/6H - 3/4' UNF 3,00",
+      "cantidad": null,
+      "unidad": "DESTORCEDOR DE MANGUEIRA",
+      "precioUnitario": "3,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "3000.04342.0L MANG. AR 3/4' (15MT) 300PSI PR. 3/4' NPT M/M GIRAT 7,00",
+      "descripcion": "MANG. AR 3/4' (15MT) 300PSI PR. 3/4' NPT M/M GIRAT 7,00",
+      "cantidad": null,
+      "unidad": "MANG.",
+      "precioUnitario": "7,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "2380.02345.0 MANG. PU AZUL 6X4 10BAR 35,00",
+      "descripcion": "MANG. PU AZUL 6X4 10BAR 35,00",
+      "cantidad": null,
+      "unidad": "MANG.",
+      "precioUnitario": "35,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "2380.02346.0 MANG. PU AZUL 8X5.5 10BAR 35,00",
+      "descripcion": "MANG. PU AZUL 8X5.5 10BAR 35,00",
+      "cantidad": null,
+      "unidad": "MANG.",
+      "precioUnitario": "35,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "2320.00687.0 DISTR. Y 1X M26X1,5 HIP 2X M26X1.5HIP 3000BAR LM 2,00",
+      "descripcion": "DISTR. Y 1X M26X1,5 HIP 2X M26X1.5HIP 3000BAR LM 2,00",
+      "cantidad": null,
+      "unidad": "DISTR.",
+      "precioUnitario": "2,00",
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    },
+    {
+      "codigo": "192.000,00 USDTOTAL",
+      "descripcion": "USDTOTAL",
+      "cantidad": "192.000,00",
+      "unidad": "USD",
+      "precioUnitario": null,
+      "descuento": null,
+      "impuesto": null,
+      "totalLinea": "192.000,00"
+    }
+  ],
+  "terminosCondiciones": [],
+  "observaciones": null
+}

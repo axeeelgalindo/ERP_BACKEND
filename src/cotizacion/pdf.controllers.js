@@ -798,7 +798,7 @@ export const importCotizacionFromPdf = async (request, reply) => {
 
       // Obtener el número correlativo para la empresa
       const maxCotizacion = await tx.cotizacion.findFirst({
-        where: { empresa_id: empresaId },
+        where: { empresa_id: empresaId, es_suscripcion: false },
         orderBy: { numero: "desc" },
         select: { numero: true },
       });
@@ -1067,7 +1067,7 @@ export const importCotizacionesFromPdfBatch = async (request, reply) => {
 
         // Obtener el número correlativo para la empresa
         const maxCotizacion = await tx.cotizacion.findFirst({
-          where: { empresa_id: empresaId },
+          where: { empresa_id: empresaId, es_suscripcion: false },
           orderBy: { numero: "desc" },
           select: { numero: true },
         });
