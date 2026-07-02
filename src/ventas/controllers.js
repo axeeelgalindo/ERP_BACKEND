@@ -209,6 +209,9 @@ export const createVenta = async (request, reply) => {
 
       // ✅ NUEVO: descuento general (0-100)
       descuentoPct: descuentoPctGeneralRaw,
+
+      // ✅ NUEVO: moneda
+      moneda = "CLP",
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
@@ -604,6 +607,7 @@ export const createVenta = async (request, reply) => {
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
           descuentoPct: descuentoPctGeneral,
+          moneda,
         },
       });
 
@@ -699,6 +703,9 @@ export async function updateVenta(request, reply) {
       // ✅ Extra por costeo (NO por ítem)
       isFeriado = false,
       isUrgencia = false,
+
+      // ✅ NUEVO: moneda
+      moneda,
     } = request.body || {};
 
     if (!Array.isArray(detalles) || detalles.length === 0) {
@@ -1064,6 +1071,7 @@ export async function updateVenta(request, reply) {
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
+          ...(moneda ? { moneda } : {}),
         },
       });
 

@@ -943,6 +943,7 @@ model Venta {
   empresa             Empresa        @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
   descuentoPct Float? @default(0) // ✅ descuento general (0-100)
+  moneda       MonedaBase @default(CLP)
 
   // ✅ NUEVO (opcional, no rompe)
   utilidadObjetivoBase UtilidadBase? @default(COSTO)

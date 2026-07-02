@@ -48,7 +48,13 @@ function getScope(request) {
 
 
 //////////////////////////////////
-const round0 = (n) => Math.round(Number(n || 0));
+const roundMoney = (n, moneda = "CLP") => {
+  const val = Number(n || 0);
+  if (moneda === "CLP") return Math.round(val);
+  if (moneda === "UF") return Number(val.toFixed(4));
+  if (moneda === "USD") return Number(val.toFixed(2));
+  return Math.round(val);
+};
 
 function clampPct(v) {
   const n = Number(v);
@@ -57,7 +63,6 @@ function clampPct(v) {
 }
 
 function calcTotalVenta(v) {
-  // usa total o ventaTotal (según tu modelo)
   return (v?.detalles || []).reduce(
     (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
     0
@@ -71,12 +76,12 @@ function normalizeVigenciaDias(v) {
   return Math.trunc(n);
 }
 
-function normalizeGlosas(glosas) {
+function normalizeGlosas(glosas, moneda = "CLP") {
   const list = Array.isArray(glosas) ? glosas : [];
   return list
     .map((g, idx) => ({
       descripcion: String(g?.descripcion || "").trim().slice(0, 250),
-      monto: round0(g?.monto || 0), // BRUTO
+      monto: roundMoney(g?.monto || 0, moneda), // BRUTO
       cantidad: Number(g?.cantidad || 1),
       precio_unitario: Number(g?.precio_unitario || g?.monto || 0),
       manual: !!g?.manual,
@@ -87,26 +92,26 @@ function normalizeGlosas(glosas) {
     .filter((g) => g.descripcion);
 }
 
-function sumBrutoGlosas(glosas) {
-  return round0(glosas.reduce((acc, g) => acc + round0(g.monto || 0), 0));
+function sumBrutoGlosas(glosas, moneda = "CLP") {
+  return roundMoney(glosas.reduce((acc, g) => acc + roundMoney(g.monto || 0, moneda), 0), moneda);
 }
 
-function calcDescuentoGlosasMonto(glosas) {
-  // suma de (bruto * %)
-  return round0(
+function calcDescuentoGlosasMonto(glosas, moneda = "CLP") {
+  return roundMoney(
     glosas.reduce((acc, g) => {
-      const bruto = round0(g.monto || 0);
+      const bruto = roundMoney(g.monto || 0, moneda);
       const pct = clampPct(g.descuento_pct || 0);
       const desc = bruto * (pct / 100);
       return acc + desc;
-    }, 0)
+    }, 0),
+    moneda
   );
 }
 
-function calcFromSubtotal(subtotalNeto, ivaRate, sinIva = false) {
-  const sub = round0(subtotalNeto);
-  const iva = sinIva ? 0 : round0(sub * Number(ivaRate || 0));
-  const total = round0(sub + iva);
+function calcFromSubtotal(subtotalNeto, ivaRate, sinIva = false, moneda = "CLP") {
+  const sub = roundMoney(subtotalNeto, moneda);
+  const iva = sinIva ? 0 : roundMoney(sub * Number(ivaRate || 0), moneda);
+  const total = roundMoney(sub + iva, moneda);
   return { subtotal: sub, iva, total };
 }
 
@@ -448,8 +453,9 @@ export const createCotizacion = async (request, reply) => {
         }
 
         // Subtotal base desde ventas (BRUTO)
-        subtotalBase = round0(
+        subtotalBase = roundMoney(
           ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0),
+          moneda
         );
         if (!subtotalBase || subtotalBase <= 0) {
           throw new Error("El subtotal calculado desde ventas es 0");
@@ -468,20 +474,20 @@ export const createCotizacion = async (request, reply) => {
           let precio_unitario = 0;
           let monto = 0;
 
-          if (moneda === "UF") {
+          if (moneda === "UF" && isSusc) {
             monto_uf = Number(g?.monto_uf || 0);
             precio_unitario = Math.round(monto_uf * (valorUF || 1));
             monto = Math.round(precio_unitario * cantidad);
           } else {
-            precio_unitario = Math.round(Number(g?.precio_unitario || g?.monto || 0));
-            monto = Math.round(precio_unitario * cantidad);
+            precio_unitario = roundMoney(Number(g?.precio_unitario || g?.monto || 0), moneda);
+            monto = roundMoney(precio_unitario * cantidad, moneda);
           }
 
           return {
             descripcion: desc,
-            monto, // CLP bruto total de la linea
+            monto, 
             cantidad,
-            precio_unitario, // CLP bruto unitario
+            precio_unitario, 
             monto_uf,
             manual: !!g?.manual,
             orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
@@ -490,9 +496,9 @@ export const createCotizacion = async (request, reply) => {
           };
         }).filter(g => g.descripcion);
 
-        subtotalBase = sumBrutoGlosas(glosasFinal);
+        subtotalBase = sumBrutoGlosas(glosasFinal, moneda);
       } else {
-        glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+        glosasFinal = normalizeGlosas(glosas, moneda).sort((a, b) => a.orden - b.orden);
 
         if (glosasFinal.length === 0) {
           glosasFinal = [
@@ -507,8 +513,10 @@ export const createCotizacion = async (request, reply) => {
         }
 
         // ✅ VALIDACIÓN: glosas deben sumar subtotalBase (BRUTO)
-        const sumaBruto = sumBrutoGlosas(glosasFinal);
-        if (sumaBruto !== subtotalBase) {
+        const sumaBruto = sumBrutoGlosas(glosasFinal, moneda);
+        // Allow a small delta for float comparison (USD/UF)
+        const diff = Math.abs(sumaBruto - subtotalBase);
+        if (diff > 0.01) {
           throw new Error(
             `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBase}`,
           );
@@ -533,22 +541,22 @@ export const createCotizacion = async (request, reply) => {
       }
 
       // ✅ Cálculo descuentos
-      const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal) : 0;
-      const subtotalTrasGlosas = round0(subtotalBase - descGlosasMonto);
+      const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal, moneda) : 0;
+      const subtotalTrasGlosas = roundMoney(subtotalBase - descGlosasMonto, moneda);
 
       const descGeneralMonto =
         descGeneralPct > 0
-          ? round0(subtotalTrasGlosas * (descGeneralPct / 100))
+          ? roundMoney(subtotalTrasGlosas * (descGeneralPct / 100), moneda)
           : 0;
 
-      const subtotalNeto = round0(subtotalTrasGlosas - descGeneralMonto);
+      const subtotalNeto = roundMoney(subtotalTrasGlosas - descGeneralMonto, moneda);
 
       if (subtotalNeto < 0) {
         throw new Error("El subtotal neto quedó negativo (revisa descuentos).");
       }
 
       const finalSinIva = !!sin_iva;
-      const { subtotal, iva, total } = calcFromSubtotal(subtotalNeto, ivaRateNum, finalSinIva);
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalNeto, ivaRateNum, finalSinIva, moneda);
 
       // Fechas
       const fechaDocumento = new Date();
@@ -932,22 +940,22 @@ export const updateCotizacion = async (request, reply) => {
         }
 
         // ✅ BRUTO desde ventas
-        subtotalBaseBruto = round0(ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0));
+        subtotalBaseBruto = roundMoney(ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0), finalMoneda);
 
         if (!subtotalBaseBruto || subtotalBaseBruto <= 0) {
           throw new Error("El subtotal calculado desde ventas es 0");
         }
 
         // ✅ VALIDACIÓN: glosas BRUTAS deben sumar subtotalBaseBruto
-        const sumaBruto = sumBrutoGlosas(glosasFinal);
-        if (sumaBruto !== subtotalBaseBruto) {
+        const sumaBruto = sumBrutoGlosas(glosasFinal, finalMoneda);
+        if (Math.abs(sumaBruto - subtotalBaseBruto) > 0.01) {
           throw new Error(
             `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBaseBruto}`
           );
         }
       } else {
         // SIN ventas: el BRUTO lo definen glosas (BRUTO)
-        subtotalBaseBruto = round0(sumBrutoGlosas(glosasFinal));
+        subtotalBaseBruto = roundMoney(sumBrutoGlosas(glosasFinal, finalMoneda), finalMoneda);
 
         if (!subtotalBaseBruto || subtotalBaseBruto <= 0) {
           throw new Error(
@@ -959,13 +967,13 @@ export const updateCotizacion = async (request, reply) => {
       // =========================
       // ✅ Cálculo descuentos (igual create)
       // =========================
-      const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal) : 0;
-      const subtotalTrasGlosas = round0(subtotalBaseBruto - descGlosasMonto);
+      const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal, finalMoneda) : 0;
+      const subtotalTrasGlosas = roundMoney(subtotalBaseBruto - descGlosasMonto, finalMoneda);
 
       const descGeneralMonto =
-        descGeneralPct > 0 ? round0(subtotalTrasGlosas * (descGeneralPct / 100)) : 0;
+        descGeneralPct > 0 ? roundMoney(subtotalTrasGlosas * (descGeneralPct / 100), finalMoneda) : 0;
 
-      const subtotalNetoBase = round0(subtotalTrasGlosas - descGeneralMonto);
+      const subtotalNetoBase = roundMoney(subtotalTrasGlosas - descGeneralMonto, finalMoneda);
 
       if (subtotalNetoBase < 0) {
         throw new Error("El subtotal neto quedó negativo (revisa descuentos).");
@@ -973,7 +981,7 @@ export const updateCotizacion = async (request, reply) => {
 
       // ✅ totales netos
       const finalSinIva = sin_iva !== undefined ? !!sin_iva : !!existing.sin_iva;
-      const { subtotal, iva, total } = calcFromSubtotal(subtotalNetoBase, ivaRateNum, finalSinIva);
+      const { subtotal, iva, total } = calcFromSubtotal(subtotalNetoBase, ivaRateNum, finalSinIva, finalMoneda);
 
       // Si glosa auto venía con monto 0, la ajustamos al BRUTO base (solo si quedó 1 glosa)
       // (esto es útil cuando no mandan glosas y quieres que se rellene)
@@ -985,8 +993,8 @@ export const updateCotizacion = async (request, reply) => {
       }
 
       // Revalidación BRUTO por seguridad
-      const sumaBrutoFinal = sumBrutoGlosas(glosasFinal);
-      if (sumaBrutoFinal !== subtotalBaseBruto) {
+      const sumaBrutoFinal = sumBrutoGlosas(glosasFinal, finalMoneda);
+      if (Math.abs(sumaBrutoFinal - subtotalBaseBruto) > 0.01) {
         throw new Error(
           `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBrutoFinal} vs base=${subtotalBaseBruto}`
         );
@@ -1017,9 +1025,9 @@ export const updateCotizacion = async (request, reply) => {
         data: glosasFinal.map((g, idx) => ({
           cotizacion_id: id,
           descripcion: g.descripcion,
-          monto: round0(g.monto || 0), // ✅ BRUTO
+          monto: roundMoney(g.monto || 0, finalMoneda), // ✅ BRUTO
           cantidad: Number(g.cantidad || 1),
-          precio_unitario: Number(g.precio_unitario || g.monto || 0),
+          precio_unitario: roundMoney(Number(g.precio_unitario || g.monto || 0), finalMoneda),
           monto_uf: g.monto_uf,
           manual: !!g.manual,
           orden: Number.isFinite(Number(g.orden)) ? Number(g.orden) : idx,
