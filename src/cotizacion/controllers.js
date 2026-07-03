@@ -223,18 +223,13 @@ export const getCotizacion = async (request, reply) => {
 
     // ✅ recalcular (por si el PDF/UI lo necesita “siempre”)
     const glosas = Array.isArray(cot.glosas) ? cot.glosas : [];
-    const subtotalBruto = round0(glosas.reduce((a, g) => a + round0(g.monto || 0), 0));
-    const descGlosasMonto = round0(
-      glosas.reduce((a, g) => {
-        const bruto = round0(g.monto || 0);
-        const pct = clampPct(g.descuento_pct || 0);
-        return a + bruto * (pct / 100);
-      }, 0)
-    );
-    const subtotalTrasGlosas = round0(subtotalBruto - descGlosasMonto);
+    const moneda = cot.moneda ?? "CLP";
+    const subtotalBruto = sumBrutoGlosas(glosas, moneda);
+    const descGlosasMonto = calcDescuentoGlosasMonto(glosas, moneda);
+    const subtotalTrasGlosas = roundMoney(subtotalBruto - descGlosasMonto, moneda);
     const descGeneralPct = clampPct(cot.descuento_pct || 0);
-    const descGeneralMonto = round0(subtotalTrasGlosas * (descGeneralPct / 100));
-    const subtotalNeto = round0(subtotalTrasGlosas - descGeneralMonto);
+    const descGeneralMonto = roundMoney(subtotalTrasGlosas * (descGeneralPct / 100), moneda);
+    const subtotalNeto = roundMoney(subtotalTrasGlosas - descGeneralMonto, moneda);
 
     return reply.send({
       ...cot,
