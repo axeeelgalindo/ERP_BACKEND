@@ -274,7 +274,7 @@ model Cliente {
   // ✅ responsables (lista)
   responsables ClienteResponsable[]
 
-  @@unique([correo, eliminado])
+  @@unique([correo, empresa_id, eliminado])
   @@index([empresa_id])
 }
 
@@ -348,7 +348,7 @@ model Proveedor {
   compras     Compra[]
   compraItems CompraItem[]
 
-  @@unique([correo, eliminado])
+  @@unique([correo, empresa_id, eliminado])
   @@index([empresa_id])
 }
 
@@ -393,7 +393,7 @@ model Producto {
   es_recurrente  Boolean      @default(false)
   periodo_meses  Int          @default(1)
 
-  @@unique([sku, eliminado])
+  @@unique([sku, empresa_id, eliminado])
   @@index([empresa_id])
 }
 
