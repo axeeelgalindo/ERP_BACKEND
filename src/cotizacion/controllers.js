@@ -581,6 +581,20 @@ export const createCotizacion = async (request, reply) => {
         nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
       }
 
+      // Garantizar unicidad global del número para la empresa (por si hay solapamiento o concurrencia)
+      let exists = true;
+      while (exists) {
+        const checkExisting = await tx.cotizacion.findFirst({
+          where: { empresa_id: empresaId, numero: nextNumero },
+          select: { id: true },
+        });
+        if (checkExisting) {
+          nextNumero++;
+        } else {
+          exists = false;
+        }
+      }
+
       // Crear cotización
       const cot = await tx.cotizacion.create({
         data: {
@@ -1530,7 +1544,21 @@ export const importVentasCSV = async (request, reply) => {
               orderBy: { numero: "desc" },
               select: { numero: true },
             });
-            const nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+            let nextNumero = maxCotizacion ? maxCotizacion.numero + 1 : 1;
+
+            // Garantizar unicidad global del número para la empresa
+            let exists = true;
+            while (exists) {
+              const checkExisting = await tx.cotizacion.findFirst({
+                where: { empresa_id: empresaId, numero: nextNumero },
+                select: { id: true },
+              });
+              if (checkExisting) {
+                nextNumero++;
+              } else {
+                exists = false;
+              }
+            }
 
             cot = await tx.cotizacion.create({
               data: {

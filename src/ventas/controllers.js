@@ -593,7 +593,21 @@ export const createVenta = async (request, reply) => {
         orderBy: { numero: "desc" },
         select: { numero: true },
       });
-      const nextNumero = maxVenta ? maxVenta.numero + 1 : 1;
+      let nextNumero = maxVenta ? maxVenta.numero + 1 : 1;
+
+      // Garantizar unicidad global del número de venta para la empresa
+      let exists = true;
+      while (exists) {
+        const checkExisting = await tx.venta.findFirst({
+          where: { empresa_id: String(empresaId), numero: nextNumero },
+          select: { id: true },
+        });
+        if (checkExisting) {
+          nextNumero++;
+        } else {
+          exists = false;
+        }
+      }
 
       const nuevaVentaHeader = await tx.venta.create({
         data: {
