@@ -951,8 +951,9 @@ model Venta {
   factorKAplicado      Float?
 
   // ✅ NUEVO: flags por costeo
-  isFeriado  Boolean @default(false)
-  isUrgencia Boolean @default(false)
+  isFeriado    Boolean @default(false)
+  isUrgencia   Boolean @default(false)
+  esProyectado Boolean @default(false)
 
   createdAt DateTime @default(now())
   

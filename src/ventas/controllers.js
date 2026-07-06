@@ -206,6 +206,7 @@ export const createVenta = async (request, reply) => {
       // ✅ Extra por costeo (NO por ítem)
       isFeriado = false,
       isUrgencia = false,
+      esProyectado = false,
 
       // ✅ NUEVO: descuento general (0-100)
       descuentoPct: descuentoPctGeneralRaw,
@@ -617,6 +618,7 @@ export const createVenta = async (request, reply) => {
           descripcion: descripcion ?? null,
           isFeriado: ventaIsFeriado,
           isUrgencia: ventaIsUrgencia,
+          esProyectado: toBool(esProyectado),
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,
           factorKAplicado: Number.isFinite(k) ? k : null,
@@ -717,6 +719,7 @@ export async function updateVenta(request, reply) {
       // ✅ Extra por costeo (NO por ítem)
       isFeriado = false,
       isUrgencia = false,
+      esProyectado = false,
 
       // ✅ NUEVO: moneda
       moneda,
@@ -1081,6 +1084,7 @@ export async function updateVenta(request, reply) {
 
           isFeriado: ventaIsFeriado,
           isUrgencia: ventaIsUrgencia,
+          esProyectado: toBool(esProyectado),
 
           utilidadObjetivoBase: utilidadPct == null ? null : baseToSave,
           utilidadObjetivoPct: utilidadPct,

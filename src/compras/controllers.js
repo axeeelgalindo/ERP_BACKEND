@@ -367,6 +367,8 @@ export async function listCompras(request, reply) {
     q,
     estado,
     periodo, // ✅ NUEVO: YYYY-MM
+    startDate,
+    endDate,
     proveedorId,
     proyectoId,
     cotizacionId,
@@ -393,14 +395,25 @@ export async function listCompras(request, reply) {
     ...(toBool(includeDeleted) ? {} : { eliminado: false }),
   };
 
+  if (estado && estado.toUpperCase() === "PENDIENTE") {
+    where.cotizacionId = null;
+  } else if (estado && estado.toUpperCase() === "VINCULADO") {
+    where.cotizacionId = { not: null };
+  }
+
   // ✅ Filtro por Periodo (fecha_docto)
-  if (periodo && /^\d{4}-\d{2}$/.test(periodo)) {
-    const [year, month] = periodo.split("-").map(Number);
-    const startDate = new Date(year, month - 1, 1);
-    const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+  if (startDate && endDate) {
     where.fecha_docto = {
-      gte: startDate,
-      lte: endDate,
+      gte: new Date(startDate),
+      lte: new Date(endDate),
+    };
+  } else if (periodo && /^\d{4}-\d{2}$/.test(periodo)) {
+    const [year, month] = periodo.split("-").map(Number);
+    const startDateVal = new Date(year, month - 1, 1);
+    const endDateVal = new Date(year, month, 0, 23, 59, 59, 999);
+    where.fecha_docto = {
+      gte: startDateVal,
+      lte: endDateVal,
     };
   }
 
@@ -541,8 +554,24 @@ export async function createCompra(request, reply) {
     const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
     // ✅ NUEVO
-    const destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
-    const centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
+    let destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
+    let centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
+    let proyecto_id = body.proyecto_id ?? null;
+
+    if (body.cotizacionId) {
+      const cotizacion = await prisma.cotizacion.findUnique({
+        where: { id: body.cotizacionId },
+        select: { id: true, proyecto_id: true, empresa_id: true }
+      });
+      if (cotizacion && cotizacion.empresa_id === empresa_id) {
+        if (cotizacion.proyecto_id) {
+          destino = "PROYECTO";
+          proyecto_id = cotizacion.proyecto_id;
+          centro_costo = null;
+        }
+      }
+    }
+
     const rendicion_id = body.rendicion_id ?? null;
 
     // normalizar items/total
@@ -558,7 +587,7 @@ export async function createCompra(request, reply) {
     }
 
     if (isProyecto) {
-      if (!body.proyecto_id) {
+      if (!proyecto_id) {
         return reply.code(400).send({ error: "proyecto_id es obligatorio cuando destino = PROYECTO" });
       }
       if (centro_costo) {
@@ -570,14 +599,14 @@ export async function createCompra(request, reply) {
       if (!centro_costo || (centro_costo !== "PMC" && centro_costo !== "PUQ")) {
         return reply.code(400).send({ error: "centro_costo inválido u obligatorio (PMC | PUQ) para ADMINISTRACION/TALLER" });
       }
-      if (body.proyecto_id) {
+      if (proyecto_id) {
         return reply.code(400).send({ error: "proyecto_id debe ser null cuando destino es ADMINISTRACION/TALLER" });
       }
     }
 
     const created = await prisma.$transaction(async (tx) => {
       // ✅ Antes validabas siempre proyecto; ahora depende del destino
-      if (isProyecto) await assertEntidadEmpresa(tx, "proyecto", body.proyecto_id, empresa_id);
+      if (isProyecto && proyecto_id) await assertEntidadEmpresa(tx, "proyecto", proyecto_id, empresa_id);
 
       await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
       await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
@@ -612,7 +641,7 @@ export async function createCompra(request, reply) {
           throw err;
         }
         // si es proyecto, proyecto_id debe coincidir
-        if (destino === "PROYECTO" && r.proyecto_id !== body.proyecto_id) {
+        if (destino === "PROYECTO" && r.proyecto_id !== proyecto_id) {
           const err = new Error("La compra debe usar el mismo proyecto_id de la rendición");
           err.statusCode = 400;
           throw err;
@@ -628,7 +657,7 @@ export async function createCompra(request, reply) {
           centro_costo: centro_costo ?? null,
           rendicion_id: rendicion_id ?? null,
 
-          proyecto_id: isProyecto ? body.proyecto_id : null,
+          proyecto_id: isProyecto ? proyecto_id : null,
 
           proveedorId: body.proveedorId ?? null,
           cotizacionId: body.cotizacionId ?? null,
@@ -787,12 +816,12 @@ export async function updateCompra(request, reply) {
     // ===== Normalizaciones / “next state”
     const estadoNorm = normalizeEstadoCompra(body.estado);
 
-    const nextDestino =
+    let nextDestino =
       body.destino !== undefined
         ? String(body.destino || "PROYECTO").toUpperCase()
         : String(exists.destino || "PROYECTO").toUpperCase();
 
-    const nextCentroCosto =
+    let nextCentroCosto =
       body.centro_costo !== undefined
         ? body.centro_costo
           ? String(body.centro_costo).toUpperCase()
@@ -801,8 +830,22 @@ export async function updateCompra(request, reply) {
           ? String(exists.centro_costo).toUpperCase()
           : null;
 
-    const nextProyectoId =
+    let nextProyectoId =
       body.proyecto_id !== undefined ? body.proyecto_id || null : exists.proyecto_id || null;
+
+    if (body.cotizacionId !== undefined && body.cotizacionId) {
+      const cotizacion = await prisma.cotizacion.findUnique({
+        where: { id: body.cotizacionId },
+        select: { id: true, proyecto_id: true, empresa_id: true }
+      });
+      if (cotizacion && cotizacion.empresa_id === empresa_id) {
+        if (cotizacion.proyecto_id) {
+          nextDestino = "PROYECTO";
+          nextProyectoId = cotizacion.proyecto_id;
+          nextCentroCosto = null;
+        }
+      }
+    }
 
     // OJO: updateCompra (PUT) normalmente puede venir con rendicion_id o no.
     // Si no viene, NO lo tocamos.
