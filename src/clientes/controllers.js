@@ -7,7 +7,7 @@ import { pipeline } from "stream/promises";
 
 const prisma = new PrismaClient();
 const PAGE = 1,
-  SIZE = 20;
+  SIZE = 10000;
 
 /* =========================
    Helpers

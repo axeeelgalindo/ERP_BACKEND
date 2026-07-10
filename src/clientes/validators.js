@@ -5,7 +5,7 @@ const Id = Type.String({ minLength: 10 }); // cuid()
 export const ClienteQuery = Type.Object({
   q: Type.Optional(Type.String()),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
-  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100000 })),
   includeDeleted: Type.Optional(Type.Union([
     Type.Boolean(),
     Type.Integer({ minimum: 0, maximum: 1 })

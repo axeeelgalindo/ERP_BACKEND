@@ -292,3 +292,204 @@ export async function notifyTaskAssignment({ tareaId, responsableId, isSubtask =
     console.error("[Mail] Error preparing task assignment notification:", error);
   }
 }
+
+/**
+ * Envía un correo a los revisores cuando una tarea o subtarea se manda a revisión.
+ * @param {Object} options
+ * @param {string} options.tareaId ID de la tarea o subtarea
+ * @param {boolean} options.isSubtask Indica si es una subtarea (TareaDetalle)
+ * @param {string} options.actorName Nombre de quien mandó la tarea a revisión
+ */
+export async function notifyTaskReview({ tareaId, isSubtask = false, actorName = "" }) {
+  try {
+    const rawEmails = process.env.REVIEW_EMAILS || "ebarria@blueinge.com";
+    const recipients = rawEmails.split(",").map(email => email.trim()).filter(Boolean);
+
+    if (recipients.length === 0) return;
+
+    let tareaNombre = "";
+    let tareaDescripcion = "";
+    let proyectoNombre = "No asociado";
+    let linkUrl = "";
+    let tipoTexto = isSubtask ? "Subtarea" : "Tarea";
+
+    if (isSubtask) {
+      const subtask = await prisma.tareaDetalle.findFirst({
+        where: { id: tareaId },
+        include: {
+          tarea: {
+            include: {
+              proyecto: { select: { id: true, nombre: true } }
+            }
+          }
+        }
+      });
+      if (!subtask) return;
+      tareaNombre = subtask.titulo;
+      tareaDescripcion = subtask.descripcion || "Sin descripción";
+      if (subtask.tarea && subtask.tarea.proyecto) {
+        proyectoNombre = subtask.tarea.proyecto.nombre;
+        const frontendUrl = process.env.FRONTEND_URL || "https://erp-orcin-ten.vercel.app";
+        linkUrl = `${frontendUrl}/proyectos/${subtask.tarea.proyecto.id}`;
+      } else {
+        const frontendUrl = process.env.FRONTEND_URL || "https://erp-orcin-ten.vercel.app";
+        linkUrl = `${frontendUrl}/kanban`;
+      }
+    } else {
+      const task = await prisma.tarea.findFirst({
+        where: { id: tareaId },
+        include: {
+          proyecto: { select: { id: true, nombre: true } }
+        }
+      });
+      if (!task) return;
+      tareaNombre = task.nombre;
+      tareaDescripcion = task.descripcion || "Sin descripción";
+      if (task.proyecto) {
+        proyectoNombre = task.proyecto.nombre;
+        const frontendUrl = process.env.FRONTEND_URL || "https://erp-orcin-ten.vercel.app";
+        linkUrl = `${frontendUrl}/proyectos/${task.proyecto.id}`;
+      } else {
+        const frontendUrl = process.env.FRONTEND_URL || "https://erp-orcin-ten.vercel.app";
+        linkUrl = `${frontendUrl}/kanban`;
+      }
+    }
+
+    const subject = `Actividad Enviada a Revisión: ${tareaNombre}`;
+    const textContent = `Hola,\n\nLa siguiente actividad ha sido enviada a revisión por ${actorName || "un miembro del equipo"}.\n\nDetalles:\n- Tipo: ${tipoTexto}\n- Actividad: ${tareaNombre}\n- Descripción: ${tareaDescripcion}\n- Proyecto: ${proyectoNombre}\n\nSaludos,\nEquipo ERP`;
+
+    const htmlContent = `<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Blue Ingeniería ERP - Actividad en Revisión</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f7fafc; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 0 auto; background-color: #ffffff; border-collapse: collapse; box-shadow: 0 1px 3px rgba(0,0,0,0.1); font-family: 'Inter', sans-serif;">
+    <!-- Top Accent Bar -->
+    <tr>
+        <td style="padding: 0; height: 6px; font-size: 0; line-height: 0;">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse; height: 6px;">
+                <tr>
+                    <td width="50%" style="background-color: #00658b; height: 6px;"></td>
+                    <td width="50%" style="background-color: #66c9fd; height: 6px;"></td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+
+    <!-- Header -->
+    <tr>
+        <td style="background-color: #00274e; padding: 24px;">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                <tr>
+                    <td style="vertical-align: middle; text-align: left;">
+                        <img alt="Logo" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDzOs9MU69iyCGdUJwdE8Nx0MAdWvAKyB0JrCT7WQ0rSKk0FVMWiwMqb7KevJZmMTMuwgAc77gRizJM4smZ4qVPW36Pqiv03E7xB5ncy4_lf8ytR4jU5asWACqQQGxQv5sieGyCF8hQcrlKA27fByra8OoIBJBiD0RfGG0qKWB-EYJn1eocisfjBl1FtmP37XZ9cbv5_We4TdaCRBm2ozQyf-5ppYNP4t2Ku8MaHS9Hp5TsAGlELSiuGx3TRIzbHvPtGwttTjWwKg4" height="40" style="display: block; border: 0; height: 40px; width: auto;"/>
+                    </td>
+                    <td align="right" style="vertical-align: middle; text-align: right; color: #ffffff; font-family: 'Inter', sans-serif;">
+                        <div style="font-size: 20px; font-weight: bold; line-height: 1.2;">Sistema ERP</div>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+
+    <!-- Content Canvas -->
+    <tr>
+        <td style="padding: 24px; background-color: #f7fafc;">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                <!-- Welcome Section -->
+                <tr>
+                    <td style="padding-bottom: 24px;">
+                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                            <tr>
+                                <td style="vertical-align: middle; font-size: 22px; font-weight: bold; color: #00274e; padding-bottom: 12px;">
+                                    🔍 Actividad enviada a revisión
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="font-size: 14px; line-height: 1.5; color: #43474f;">
+                                    Hola,<br/>
+                                    La siguiente actividad ha sido enviada al estado de <strong>revisión (control de calidad)</strong> por <strong style="color: #00274e;">${actorName || "un miembro del equipo"}</strong>. A continuación se presentan los detalles de la actividad para su revisión inmediata.
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+
+                <!-- Data Card -->
+                <tr>
+                    <td style="background-color: #ffffff; border: 2px solid #e5e9eb; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
+                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                            <!-- Card Header -->
+                            <tr>
+                                <td style="border-bottom: 1px solid #ebeef0; padding-bottom: 16px;">
+                                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                                        <tr>
+                                            <td style="vertical-align: top;">
+                                                <span style="font-size: 11px; text-transform: uppercase; font-weight: bold; color: #00658b; letter-spacing: 0.05em; display: block; margin-bottom: 6px;">Tipo de actividad: ${tipoTexto}</span>
+                                                <span style="font-size: 18px; font-weight: bold; color: #00274e;">${tareaNombre}</span>
+                                            </td>
+                                            <td align="right" style="vertical-align: top; padding-left: 12px;">
+                                                <span style="font-size: 11px; text-transform: uppercase; font-weight: bold; color: #737780; letter-spacing: 0.05em; display: block; margin-bottom: 6px;">Proyecto</span>
+                                                <span style="font-size: 13px; font-weight: bold; color: #181c1e;">${proyectoNombre}</span>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </td>
+                            </tr>
+
+                            <!-- Details Table -->
+                            <tr>
+                                <td style="padding-top: 16px;">
+                                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+                                        <tr>
+                                            <td style="padding: 10px 0; font-size: 12px; font-weight: bold; color: #00658b; text-transform: uppercase; letter-spacing: 0.05em;">Descripción</td>
+                                            <td align="right" style="padding: 10px 0; font-size: 14px; color: #43474f; max-width: 60%;">${tareaDescripcion}</td>
+                                        </tr>
+                                    </table>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+
+                <!-- Call to Action -->
+                <tr>
+                    <td style="padding: 24px 0 8px 0; text-align: center;">
+                        <a href="${linkUrl}" target="_blank" style="background-color: #00274e; color: #ffffff; font-size: 15px; font-weight: bold; text-decoration: none; padding: 14px 36px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 6px rgba(0,39,78,0.15);">
+                            Ver en Kanban ↗
+                        </a>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+
+    <!-- Footer -->
+    <tr>
+        <td style="background-color: #f1f4f6; border-top: 1px solid #c3c6d0; padding: 32px 24px; text-align: center; font-size: 12px; color: #737780;">
+            <div style="font-size: 11px; font-weight: bold; color: #43474f; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 4px;">BLUE INGENIERÍA | CONTROL DE CALIDAD</div>
+            <div>© 2026 Blue Ingeniería. Todos los derechos reservados.</div>
+        </td>
+    </tr>
+</table>
+</body>
+</html>`;
+
+    for (const to of recipients) {
+      sendEmail({
+        to,
+        subject,
+        text: textContent,
+        html: htmlContent
+      }).catch(err => {
+        console.error(`[Mail] Failed to send email to ${to}:`, err);
+      });
+    }
+
+  } catch (error) {
+    console.error("[Mail] Error preparing task review notification:", error);
+  }
+}

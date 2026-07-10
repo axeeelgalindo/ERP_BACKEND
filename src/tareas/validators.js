@@ -78,6 +78,12 @@ export const TareaCreateBody = Type.Object({
       })
     )
   ),
+
+  // Campos extras para transiciones/revisiones
+  estado: Type.Optional(Type.String()),
+  avance: Type.Optional(Type.Integer()),
+  comentario_revision: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  evidencia_antes_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
 // PATCH: todo opcional

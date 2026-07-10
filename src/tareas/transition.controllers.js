@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { recomputeTareaFromDetalles } from "./detalles.controllers.js";
 import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
 import { resolveScope } from "../lib/scope.js";
+import { notifyTaskReview } from "./notification.js";
 
 const prisma = new PrismaClient();
 
@@ -127,6 +128,16 @@ export async function processTransition(request, reply) {
 
       return { ok: true };
     });
+
+    if (newStatus === "en_revision") {
+      notifyTaskReview({
+        tareaId: id,
+        isSubtask: tipo === "SUBTAREA",
+        actorName: request.user?.nombre
+      }).catch(err => {
+        console.error("[Mail] Error triggered in notifyTaskReview transition hook:", err);
+      });
+    }
 
     return reply.send(result);
   } catch (err) {

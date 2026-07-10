@@ -13,7 +13,7 @@ import {
   unassignEpicaFromTarea,
   addDetallesToTarea,
   listTareasByEpica,
-  // ...otros
+  uploadEvidenciaFile,
 } from "./controllers.js";
 import { processTransition } from "./transition.controllers.js";
 
@@ -150,4 +150,7 @@ export default async function tareasRoutes(server) {
 
   // ✅ crear varias tareas en una épica
   server.post("/tareas/batch-add", { ...guard }, createTareasBatch);
+
+  // ✅ subir evidencia antes de la creación
+  server.post("/tareas/upload-evidencia", { ...guard }, uploadEvidenciaFile);
 }

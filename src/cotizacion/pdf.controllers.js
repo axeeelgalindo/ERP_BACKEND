@@ -396,7 +396,7 @@ export const importCotizacionFromPdf = async (request, reply) => {
           if (/\bS\d{3,}\b/.test(cand)) continue; // quote code
           // ignore blueinge headers
           if (/Tecnolog[íi]a que impulsa/i.test(cand)) continue;
-          if (/Juan Guillermo/i.test(cand)) continue;
+          if (/Juan Guillermos?/i.test(cand)) continue;
           if (/Punta Arenas|Puerto Montt/i.test(cand) && cand.length < 15) continue;
           if (/Av\. San Agustín/i.test(cand)) continue;
           if (/RUT\s*781159/i.test(cand)) continue;

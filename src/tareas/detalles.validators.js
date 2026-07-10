@@ -52,6 +52,12 @@ export const TareaDetalleCreateBody = Type.Object({
   // HORAS / COSTOS
   horas_plan: Type.Optional(Type.Number()),
   horas_real: Type.Optional(Type.Number()),
+
+  // Campos extras para transiciones/revisiones
+  avance: Type.Optional(Type.Integer()),
+  accion: Type.Optional(Type.String()),
+  comentario_revision: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  evidencia_antes_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
 /**

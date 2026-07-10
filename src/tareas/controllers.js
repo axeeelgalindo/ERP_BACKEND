@@ -3,7 +3,11 @@ import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
-import { notifyTaskAssignment } from "./notification.js";
+import { notifyTaskAssignment, notifyTaskReview } from "./notification.js";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import { pipeline } from "stream/promises";
 
 const prisma = new PrismaClient();
 const PAGE = 1,
@@ -221,11 +225,20 @@ export async function getTarea(request, reply) {
     where: {
       id,
       eliminado: false,
-      proyecto: {
-        empresa_id: scope.empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      OR: [
+        {
+          proyecto_id: null,
+          empresa_id: scope.empresaId,
+          empresa: { eliminado: false }
+        },
+        {
+          proyecto: {
+            empresa_id: scope.empresaId,
+            eliminado: false,
+            empresa: { eliminado: false }
+          }
+        }
+      ]
     },
     include: {
       responsable: { include: { usuario: true } },
@@ -405,6 +418,16 @@ export async function createTarea(request, reply) {
       },
     });
 
+    if (body.evidencia_antes_url) {
+      await tx.tareaEvidencia.create({
+        data: {
+          tarea_id: tarea.id,
+          archivo_url: body.evidencia_antes_url,
+          comentario: "Evidencia Inicial (Antes)"
+        }
+      });
+    }
+
     if (predecesora_id) {
       const pred = await tx.tarea.findFirst({
         where: {
@@ -550,17 +573,27 @@ export async function updateTarea(request, reply) {
   delete data.predecesora_id;
 
   let oldResponsableId = null;
+  let oldEstado = null;
 
   const row = await prisma.$transaction(async (tx) => {
     const tarea = await tx.tarea.findFirst({
       where: {
         id,
         eliminado: false,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
+        OR: [
+          {
+            proyecto_id: null,
+            empresa_id: scope.empresaId,
+            empresa: { eliminado: false }
+          },
+          {
+            proyecto: {
+              empresa_id: scope.empresaId,
+              eliminado: false,
+              empresa: { eliminado: false }
+            }
+          }
+        ]
       },
       include: { proyecto: true },
     });
@@ -568,6 +601,9 @@ export async function updateTarea(request, reply) {
       throw Object.assign(new Error("Tarea no encontrada o deshabilitada"), {
         statusCode: 404,
       });
+
+    oldResponsableId = tarea.responsable_id;
+    oldEstado = tarea.estado;
 
     const dest = data.destino !== undefined ? data.destino : tarea.destino;
     if (dest === "PROYECTO") {
@@ -792,6 +828,16 @@ export async function updateTarea(request, reply) {
     });
   }
 
+  if (row.estado === "en_revision" && oldEstado !== "en_revision") {
+    notifyTaskReview({
+      tareaId: row.id,
+      isSubtask: false,
+      actorName: request.user?.nombre
+    }).catch(err => {
+      console.error("[Mail] Error in notifyTaskReview update hook:", err);
+    });
+  }
+
   return reply.send({ ok: true, row });
 }
 
@@ -804,11 +850,20 @@ export async function deleteTarea(request, reply) {
     const tarea = await tx.tarea.findFirst({
       where: {
         id,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
+        OR: [
+          {
+            proyecto_id: null,
+            empresa_id: scope.empresaId,
+            empresa: { eliminado: false }
+          },
+          {
+            proyecto: {
+              empresa_id: scope.empresaId,
+              eliminado: false,
+              empresa: { eliminado: false }
+            }
+          }
+        ]
       },
       select: { id: true },
     });
@@ -834,11 +889,20 @@ export async function disableTarea(request, reply) {
   const t = await prisma.tarea.findFirst({
     where: {
       id,
-      proyecto: {
-        empresa_id: scope.empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      OR: [
+        {
+          proyecto_id: null,
+          empresa_id: scope.empresaId,
+          empresa: { eliminado: false }
+        },
+        {
+          proyecto: {
+            empresa_id: scope.empresaId,
+            eliminado: false,
+            empresa: { eliminado: false }
+          }
+        }
+      ]
     },
     select: { id: true, eliminado: true },
   });
@@ -859,11 +923,20 @@ export async function restoreTarea(request, reply) {
   const t = await prisma.tarea.findFirst({
     where: {
       id,
-      proyecto: {
-        empresa_id: scope.empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      OR: [
+        {
+          proyecto_id: null,
+          empresa_id: scope.empresaId,
+          empresa: { eliminado: false }
+        },
+        {
+          proyecto: {
+            empresa_id: scope.empresaId,
+            eliminado: false,
+            empresa: { eliminado: false }
+          }
+        }
+      ]
     },
     select: { id: true, eliminado: true },
   });
@@ -913,11 +986,20 @@ export async function addDependencia(request, reply) {
         where: {
           id: tarea_id,
           eliminado: false,
-          proyecto: {
-            empresa_id: scope.empresaId,
-            eliminado: false,
-            empresa: { eliminado: false },
-          },
+          OR: [
+            {
+              proyecto_id: null,
+              empresa_id: scope.empresaId,
+              empresa: { eliminado: false }
+            },
+            {
+              proyecto: {
+                empresa_id: scope.empresaId,
+                eliminado: false,
+                empresa: { eliminado: false }
+              }
+            }
+          ]
         },
         select: { id: true, proyecto_id: true },
       }),
@@ -925,11 +1007,20 @@ export async function addDependencia(request, reply) {
         where: {
           id: predecesora_id,
           eliminado: false,
-          proyecto: {
-            empresa_id: scope.empresaId,
-            eliminado: false,
-            empresa: { eliminado: false },
-          },
+          OR: [
+            {
+              proyecto_id: null,
+              empresa_id: scope.empresaId,
+              empresa: { eliminado: false }
+            },
+            {
+              proyecto: {
+                empresa_id: scope.empresaId,
+                eliminado: false,
+                empresa: { eliminado: false }
+              }
+            }
+          ]
         },
         select: { id: true, proyecto_id: true },
       }),
@@ -999,11 +1090,20 @@ export async function assignEpicaToTarea(request, reply) {
       where: {
         id: tarea_id,
         eliminado: false,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
+        OR: [
+          {
+            proyecto_id: null,
+            empresa_id: scope.empresaId,
+            empresa: { eliminado: false }
+          },
+          {
+            proyecto: {
+              empresa_id: scope.empresaId,
+              eliminado: false,
+              empresa: { eliminado: false }
+            }
+          }
+        ]
       },
       select: { id: true, proyecto_id: true, epica_id: true },
     });
@@ -1181,11 +1281,20 @@ export async function unassignEpicaFromTarea(request, reply) {
       where: {
         id: tarea_id,
         eliminado: false,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
+        OR: [
+          {
+            proyecto_id: null,
+            empresa_id: scope.empresaId,
+            empresa: { eliminado: false }
+          },
+          {
+            proyecto: {
+              empresa_id: scope.empresaId,
+              eliminado: false,
+              empresa: { eliminado: false }
+            }
+          }
+        ]
       },
       select: { id: true, epica_id: true },
     });
@@ -1226,11 +1335,20 @@ export async function addDetallesToTarea(request, reply) {
       where: {
         id: tarea_id,
         eliminado: false,
-        proyecto: {
-          empresa_id: scope.empresaId,
-          eliminado: false,
-          empresa: { eliminado: false },
-        },
+        OR: [
+          {
+            proyecto_id: null,
+            empresa_id: scope.empresaId,
+            empresa: { eliminado: false }
+          },
+          {
+            proyecto: {
+              empresa_id: scope.empresaId,
+              eliminado: false,
+              empresa: { eliminado: false }
+            }
+          }
+        ]
       },
       select: { id: true, epica_id: true },
     });
@@ -1315,4 +1433,32 @@ export async function addDetallesToTarea(request, reply) {
   }
 
   return reply.code(201).send({ ok: true, rows });
+}
+
+export async function uploadEvidenciaFile(request, reply) {
+  const parts = request.parts();
+  let fileUrl = null;
+
+  for await (const part of parts) {
+    if (part.type === "file" && part.filename) {
+      const ext = path.extname(part.filename);
+      const rand = crypto.randomBytes(8).toString("hex");
+      const savedName = `ev_antes_${rand}${ext}`;
+      const uploadsRoot = path.resolve(process.cwd(), "uploads");
+      if (!fs.existsSync(uploadsRoot)) {
+        fs.mkdirSync(uploadsRoot, { recursive: true });
+      }
+      
+      const savePath = path.join(uploadsRoot, savedName);
+      const fsStream = fs.createWriteStream(savePath);
+      await pipeline(part.file, fsStream);
+      fileUrl = `/api/uploads/${savedName}`;
+    }
+  }
+
+  if (!fileUrl) {
+    return reply.code(400).send({ ok: false, message: "No se recibió ningún archivo" });
+  }
+
+  return reply.send({ ok: true, url: fileUrl });
 }

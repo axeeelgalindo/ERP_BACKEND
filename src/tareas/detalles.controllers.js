@@ -4,7 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
 import { httpError } from "../lib/errors.js";
 import { recomputeEpicaFromTareas } from "./epicas.controllers.js";
-import { notifyTaskAssignment } from "./notification.js";
+import { notifyTaskAssignment, notifyTaskReview } from "./notification.js";
 
 const prisma = new PrismaClient();
 
@@ -45,11 +45,20 @@ async function assertTareaInEmpresa(tx, tareaId, empresaId) {
     where: {
       id: tareaId,
       eliminado: false,
-      proyecto: {
-        empresa_id: empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      OR: [
+        {
+          proyecto_id: null,
+          empresa_id: empresaId,
+          empresa: { eliminado: false }
+        },
+        {
+          proyecto: {
+            empresa_id: empresaId,
+            eliminado: false,
+            empresa: { eliminado: false }
+          }
+        }
+      ]
     },
     select: { id: true },
   });
@@ -161,11 +170,21 @@ export async function listTareaDetalles(request, reply) {
     tarea_id: tareaId,
     eliminado: false,
     tarea: {
-      proyecto: {
-        empresa_id: scope.empresaId,
-        eliminado: false,
-        empresa: { eliminado: false },
-      },
+      eliminado: false,
+      OR: [
+        {
+          proyecto_id: null,
+          empresa_id: scope.empresaId,
+          empresa: { eliminado: false }
+        },
+        {
+          proyecto: {
+            empresa_id: scope.empresaId,
+            eliminado: false,
+            empresa: { eliminado: false }
+          }
+        }
+      ]
     },
     ...(estado ? { estado } : {}),
     ...(responsableId ? { responsable_id: responsableId } : {}),
@@ -282,6 +301,17 @@ export async function createTareaDetalle(request, reply) {
       },
     });
 
+    if (body.evidencia_antes_url) {
+      await tx.tareaEvidencia.create({
+        data: {
+          subtarea_id: created.id,
+          tarea_id,
+          archivo_url: body.evidencia_antes_url,
+          comentario: "Evidencia Inicial (Antes)"
+        }
+      });
+    }
+
     const tareaUpdated = await recomputeTareaFromDetalles(tx, tarea_id);
     if (tareaUpdated?.epica_id) {
       await recomputeEpicaFromTareas(tx, tareaUpdated.epica_id);
@@ -317,6 +347,7 @@ export async function updateTareaDetalle(request, reply) {
   delete data.comentario_revision;
 
   let oldResponsableId = null;
+  let oldEstado = null;
 
   const row = await prisma.$transaction(async (tx) => {
     const current = await tx.tareaDetalle.findFirst({
@@ -324,11 +355,21 @@ export async function updateTareaDetalle(request, reply) {
         id,
         eliminado: false,
         tarea: {
-          proyecto: {
-            empresa_id: scope.empresaId,
-            eliminado: false,
-            empresa: { eliminado: false },
-          },
+          eliminado: false,
+          OR: [
+            {
+              proyecto_id: null,
+              empresa_id: scope.empresaId,
+              empresa: { eliminado: false }
+            },
+            {
+              proyecto: {
+                empresa_id: scope.empresaId,
+                eliminado: false,
+                empresa: { eliminado: false }
+              }
+            }
+          ]
         },
       },
       include: {
@@ -342,6 +383,7 @@ export async function updateTareaDetalle(request, reply) {
       });
 
     oldResponsableId = current.responsable_id;
+    oldEstado = current.estado;
 
     const tareaId = current.tarea_id;
 
@@ -517,6 +559,16 @@ export async function updateTareaDetalle(request, reply) {
     });
   }
 
+  if (row.estado === "en_revision" && oldEstado !== "en_revision") {
+    notifyTaskReview({
+      tareaId: row.id,
+      isSubtask: true,
+      actorName: request.user?.nombre
+    }).catch(err => {
+      console.error("[Mail] Error in notifyTaskReview update subtask hook:", err);
+    });
+  }
+
   return reply.send({ ok: true, row });
 }
 
@@ -530,11 +582,21 @@ export async function deleteTareaDetalle(request, reply) {
       where: {
         id,
         tarea: {
-          proyecto: {
-            empresa_id: scope.empresaId,
-            eliminado: false,
-            empresa: { eliminado: false },
-          },
+          eliminado: false,
+          OR: [
+            {
+              proyecto_id: null,
+              empresa_id: scope.empresaId,
+              empresa: { eliminado: false }
+            },
+            {
+              proyecto: {
+                empresa_id: scope.empresaId,
+                eliminado: false,
+                empresa: { eliminado: false }
+              }
+            }
+          ]
         },
       },
       select: { id: true, tarea_id: true },
