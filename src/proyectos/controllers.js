@@ -392,7 +392,13 @@ export async function updateProyecto(request, reply) {
   // (opcional) permitir editar estado/fechas si lo usas
   if (typeof body.estado === "string") data.estado = body.estado;
   if (body.fecha_inicio_plan) data.fecha_inicio_plan = new Date(`${String(body.fecha_inicio_plan).slice(0, 10)}T12:00:00`);
+  if (body.fecha_inicio_plan === null) data.fecha_inicio_plan = null;
   if (body.fecha_fin_plan) data.fecha_fin_plan = new Date(`${String(body.fecha_fin_plan).slice(0, 10)}T12:00:00`);
+  if (body.fecha_fin_plan === null) data.fecha_fin_plan = null;
+  if (body.fecha_inicio_real) data.fecha_inicio_real = new Date(`${String(body.fecha_inicio_real).slice(0, 10)}T12:00:00`);
+  if (body.fecha_inicio_real === null) data.fecha_inicio_real = null;
+  if (body.fecha_fin_real) data.fecha_fin_real = new Date(`${String(body.fecha_fin_real).slice(0, 10)}T12:00:00`);
+  if (body.fecha_fin_real === null) data.fecha_fin_real = null;
 
   // seguridad: empresa_id no se toca si no es master
   if (data.empresa_id && !scope.isMaster) delete data.empresa_id;

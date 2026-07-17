@@ -65,6 +65,8 @@ export async function processTransition(request, reply) {
         updateData.fecha_fin_real = new Date();
       }
 
+      let proyectoId = null;
+
       if (tipo === "SUBTAREA") {
         item = await tx.tareaDetalle.findUnique({ where: { id } });
         if (!item) throw new Error("Subtarea no encontrada");
@@ -89,6 +91,16 @@ export async function processTransition(request, reply) {
         
         const tUpd = await recomputeTareaFromDetalles(tx, item.tarea_id);
         if (tUpd?.epica_id) await recomputeEpicaFromTareas(tx, tUpd.epica_id);
+        
+        if (tUpd?.proyecto_id) {
+          proyectoId = tUpd.proyecto_id;
+        } else {
+          const parentTarea = await tx.tarea.findUnique({
+            where: { id: item.tarea_id },
+            select: { proyecto_id: true }
+          });
+          proyectoId = parentTarea?.proyecto_id;
+        }
 
       } else if (tipo === "TAREA") {
         item = await tx.tarea.findUnique({ where: { id } });
@@ -112,6 +124,7 @@ export async function processTransition(request, reply) {
         }
         
         if (item.epica_id) await recomputeEpicaFromTareas(tx, item.epica_id);
+        proyectoId = item.proyecto_id;
 
       } else if (tipo === "EPICA") {
         item = await tx.epica.findUnique({ where: { id } });
@@ -121,9 +134,23 @@ export async function processTransition(request, reply) {
           where: { id },
           data: updateData
         });
-        // Epicas no tienen tabla de evidencias propia en este esquema (se ven en tareas), 
-        // pero podemos guardar el comentario/archivo si existiera una tabla. 
-        // Por ahora solo actualizamos estado/fechas.
+        proyectoId = item.proyecto_id;
+      }
+
+      if (newStatus === "en_progreso" && proyectoId) {
+        const proj = await tx.proyecto.findUnique({
+          where: { id: proyectoId },
+          select: { id: true, fecha_inicio_real: true }
+        });
+        if (proj && !proj.fecha_inicio_real) {
+          await tx.proyecto.update({
+            where: { id: proyectoId },
+            data: {
+              fecha_inicio_real: new Date(),
+              estado: "en_progreso"
+            }
+          });
+        }
       }
 
       return { ok: true };

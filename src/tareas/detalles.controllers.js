@@ -11,7 +11,7 @@ const prisma = new PrismaClient();
 const parseDate = (d) => {
   if (!d) return null;
   const s = String(d);
-  return s.includes("T") ? new Date(s) : new Date(`${s.slice(0, 10)}T12:00:00`);
+  return new Date(`${s.slice(0, 10)}T12:00:00`);
 };
 const toIntOrNull = (v) => {
   if (v === null || v === undefined || v === "") return null;

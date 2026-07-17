@@ -79,16 +79,22 @@ function normalizeVigenciaDias(v) {
 function normalizeGlosas(glosas, moneda = "CLP") {
   const list = Array.isArray(glosas) ? glosas : [];
   return list
-    .map((g, idx) => ({
-      descripcion: String(g?.descripcion || "").trim().slice(0, 250),
-      monto: roundMoney(g?.monto || 0, moneda), // BRUTO
-      cantidad: Number(g?.cantidad || 1),
-      precio_unitario: Number(g?.precio_unitario || g?.monto || 0),
-      manual: !!g?.manual,
-      orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
-      descuento_pct: clampPct(g?.descuento_pct ?? 0),
-      comentario: g?.comentario ? String(g.comentario).trim() : null,
-    }))
+    .map((g, idx) => {
+      const precio_unitario = roundMoney(Number(g?.precio_unitario || g?.monto || 0), moneda);
+      const monto = roundMoney(precio_unitario * Number(g?.cantidad || 1), moneda);
+      const monto_uf = moneda === "UF" ? (g?.monto_uf !== undefined ? Number(g?.monto_uf || 0) : precio_unitario) : null;
+      return {
+        descripcion: String(g?.descripcion || "").trim().slice(0, 250),
+        monto,
+        cantidad: Number(g?.cantidad || 1),
+        precio_unitario,
+        monto_uf,
+        manual: !!g?.manual,
+        orden: Number.isFinite(Number(g?.orden)) ? Number(g.orden) : idx,
+        descuento_pct: clampPct(g?.descuento_pct ?? 0),
+        comentario: g?.comentario ? String(g.comentario).trim() : null,
+      };
+    })
     .filter((g) => g.descripcion);
 }
 
@@ -476,6 +482,9 @@ export const createCotizacion = async (request, reply) => {
           } else {
             precio_unitario = roundMoney(Number(g?.precio_unitario || g?.monto || 0), moneda);
             monto = roundMoney(precio_unitario * cantidad, moneda);
+            if (moneda === "UF") {
+              monto_uf = precio_unitario;
+            }
           }
 
           return {
@@ -870,7 +879,7 @@ export const updateCotizacion = async (request, reply) => {
             };
           }).filter(g => g.descripcion);
         } else {
-          glosasFinal = normalizeGlosas(glosas).sort((a, b) => a.orden - b.orden);
+          glosasFinal = normalizeGlosas(glosas, finalMoneda).sort((a, b) => a.orden - b.orden);
         }
       } else {
         // no se enviaron glosas, usamos las existentes
@@ -1156,6 +1165,8 @@ export const updateCotizacionEstado = async (request, reply) => {
       "ACEPTADA",
       "RECHAZADA",
       "ORDEN_VENTA",
+      "ENTREGADO",
+      "POR_FACTURAR",
       "FACTURADA",
       "PAGADA",
     ];
@@ -1166,13 +1177,15 @@ export const updateCotizacionEstado = async (request, reply) => {
     const allowed = {
       COTIZACION: ["ACEPTADA", "RECHAZADA"],
       ACEPTADA: ["ORDEN_VENTA", "RECHAZADA"],
-      ORDEN_VENTA: ["FACTURADA"],
+      ORDEN_VENTA: ["POR_FACTURAR"],
+      POR_FACTURAR: ["FACTURADA"],
       FACTURADA: ["PAGADA"],
-      PAGADA: [],
+      PAGADA: ["ENTREGADO"],
+      ENTREGADO: [],
       RECHAZADA: [],
     };
 
-    const parseDate = (v) => (v ? new Date(v) : null);
+    const parseDate = (v) => (v ? new Date(`${String(v).slice(0, 10)}T12:00:00`) : null);
     const toAceptada = estado === "ACEPTADA";
     const toRechazada = estado === "RECHAZADA";
 
@@ -1313,26 +1326,26 @@ export const updateCotizacionEstado = async (request, reply) => {
       } else if (estado === "ORDEN_VENTA") {
         updateData.fecha_ov = now;
         if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
-      } else if (estado === "ENTREGADO") {
-        updateData.fecha_entregado = now;
-        if (!cot.fecha_ov) updateData.fecha_ov = now;
-        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "POR_FACTURAR") {
         updateData.fecha_por_facturar = now;
-        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
         if (!cot.fecha_ov) updateData.fecha_ov = now;
         if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "FACTURADA") {
         updateData.fecha_facturada = now;
         if (!cot.fecha_por_facturar) updateData.fecha_por_facturar = now;
-        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
         if (!cot.fecha_ov) updateData.fecha_ov = now;
         if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "PAGADA") {
         updateData.fecha_pagada = now;
         if (!cot.fecha_facturada) updateData.fecha_facturada = now;
         if (!cot.fecha_por_facturar) updateData.fecha_por_facturar = now;
-        if (!cot.fecha_entregado) updateData.fecha_entregado = now;
+        if (!cot.fecha_ov) updateData.fecha_ov = now;
+        if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
+      } else if (estado === "ENTREGADO") {
+        updateData.fecha_entregado = now;
+        if (!cot.fecha_pagada) updateData.fecha_pagada = now;
+        if (!cot.fecha_facturada) updateData.fecha_facturada = now;
+        if (!cot.fecha_por_facturar) updateData.fecha_por_facturar = now;
         if (!cot.fecha_ov) updateData.fecha_ov = now;
         if (!cot.fecha_aceptada) updateData.fecha_aceptada = now;
       } else if (estado === "RECHAZADA") {
@@ -1644,7 +1657,7 @@ export const uploadCotizacionDoc = async (request, reply) => {
     if (!data) return reply.code(400).send({ error: "No se envió ningún archivo" });
 
     // Validar tipo
-    const validDocs = ["oc", "hes", "fac", "comprobante", "gd"];
+    const validDocs = ["oc", "hes", "fac", "comprobante", "gd", "ae"];
     if (!validDocs.includes(docType)) {
       return reply.code(400).send({ error: "Tipo de documento inválido" });
     }
@@ -1682,22 +1695,15 @@ export const uploadCotizacionDoc = async (request, reply) => {
       nuevoEstado = "ORDEN_VENTA";
       dateUpdates.fecha_ov = now;
       if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
-    } else if (docType === "gd" && (est === "ACEPTADA" || est === "ORDEN_VENTA")) {
-      nuevoEstado = "ENTREGADO";
-      dateUpdates.fecha_entregado = now;
-      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
-      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
-    } else if (docType === "hes" && (est === "ORDEN_VENTA" || est === "ENTREGADO")) {
+    } else if (docType === "hes" && est === "ORDEN_VENTA") {
       nuevoEstado = "POR_FACTURAR";
       dateUpdates.fecha_por_facturar = now;
-      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
       if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
       if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
-    } else if (docType === "fac" && (est === "ENTREGADO" || est === "POR_FACTURAR")) {
+    } else if (docType === "fac" && est === "POR_FACTURAR") {
       nuevoEstado = "FACTURADA";
       dateUpdates.fecha_facturada = now;
       if (!cot.fecha_por_facturar) dateUpdates.fecha_por_facturar = now;
-      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
       if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
       if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     } else if (docType === "comprobante" && (est === "POR_FACTURAR" || est === "FACTURADA")) {
@@ -1705,7 +1711,14 @@ export const uploadCotizacionDoc = async (request, reply) => {
       dateUpdates.fecha_pagada = now;
       if (!cot.fecha_facturada) dateUpdates.fecha_facturada = now;
       if (!cot.fecha_por_facturar) dateUpdates.fecha_por_facturar = now;
-      if (!cot.fecha_entregado) dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
+      if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
+    } else if (docType === "gd" || docType === "ae") {
+      nuevoEstado = "ENTREGADO";
+      dateUpdates.fecha_entregado = now;
+      if (!cot.fecha_pagada) dateUpdates.fecha_pagada = now;
+      if (!cot.fecha_facturada) dateUpdates.fecha_facturada = now;
+      if (!cot.fecha_por_facturar) dateUpdates.fecha_por_facturar = now;
       if (!cot.fecha_ov) dateUpdates.fecha_ov = now;
       if (!cot.fecha_aceptada) dateUpdates.fecha_aceptada = now;
     }
