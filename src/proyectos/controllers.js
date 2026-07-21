@@ -23,6 +23,7 @@ export async function listProyectos(request, reply) {
   const {
     q = "",
     estado = "",
+    clienteId = "",
     page = PAGE,
     pageSize = SIZE,
     includeDeleted = "false",
@@ -46,6 +47,21 @@ export async function listProyectos(request, reply) {
       }
       : {}),
     ...(estado ? { estado } : {}),
+    ...(clienteId
+      ? {
+        OR: [
+          { cliente_id: clienteId },
+          {
+            cotizaciones: {
+              some: {
+                cliente_id: clienteId,
+                eliminado: false,
+              },
+            },
+          },
+        ],
+      }
+      : {}),
   };
 
   const allowedSort = [
@@ -71,6 +87,7 @@ export async function listProyectos(request, reply) {
       where,
       orderBy: { [sortField]: sortDir },
       include: {
+        cliente: true,
         // Para cliente (vía cotizaciones -> ventas -> cliente)
         cotizaciones: {
           where: { eliminado: false },
@@ -173,6 +190,7 @@ export async function getProyecto(request, reply) {
         },
       },
       cotizaciones: true,
+      cliente: true,
       compras: { where: { eliminado: false } },
       rendiciones: { where: { eliminado: false } },
       retrasos: { orderBy: { creado_en: "desc" } },
@@ -273,7 +291,7 @@ export async function getProyecto(request, reply) {
       costoPromedioPorTarea,
       ventaPromedioPorTarea,
     },
-    clientePrincipal: null,
+    clientePrincipal: row.cliente || null,
   };
 
   return reply.send({ ok: true, row, metrics });
@@ -328,12 +346,15 @@ export async function createProyecto(req, reply) {
     const presupuestoNum =
       presupuesto == null || presupuesto === "" ? 0 : Number(presupuesto);
 
+    const cliente_id = payload?.cliente_id || payload?.clienteId || null;
+
     const proyecto = await prisma.proyecto.create({
       data: {
         empresa_id,
         nombre: String(nombre).trim(),
         descripcion: descripcion ? String(descripcion).trim() : null,
         presupuesto: Number.isFinite(presupuestoNum) ? presupuestoNum : 0,
+        cliente_id,
 
         // ✅ crea ProyectoMiembro
         ...(miembrosIds.length
@@ -402,6 +423,9 @@ export async function updateProyecto(request, reply) {
 
   // seguridad: empresa_id no se toca si no es master
   if (data.empresa_id && !scope.isMaster) delete data.empresa_id;
+
+  if (body.cliente_id !== undefined) data.cliente_id = body.cliente_id || null;
+  else if (body.clienteId !== undefined) data.cliente_id = body.clienteId || null;
 
   // ✅ miembros
   const miembros = Array.isArray(body.miembros) ? body.miembros.filter(Boolean) : null;

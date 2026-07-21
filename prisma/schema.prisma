@@ -274,6 +274,8 @@ model Cliente {
   // ✅ responsables (lista)
   responsables ClienteResponsable[]
 
+  proyectos Proyecto[]
+
   @@unique([correo, empresa_id, eliminado])
   @@index([empresa_id])
 }
@@ -427,6 +429,8 @@ model Proyecto {
   // soft delete
   eliminado      Boolean          @default(false)
   eliminado_en   DateTime?
+  cliente_id     String?
+  cliente        Cliente?         @relation(fields: [cliente_id], references: [id], onDelete: SetNull)
   tareaHistorial TareaHistorial[]
   cotizaciones   Cotizacion[]
   compras        Compra[]
@@ -438,6 +442,7 @@ model Proyecto {
   retrasos ProyectoRetraso[]
 
   @@index([empresa_id])
+  @@index([cliente_id])
 }
 
 model ProyectoRetraso {

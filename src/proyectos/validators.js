@@ -5,6 +5,7 @@ const Id = Type.String({ minLength: 10 }); // cuid()
 export const ProyectoQuery = Type.Object({
   q: Type.Optional(Type.String()),
   estado: Type.Optional(Type.String()),
+  clienteId: Type.Optional(Id),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   empresaId: Type.Optional(Type.String()),
@@ -22,8 +23,9 @@ export const ProyectoCreateBody = Type.Object(
     estado: Type.Optional(Type.String()),
     // miembros del proyecto (empleados)
     miembrosIds: Type.Optional(Type.Array(Type.String({ minLength: 10 }))),
-    // si tu UI manda clienteId hoy, lo aceptamos aunque tu modelo no lo guarde
+    // si tu UI manda clienteId o cliente_id hoy, los aceptamos
     clienteId: Type.Optional(Type.String({ minLength: 10 })),
+    cliente_id: Type.Optional(Type.Union([Type.String({ minLength: 10 }), Type.Null()])),
   },
   { additionalProperties: true }
 );

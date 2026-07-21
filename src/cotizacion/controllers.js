@@ -1157,7 +1157,7 @@ export const updateCotizacionEstado = async (request, reply) => {
     const { empresaId } = getScope(request);
     const { id } = request.params;
 
-    const { estado, fecha_inicio_plan, fecha_fin_plan, motivo_rechazo } =
+    const { estado, fecha_inicio_plan, fecha_fin_plan, motivo_rechazo, crear_proyecto } =
       request.body || {};
 
     const valid = [
@@ -1261,7 +1261,7 @@ export const updateCotizacionEstado = async (request, reply) => {
 
       let proyectoIdFinal = cot.proyecto_id;
 
-      if (!cot.es_suscripcion) {
+      if (!cot.es_suscripcion && crear_proyecto !== false) {
         // ✅ crear proyecto al ACEPTAR (solo para cotizaciones que NO sean suscripciones/servicios)
         const isCotToAceptada =
           cot.estado === "COTIZACION" && estado === "ACEPTADA";
