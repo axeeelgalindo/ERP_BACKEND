@@ -539,6 +539,7 @@ model Tarea {
   epica    Epica?  @relation(fields: [epica_id], references: [id], onDelete: SetNull)
 
   prioridad Int?
+  creador_id String?
   estado    String  @default("pendiente")
   avance    Int     @default(0)
   es_hito   Boolean @default(false)

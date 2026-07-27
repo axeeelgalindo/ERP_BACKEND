@@ -745,6 +745,12 @@ export const updateCotizacion = async (request, reply) => {
       return reply.code(404).send({ error: "Cotización no encontrada" });
     }
 
+    if (existing.estado !== "COTIZACION") {
+      return reply.code(400).send({
+        error: "No se puede editar una cotización que no está en estado COTIZACION",
+      });
+    }
+
     // =========================
     // Determinar valores finales (fallback a existing)
     // =========================

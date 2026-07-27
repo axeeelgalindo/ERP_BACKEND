@@ -632,6 +632,10 @@ export const createVenta = async (request, reply) => {
         data: detallesData.map(d => ({ ...d, ventaId: nuevaVentaHeader.id }))
       });
 
+      if (ordenVentaId) {
+        await autoUpdateCotizacion(tx, ordenVentaId);
+      }
+
       const nuevaVenta = await tx.venta.findUnique({
         where: { id: nuevaVentaHeader.id },
         include: {
@@ -822,7 +826,7 @@ export async function updateVenta(request, reply) {
 
     const ventaActual = await prisma.venta.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, ordenVentaId: true },
     });
     if (!ventaActual)
       return reply.status(404).send({ error: "Venta no encontrada" });
@@ -1100,6 +1104,13 @@ export async function updateVenta(request, reply) {
         data: detallesData.map((d) => ({ ...d, ventaId: id })),
       });
 
+      if (ventaActual.ordenVentaId) {
+        await autoUpdateCotizacion(tx, ventaActual.ordenVentaId);
+      }
+      if (ordenVentaId && ordenVentaId !== ventaActual.ordenVentaId) {
+        await autoUpdateCotizacion(tx, ordenVentaId);
+      }
+
       // devolver venta completa
       const nuevaVenta = await tx.venta.findUnique({
         where: { id },
@@ -1220,6 +1231,10 @@ export const disableVenta = async (request, reply) => {
         },
       });
 
+      if (venta.ordenVentaId) {
+        await autoUpdateCotizacion(tx, venta.ordenVentaId);
+      }
+
       return v;
     });
 
@@ -1280,9 +1295,15 @@ export const deleteVenta = async (request, reply) => {
     // Regla simple:
     // - si NO force: solo marca eliminado (soft delete) para evitar cagazos
     if (!force) {
-      const updated = await prisma.venta.update({
-        where: { id },
-        data: { eliminado: true, eliminadoAt: new Date() },
+      const updated = await prisma.$transaction(async (tx) => {
+        const v = await tx.venta.update({
+          where: { id },
+          data: { eliminado: true, eliminado_en: new Date() },
+        });
+        if (venta.ordenVentaId) {
+          await autoUpdateCotizacion(tx, venta.ordenVentaId);
+        }
+        return v;
       });
       return reply.send({
         ok: true,
@@ -1300,6 +1321,9 @@ export const deleteVenta = async (request, reply) => {
       // si DetalleVenta tiene dependencias, bórralas primero acá
       await tx.detalleVenta.deleteMany({ where: { ventaId: id } });
       await tx.venta.delete({ where: { id } });
+      if (venta.ordenVentaId) {
+        await autoUpdateCotizacion(tx, venta.ordenVentaId);
+      }
     });
 
     return reply.send({ ok: true, deleted: true });
@@ -1310,3 +1334,187 @@ export const deleteVenta = async (request, reply) => {
       .send({ error: "Error eliminando venta", detalle: err?.message });
   }
 };
+
+/* =====================================================
+   HELPER PARA ACTUALIZAR AUTOMÁTICAMENTE LA COTIZACIÓN
+   AL CAMBIAR SUS COSTEOS (VENTAS)
+   ===================================================== */
+const roundMoney = (n, moneda = "CLP") => {
+  const val = Number(n || 0);
+  if (moneda === "CLP") return Math.round(val);
+  if (moneda === "UF") return Number(val.toFixed(4));
+  if (moneda === "USD") return Number(val.toFixed(2));
+  return Math.round(val);
+};
+
+function clampPct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(99.99, n));
+}
+
+function calcTotalVenta(v) {
+  return (v?.detalles || []).reduce(
+    (s, d) => s + (Number(d.total ?? d.ventaTotal) || 0),
+    0
+  );
+}
+
+function calcDescuentoGlosasMonto(glosas, moneda = "CLP") {
+  return roundMoney(
+    glosas.reduce((acc, g) => {
+      const bruto = roundMoney(g.monto || 0, moneda);
+      const pct = clampPct(g.descuento_pct || 0);
+      const desc = bruto * (pct / 100);
+      return acc + desc;
+    }, 0),
+    moneda
+  );
+}
+
+function calcFromSubtotal(subtotalNeto, ivaRate, sinIva = false, moneda = "CLP") {
+  const sub = roundMoney(subtotalNeto, moneda);
+  const iva = sinIva ? 0 : roundMoney(sub * Number(ivaRate || 0), moneda);
+  const total = roundMoney(sub + iva, moneda);
+  return { subtotal: sub, iva, total };
+}
+
+async function autoUpdateCotizacion(tx, cotizacionId) {
+  if (!cotizacionId) return;
+
+  const cotizacion = await tx.cotizacion.findUnique({
+    where: { id: cotizacionId },
+    include: {
+      ventas: { where: { eliminado: false }, include: { detalles: true } },
+      glosas: { orderBy: { orden: "asc" } },
+    },
+  });
+
+  if (!cotizacion || cotizacion.estado !== "COTIZACION" || cotizacion.eliminado) {
+    return;
+  }
+
+  // Calculate new subtotal base from all linked non-deleted Ventas
+  const subtotalBaseBruto = roundMoney(
+    cotizacion.ventas.reduce((acc, v) => acc + calcTotalVenta(v), 0),
+    cotizacion.moneda
+  );
+
+  // Scale and adjust the glosas
+  let glosasFinal = cotizacion.glosas.map((g) => ({
+    descripcion: g.descripcion,
+    monto: Number(g.monto),
+    cantidad: Number(g.cantidad || 1),
+    precio_unitario: Number(g.precio_unitario),
+    monto_uf: g.monto_uf ? Number(g.monto_uf) : null,
+    manual: g.manual,
+    orden: g.orden,
+    descuento_pct: Number(g.descuento_pct || 0),
+    comentario: g.comentario,
+  }));
+
+  const oldSumBruto = glosasFinal.reduce((acc, g) => acc + g.monto, 0);
+  if (oldSumBruto > 0) {
+    const factor = subtotalBaseBruto / oldSumBruto;
+    glosasFinal = glosasFinal.map((g) => {
+      const newMonto = roundMoney(g.monto * factor, cotizacion.moneda);
+      const cant = g.cantidad || 1;
+      const newPrecioUnitario = roundMoney(newMonto / cant, cotizacion.moneda);
+      
+      let newMontoUf = g.monto_uf;
+      if (cotizacion.moneda === "UF" && g.monto_uf !== null) {
+        newMontoUf = roundMoney(newPrecioUnitario, "UF");
+      }
+      
+      return {
+        ...g,
+        monto: newMonto,
+        precio_unitario: newPrecioUnitario,
+        monto_uf: newMontoUf,
+      };
+    });
+  } else {
+    // If sum is 0, assign everything to the first glosa (or create a default one if none exist)
+    if (glosasFinal.length > 0) {
+      const cant = glosasFinal[0].cantidad || 1;
+      const newPrecioUnitario = roundMoney(subtotalBaseBruto / cant, cotizacion.moneda);
+      glosasFinal[0].monto = subtotalBaseBruto;
+      glosasFinal[0].precio_unitario = newPrecioUnitario;
+      if (cotizacion.moneda === "UF") {
+        glosasFinal[0].monto_uf = newPrecioUnitario;
+      }
+    } else {
+      glosasFinal = [
+        {
+          descripcion: (String(cotizacion.asunto || "").trim() || "Servicios").slice(0, 250),
+          monto: subtotalBaseBruto,
+          cantidad: 1,
+          precio_unitario: subtotalBaseBruto,
+          monto_uf: cotizacion.moneda === "UF" ? subtotalBaseBruto : null,
+          manual: true,
+          orden: 0,
+          descuento_pct: 0,
+          comentario: null,
+        },
+      ];
+    }
+  }
+
+  // Cover any rounding differences in the last glosa
+  const newSumBruto = glosasFinal.reduce((acc, g) => acc + g.monto, 0);
+  const diff = roundMoney(subtotalBaseBruto - newSumBruto, cotizacion.moneda);
+  if (Math.abs(diff) > 0.0001 && glosasFinal.length > 0) {
+    const lastIdx = glosasFinal.length - 1;
+    glosasFinal[lastIdx].monto = roundMoney(glosasFinal[lastIdx].monto + diff, cotizacion.moneda);
+    const cant = glosasFinal[lastIdx].cantidad || 1;
+    const newPrecioUnitario = roundMoney(glosasFinal[lastIdx].monto / cant, cotizacion.moneda);
+    glosasFinal[lastIdx].precio_unitario = newPrecioUnitario;
+    if (cotizacion.moneda === "UF" && glosasFinal[lastIdx].monto_uf !== null) {
+      glosasFinal[lastIdx].monto_uf = roundMoney(newPrecioUnitario, "UF");
+    }
+  }
+
+  // Calculate discounts
+  const hayDescGlosa = glosasFinal.some((g) => clampPct(g.descuento_pct || 0) > 0);
+  const descGlosasMonto = hayDescGlosa ? calcDescuentoGlosasMonto(glosasFinal, cotizacion.moneda) : 0;
+  const subtotalTrasGlosas = roundMoney(subtotalBaseBruto - descGlosasMonto, cotizacion.moneda);
+
+  const descGeneralPct = clampPct(cotizacion.descuento_pct || 0);
+  const descGeneralMonto = descGeneralPct > 0 ? roundMoney(subtotalTrasGlosas * (descGeneralPct / 100), cotizacion.moneda) : 0;
+
+  const subtotalNetoBase = roundMoney(subtotalTrasGlosas - descGeneralMonto, cotizacion.moneda);
+
+  let ivaRateNum = 0.19;
+  if (cotizacion.subtotal > 0) {
+    ivaRateNum = cotizacion.iva / cotizacion.subtotal;
+  }
+  const { subtotal, iva, total } = calcFromSubtotal(subtotalNetoBase, ivaRateNum, cotizacion.sin_iva, cotizacion.moneda);
+
+  // Delete and recreate the glosas
+  await tx.cotizacionGlosa.deleteMany({ where: { cotizacion_id: cotizacionId } });
+  await tx.cotizacionGlosa.createMany({
+    data: glosasFinal.map((g, idx) => ({
+      cotizacion_id: cotizacionId,
+      descripcion: g.descripcion,
+      monto: g.monto,
+      cantidad: g.cantidad,
+      precio_unitario: g.precio_unitario,
+      monto_uf: g.monto_uf,
+      manual: g.manual,
+      orden: g.orden !== null && g.orden !== undefined ? g.orden : idx,
+      descuento_pct: g.descuento_pct,
+      comentario: g.comentario,
+    })),
+  });
+
+  // Update Cotizacion totals
+  await tx.cotizacion.update({
+    where: { id: cotizacionId },
+    data: {
+      subtotal,
+      iva,
+      total,
+      descuento_monto: descGeneralMonto,
+    },
+  });
+}

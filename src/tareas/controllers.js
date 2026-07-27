@@ -404,6 +404,7 @@ export async function createTarea(request, reply) {
         descripcion,
         responsable_id: responsable_id || null,
         prioridad,
+        creador_id: scope.userId,
         estado: "pendiente",
         avance: 0,
         fecha_inicio_plan: fip,
@@ -601,6 +602,14 @@ export async function updateTarea(request, reply) {
       throw Object.assign(new Error("Tarea no encontrada o deshabilitada"), {
         statusCode: 404,
       });
+
+    if (data.prioridad !== undefined && data.prioridad !== tarea.prioridad) {
+      if (tarea.creador_id && tarea.creador_id !== scope.userId) {
+        throw Object.assign(new Error("Solo el creador de la tarea puede cambiar su prioridad"), {
+          statusCode: 403,
+        });
+      }
+    }
 
     oldResponsableId = tarea.responsable_id;
     oldEstado = tarea.estado;
