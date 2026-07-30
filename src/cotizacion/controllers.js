@@ -81,7 +81,7 @@ function normalizeGlosas(glosas, moneda = "CLP") {
   return list
     .map((g, idx) => {
       const precio_unitario = roundMoney(Number(g?.precio_unitario || g?.monto || 0), moneda);
-      const monto = roundMoney(precio_unitario * Number(g?.cantidad || 1), moneda);
+      const monto = roundMoney(g?.monto !== undefined && g?.monto !== null ? Number(g.monto) : (precio_unitario * Number(g?.cantidad || 1)), moneda);
       const monto_uf = moneda === "UF" ? (g?.monto_uf !== undefined ? Number(g?.monto_uf || 0) : precio_unitario) : null;
       return {
         descripcion: String(g?.descripcion || "").trim().slice(0, 250),
