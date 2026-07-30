@@ -518,9 +518,10 @@ export const createCotizacion = async (request, reply) => {
 
         // ✅ VALIDACIÓN: glosas deben sumar subtotalBase (BRUTO)
         const sumaBruto = sumBrutoGlosas(glosasFinal, moneda);
-        // Allow a small delta for float comparison (USD/UF)
+        // Allow a small delta (10 for CLP, 0.01 for USD/UF)
         const diff = Math.abs(sumaBruto - subtotalBase);
-        if (diff > 0.01) {
+        const maxDiff = moneda === "CLP" ? 10 : 0.01;
+        if (diff > maxDiff) {
           throw new Error(
             `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBase}`,
           );
@@ -972,7 +973,8 @@ export const updateCotizacion = async (request, reply) => {
 
         // ✅ VALIDACIÓN: glosas BRUTAS deben sumar subtotalBaseBruto
         const sumaBruto = sumBrutoGlosas(glosasFinal, finalMoneda);
-        if (Math.abs(sumaBruto - subtotalBaseBruto) > 0.01) {
+        const maxDiff = finalMoneda === "CLP" ? 10 : 0.01;
+        if (Math.abs(sumaBruto - subtotalBaseBruto) > maxDiff) {
           throw new Error(
             `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBruto} vs ventas=${subtotalBaseBruto}`
           );
@@ -1018,7 +1020,8 @@ export const updateCotizacion = async (request, reply) => {
 
       // Revalidación BRUTO por seguridad
       const sumaBrutoFinal = sumBrutoGlosas(glosasFinal, finalMoneda);
-      if (Math.abs(sumaBrutoFinal - subtotalBaseBruto) > 0.01) {
+      const maxDiffReval = finalMoneda === "CLP" ? 10 : 0.01;
+      if (Math.abs(sumaBrutoFinal - subtotalBaseBruto) > maxDiffReval) {
         throw new Error(
           `Las glosas deben sumar el subtotal BRUTO. Suma glosas=${sumaBrutoFinal} vs base=${subtotalBaseBruto}`
         );
@@ -1163,7 +1166,7 @@ export const updateCotizacionEstado = async (request, reply) => {
     const { empresaId } = getScope(request);
     const { id } = request.params;
 
-    const { estado, fecha_inicio_plan, fecha_fin_plan, motivo_rechazo, crear_proyecto } =
+    const { estado, fecha_inicio_plan, fecha_fin_plan, motivo_rechazo, crear_proyecto, epica_nombre, tarea_nombre } =
       request.body || {};
 
     const valid = [
@@ -1272,6 +1275,17 @@ export const updateCotizacionEstado = async (request, reply) => {
         const isCotToAceptada =
           cot.estado === "COTIZACION" && estado === "ACEPTADA";
         if (isCotToAceptada && !proyectoIdFinal) {
+          if (!epica_nombre || !String(epica_nombre).trim()) {
+            const err = new Error("El nombre de la épica es obligatorio al crear el proyecto.");
+            err.statusCode = 400;
+            throw err;
+          }
+          if (!tarea_nombre || !String(tarea_nombre).trim()) {
+            const err = new Error("El nombre de la tarea inicial es obligatorio al crear el proyecto.");
+            err.statusCode = 400;
+            throw err;
+          }
+
           const asunto = String(cot.asunto || "Sin asunto").trim();
           const nombreProyecto = `${cot.numero} - ${asunto}`.slice(0, 255);
 
@@ -1286,6 +1300,51 @@ export const updateCotizacionEstado = async (request, reply) => {
           });
 
           proyectoIdFinal = proyecto.id;
+
+          // Calcular dias_plan para la épica y tarea
+          let diasPlan = null;
+          if (inicioPlan && finPlan) {
+            const diffMs = finPlan.getTime() - inicioPlan.getTime();
+            diasPlan = Math.floor(diffMs / (24 * 60 * 60 * 1000)) + 1;
+          }
+
+          // Crear tarea épica inicial
+          const epica = await tx.epica.create({
+            data: {
+              empresa_id: cot.empresa_id,
+              proyecto_id: proyectoIdFinal,
+              nombre: String(epica_nombre).trim(),
+              descripcion: "Fase inicial de planificación y definición del proyecto.",
+              estado: "pendiente",
+              avance: 0,
+              destino: "PROYECTO",
+              source: "MANUAL",
+              es_planificado: true,
+              fecha_inicio_plan: inicioPlan,
+              fecha_fin_plan: finPlan,
+              dias_plan: diasPlan,
+            },
+            select: { id: true }
+          });
+
+          // Crear tarea inicial asociada a la épica creada
+          await tx.tarea.create({
+            data: {
+              empresa_id: cot.empresa_id,
+              proyecto_id: proyectoIdFinal,
+              destino: "PROYECTO",
+              epica_id: epica.id,
+              nombre: String(tarea_nombre).trim(),
+              descripcion: "Tarea inicial para arrancar el proyecto.",
+              estado: "pendiente",
+              avance: 0,
+              fecha_inicio_plan: inicioPlan,
+              fecha_fin_plan: finPlan,
+              dias_plan: diasPlan,
+              es_planificado: true,
+              source: "MANUAL",
+            }
+          });
         }
 
         // ✅ si ya existía proyecto y se vuelve a setear plan (por si acaso)
