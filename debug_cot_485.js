@@ -3,15 +3,12 @@ const prisma = new PrismaClient();
 
 async function main() {
   const cot = await prisma.cotizacion.findFirst({
-    where: { numero: 469 },
+    where: { numero: 476 },
     include: {
-      ventas: {
-        where: { eliminado: false },
-        include: { detalles: true }
-      }
+      glosas: true
     }
   });
-  console.log("=== COT 469 ===");
+  console.log("=== COT 476 ===");
   console.log(JSON.stringify(cot, null, 2));
 }
 

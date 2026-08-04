@@ -1880,6 +1880,19 @@ export const addPago = async (request, reply) => {
       }
     });
 
+    // ✅ Autotransición a PAGADA si llega a 100% y estaba en FACTURADA
+    const pagosActivos = await prisma.cotizacionPago.findMany({
+      where: { cotizacion_id: id, eliminado: false }
+    });
+    const totalPagado = pagosActivos.reduce((acc, p) => acc + Number(p.monto || 0), 0);
+
+    if (cot.total > 0 && totalPagado >= Number(cot.total) * 0.999 && cot.estado === "FACTURADA") {
+      await prisma.cotizacion.update({
+        where: { id: cot.id },
+        data: { estado: "PAGADA", fecha_pagada: new Date() }
+      });
+    }
+
     return reply.send(pago);
   } catch (e) {
     console.error("Error addPago:", e);
@@ -1905,6 +1918,20 @@ export const deletePago = async (request, reply) => {
       where: { id: pagoId },
       data: { eliminado: true, eliminado_en: new Date() }
     });
+
+    // ✅ Autoreversión de PAGADA a FACTURADA si el total de pagos cae de 100%
+    const pagosActivos = await prisma.cotizacionPago.findMany({
+      where: { cotizacion_id: pago.cotizacion_id, eliminado: false }
+    });
+    const totalPagado = pagosActivos.reduce((acc, p) => acc + Number(p.monto || 0), 0);
+
+    const cot = pago.cotizacion;
+    if (cot.estado === "PAGADA" && totalPagado < Number(cot.total) * 0.999) {
+      await prisma.cotizacion.update({
+        where: { id: cot.id },
+        data: { estado: "FACTURADA", fecha_pagada: null }
+      });
+    }
 
     return reply.send({ ok: true });
   } catch (e) {

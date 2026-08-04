@@ -880,6 +880,10 @@ model CotizacionPago {
   eliminado      Boolean   @default(false)
   eliminado_en   DateTime?
   
+  is_factoring              Boolean   @default(false)
+  factoring_descuento_pct   Float?
+  factoring_descuento_monto Float?
+  
   @@index([cotizacion_id])
 }
 
