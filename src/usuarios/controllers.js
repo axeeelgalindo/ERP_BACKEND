@@ -71,6 +71,10 @@ export const listUsuarios = async (request, reply) => {
     ...(q ? { OR: [{ nombre: { contains: q, mode: "insensitive" } }, { correo: { contains: q, mode: "insensitive" } }] } : {}),
     empresa_id: targetEmpresaId,
     eliminado: false,
+    OR: [
+      { empleado: null },
+      { empleado: { activo: true, eliminado: false } }
+    ]
   };
 
   const isAll = all === "true" || all === true;
