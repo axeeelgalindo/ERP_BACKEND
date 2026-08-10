@@ -13,7 +13,8 @@ export const LoginBody = Type.Object({
 export const UsuarioQuery = Type.Object({
   q: Type.Optional(Type.String()),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
-  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+  all: Type.Optional(Type.Union([Type.Boolean(), Type.String()])),
   empresaId: Type.Optional(Type.String()), // para master
   includeDeleted: Type.Optional(
     Type.Union([Type.Boolean(), Type.Integer({ minimum: 0, maximum: 1 })])
