@@ -980,7 +980,19 @@ export async function updateCompra(request, reply) {
       // imputación (NUEVO)
       data.destino = nextDestino;
       data.centro_costo = isProyecto ? null : nextCentroCosto;
-      data.proyecto_id = isProyecto ? nextProyectoId : null;
+      if (isProyecto) {
+        if (nextProyectoId) {
+          data.proyecto = { connect: { id: nextProyectoId } };
+        } else if (exists.proyecto_id) {
+          data.proyecto = { disconnect: true };
+        }
+      } else if (exists.proyecto_id) {
+        data.proyecto = { disconnect: true };
+      }
+
+      if (body.sub_destino !== undefined) data.sub_destino = body.sub_destino || null;
+      if (body.proyecto_interno !== undefined) data.proyecto_interno = body.proyecto_interno || null;
+      if (body.comentario_destino !== undefined) data.comentario_destino = body.comentario_destino || null;
 
       // rendición (solo si vino en body, o si cambió imputación y quieres forzar que se mantenga compatible)
       // Aquí lo dejamos: si NO vino rendicion_id, no lo tocamos.
@@ -1297,7 +1309,11 @@ export async function setCompraCosteos(req, reply) {
     if (linkedProyectoId && (!compra.proyecto_id || compra.proyecto_id !== linkedProyectoId)) {
       await tx.compra.update({
         where: { id: compraId },
-        data: { proyecto_id: linkedProyectoId, destino: "PROYECTO" }
+        data: {
+          proyecto: { connect: { id: linkedProyectoId } },
+          destino: "PROYECTO",
+          centro_costo: null,
+        }
       });
     }
 

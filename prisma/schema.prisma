@@ -1140,6 +1140,10 @@ model Compra {
   destino      CompraDestino @default(PROYECTO) // PROYECTO | ADMINISTRACION | TALLER
   centro_costo CentroCosto? // PMC | PUQ (solo ADMINISTRACION/TALLER)
 
+  sub_destino        String? // PROYECTO_INTERNO | EPP | INSUMOS | GENERAL
+  proyecto_interno   String?
+  comentario_destino String? @db.Text
+
   // ✅ Proyecto opcional (solo cuando destino = PROYECTO)
   proyecto_id String?
   proyecto    Proyecto? @relation(fields: [proyecto_id], references: [id], onDelete: Cascade)

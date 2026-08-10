@@ -1862,9 +1862,15 @@ export const addPago = async (request, reply) => {
   try {
     const { empresaId } = getScope(request);
     const { id } = request.params;
-    const { monto, fecha } = request.body || {};
+    const { 
+      monto, 
+      fecha, 
+      is_factoring, 
+      factoring_descuento_pct, 
+      factoring_descuento_monto 
+    } = request.body || {};
 
-    if (!monto) return reply.code(400).send({ error: "Falta monto del pago" });
+    if (!monto || Number(monto) <= 0) return reply.code(400).send({ error: "Falta monto del pago" });
 
     const cot = await prisma.cotizacion.findFirst({
       where: { id, empresa_id: empresaId, eliminado: false }
@@ -1872,11 +1878,22 @@ export const addPago = async (request, reply) => {
 
     if (!cot) return reply.code(404).send({ error: "Cotización no encontrada" });
 
+    const isFactoring = Boolean(is_factoring);
+    const descMonto = isFactoring && factoring_descuento_monto !== undefined && factoring_descuento_monto !== null ? Number(factoring_descuento_monto) : null;
+    const descPct = isFactoring && factoring_descuento_pct !== undefined && factoring_descuento_pct !== null ? Number(factoring_descuento_pct) : null;
+
+    if (isFactoring && descMonto !== null && descMonto > Number(monto)) {
+      return reply.code(400).send({ error: "El descuento de factoring no puede superar el monto del pago" });
+    }
+
     const pago = await prisma.cotizacionPago.create({
       data: {
         cotizacion_id: id,
         monto: Number(monto),
         fecha: fecha ? new Date(`${fecha}T12:00:00`) : new Date(),
+        is_factoring: isFactoring,
+        factoring_descuento_pct: descPct,
+        factoring_descuento_monto: descMonto,
       }
     });
 

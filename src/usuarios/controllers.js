@@ -60,7 +60,7 @@ export const me = async (request, reply) => {
 
 /* ============= CRUD USUARIOS ============= */
 export const listUsuarios = async (request, reply) => {
-  const { q, page = 1, pageSize = 20, empresaId } = request.query;
+  const { q, page = 1, pageSize = 1000, empresaId, all } = request.query;
   const { scope } = request;
 
   // si no es master o superadmin, fuerza empresaId del scope
@@ -70,14 +70,19 @@ export const listUsuarios = async (request, reply) => {
   const where = {
     ...(q ? { OR: [{ nombre: { contains: q, mode: "insensitive" } }, { correo: { contains: q, mode: "insensitive" } }] } : {}),
     empresa_id: targetEmpresaId,
+    eliminado: false,
   };
+
+  const isAll = all === "true" || all === true;
+  const takeVal = isAll ? undefined : Number(pageSize || 1000);
+  const skipVal = isAll ? undefined : (Number(page || 1) - 1) * Number(pageSize || 1000);
 
   const total = await prisma.usuario.count({ where });
   const data = await prisma.usuario.findMany({
     where,
-    skip: (page - 1) * pageSize,
-    take: pageSize,
-    orderBy: { creado_en: "desc" },
+    ...(takeVal ? { take: takeVal } : {}),
+    ...(skipVal ? { skip: skipVal } : {}),
+    orderBy: { nombre: "asc" },
     include: {
       empresa: { select: { id: true, nombre: true } },
       rol: { select: { id: true, nombre: true, codigo: true } },

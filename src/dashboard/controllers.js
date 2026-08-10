@@ -287,20 +287,25 @@ export const getDashboardData = async (request, reply) => {
     }, 0);
 
     // 4. Flujo Caja Periodo — Ingresos basados en pagos individuales (CotizacionPago)
-    // Cada hito de pago registrado en una cotización se contabiliza según su propia fecha
+    // Cada hito de pago registrado en una cotización se contabiliza según su propia fecha (descontando factoring si aplica)
     const ingresosPagadosMes = cotizaciones.reduce((acc, cot) => {
       if (!Array.isArray(cot.pagos) || cot.pagos.length === 0) return acc;
       let sumPeriodo = 0;
       for (const pago of cot.pagos) {
+        if (pago.eliminado) continue;
         if (isThisPeriod(pago.fecha)) {
-          const monto = Number(pago.monto || 0);
+          const montoBruto = Number(pago.monto || 0);
+          const descuentoFactoring = pago.is_factoring ? Number(pago.factoring_descuento_monto || 0) : 0;
+          const montoLiquido = Math.max(0, montoBruto - descuentoFactoring);
           b_ingresosMes.push({
-            concepto: `COT #${cot.numero} — Pago`,
+            concepto: `COT #${cot.numero} — Pago${pago.is_factoring ? ' (Factoring)' : ''}`,
             cliente: cot.cliente?.nombre || 'N/A',
-            total: monto,
+            total: montoLiquido,
+            monto_bruto: montoBruto,
+            descuento_factoring: descuentoFactoring,
             fecha_pago: pago.fecha,
           });
-          sumPeriodo += monto;
+          sumPeriodo += montoLiquido;
         }
       }
       return acc + sumPeriodo;
