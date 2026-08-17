@@ -64,6 +64,8 @@ await server.register(cors, {
     "http://localhost:3000",
     "http://localhost:3003",
     "http://127.0.0.1:3000",
+    "https://erp.blueinge.com",
+    "https://www.erp.blueinge.com",
     "https://erp-orcin-ten.vercel.app",
     "https://api-erp.blue-ingenieria.com",
   ],
