@@ -23,6 +23,8 @@ export const EmpleadoCreateBody = Type.Object({
   fecha_ingreso: Type.Optional(Type.String()), // ISO date
   sueldo_base: Type.Optional(Type.Integer()),
   activo: Type.Optional(Type.Boolean()),
+  jefe_id: Type.Optional(Type.Union([Id, Type.Null()])),
+  sede: Type.Optional(Type.String()),
 });
 
 export const EmpleadoUpdateBody = Type.Partial(EmpleadoCreateBody);

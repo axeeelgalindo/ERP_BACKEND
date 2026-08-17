@@ -697,6 +697,23 @@ export async function updateTarea(request, reply) {
     if (data.estado === "completada" || (data.avance >= 100)) {
       if (!fir) fir = new Date();
       if (!ffr) ffr = new Date();
+
+      let completadaPorId = data.completada_por_id || null;
+      if (!completadaPorId && scope.userId) {
+        const emp = await tx.empleado.findFirst({
+          where: { usuario_id: scope.userId, eliminado: false },
+          select: { id: true }
+        });
+        if (emp) completadaPorId = emp.id;
+        else if (data.responsable_id || tarea.responsable_id) {
+          completadaPorId = data.responsable_id || tarea.responsable_id;
+        }
+      }
+      data.completada_por_id = completadaPorId;
+      data.completada_en = ffr || new Date();
+    } else if (data.estado === "pendiente" || (data.avance === 0)) {
+      data.completada_por_id = null;
+      data.completada_en = null;
     }
 
     // Calcular días reales si tenemos inicio y fin pero no el contador

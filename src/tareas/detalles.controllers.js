@@ -439,19 +439,34 @@ export async function updateTareaDetalle(request, reply) {
       ffr = null;
       diasReales = null;
       data.estado = "en_progreso";
-      // si quieres, puedes fijar avance mínimo:
+      data.completada_por_id = null;
+      data.completada_en = null;
       if (typeof data.avance === "undefined") {
         data.avance = current.avance && current.avance > 0 ? current.avance : 0;
       }
     } else if (accion === "finish") {
       // finalizar actividad
       if (!fir) {
-        fir = new Date(); // si nunca se marcó inicio, usamos ahora
+        fir = new Date();
       }
       ffr = new Date();
       diasReales = daysBetweenInclusive(fir, ffr);
       data.estado = "completada";
       data.avance = 100;
+
+      let completadaPorId = data.completada_por_id || null;
+      if (!completadaPorId && scope.userId) {
+        const emp = await tx.empleado.findFirst({
+          where: { usuario_id: scope.userId, eliminado: false },
+          select: { id: true }
+        });
+        if (emp) completadaPorId = emp.id;
+        else if (data.responsable_id || current.responsable_id) {
+          completadaPorId = data.responsable_id || current.responsable_id;
+        }
+      }
+      data.completada_por_id = completadaPorId;
+      data.completada_en = ffr;
     } else if (accion === "reset") {
       // volver a pendiente
       fir = null;
@@ -459,18 +474,36 @@ export async function updateTareaDetalle(request, reply) {
       diasReales = null;
       data.estado = "pendiente";
       data.avance = 0;
+      data.completada_por_id = null;
+      data.completada_en = null;
     } else {
       // Si no hay acción pero se cambia el estado manualmente
-      if (data.estado === "completada") {
+      if (data.estado === "completada" || data.avance >= 100) {
         data.avance = 100;
         if (!fir) fir = new Date();
         if (!ffr) ffr = new Date();
         diasReales = daysBetweenInclusive(fir, ffr);
-      } else if (data.estado === "pendiente") {
+
+        let completadaPorId = data.completada_por_id || null;
+        if (!completadaPorId && scope.userId) {
+          const emp = await tx.empleado.findFirst({
+            where: { usuario_id: scope.userId, eliminado: false },
+            select: { id: true }
+          });
+          if (emp) completadaPorId = emp.id;
+          else if (data.responsable_id || current.responsable_id) {
+            completadaPorId = data.responsable_id || current.responsable_id;
+          }
+        }
+        data.completada_por_id = completadaPorId;
+        data.completada_en = ffr;
+      } else if (data.estado === "pendiente" || data.avance === 0) {
         data.avance = 0;
         fir = null;
         ffr = null;
         diasReales = null;
+        data.completada_por_id = null;
+        data.completada_en = null;
       }
     }
 

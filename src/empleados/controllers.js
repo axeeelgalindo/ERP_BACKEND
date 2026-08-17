@@ -88,7 +88,7 @@ export const listEmpleados = async (request, reply) => {
       : {}),
   };
 
-  const [total, data] = await Promise.all([
+  const [total, rawData] = await Promise.all([
     prisma.empleado.count({ where }),
     prisma.empleado.findMany({
       where,
@@ -111,6 +111,44 @@ export const listEmpleados = async (request, reply) => {
       },
     }),
   ]);
+
+  // Poblar jefes y conteo de subordinados
+  const jefeIds = [...new Set(rawData.map((e) => e.jefe_id).filter(Boolean))];
+  const empIds = rawData.map((e) => e.id);
+
+  const [jefesList, subordinadosList] = await Promise.all([
+    jefeIds.length > 0
+      ? prisma.empleado.findMany({
+          where: { id: { in: jefeIds } },
+          include: {
+            usuario: { select: { id: true, nombre: true, correo: true } },
+          },
+        })
+      : [],
+    empIds.length > 0
+      ? prisma.empleado.findMany({
+          where: { jefe_id: { in: empIds }, eliminado: false },
+          select: { id: true, jefe_id: true },
+        })
+      : [],
+  ]);
+
+  const jefeMap = new Map(jefesList.map((j) => [j.id, j]));
+  const subCountMap = new Map();
+  subordinadosList.forEach((s) => {
+    if (s.jefe_id) {
+      subCountMap.set(s.jefe_id, (subCountMap.get(s.jefe_id) || 0) + 1);
+    }
+  });
+
+  const data = rawData.map((e) => ({
+    ...e,
+    jefe: e.jefe_id ? jefeMap.get(e.jefe_id) || null : null,
+    _count: {
+      ...e._count,
+      subordinados: subCountMap.get(e.id) || 0,
+    },
+  }));
 
   return reply.send({ total, data, items: data });
 };
@@ -144,7 +182,35 @@ export const getEmpleado = async (request, reply) => {
     return reply.forbidden("Empleado fuera de tu empresa");
   }
 
-  return reply.send(emp);
+  // Traer jefe y subordinados
+  const [jefe, subordinados] = await Promise.all([
+    emp.jefe_id
+      ? prisma.empleado.findUnique({
+          where: { id: emp.jefe_id },
+          include: {
+            usuario: { select: { id: true, nombre: true, correo: true } },
+          },
+        })
+      : null,
+    prisma.empleado.findMany({
+      where: { jefe_id: emp.id, eliminado: false },
+      include: {
+        usuario: { select: { id: true, nombre: true, correo: true } },
+      },
+    }),
+  ]);
+
+  const result = {
+    ...emp,
+    jefe,
+    subordinados,
+    _count: {
+      ...emp._count,
+      subordinados: subordinados.length,
+    },
+  };
+
+  return reply.send(result);
 };
 
 
@@ -233,6 +299,8 @@ export const createEmpleado = async (request, reply) => {
         usuario_id: usuarioIdFinal,
         cargo: body.cargo ?? null,
         telefono: body.telefono ?? null,
+        jefe_id: body.jefe_id || null,
+        sede: body.sede || "PMC",
         fecha_ingreso: body.fecha_ingreso ? new Date(`${String(body.fecha_ingreso).slice(0, 10)}T12:00:00`) : null,
         sueldo_base:
           typeof body.sueldo_base === "number"
@@ -292,6 +360,8 @@ export const updateEmpleado = async (request, reply) => {
     ...(body.usuario_id !== undefined ? { usuario_id: body.usuario_id } : {}),
     ...(body.cargo !== undefined ? { cargo: body.cargo } : {}),
     ...(body.telefono !== undefined ? { telefono: body.telefono } : {}),
+    ...(body.jefe_id !== undefined ? { jefe_id: body.jefe_id || null } : {}),
+    ...(body.sede !== undefined ? { sede: body.sede || "PMC" } : {}),
     ...(body.fecha_ingreso !== undefined
       ? {
           fecha_ingreso: body.fecha_ingreso

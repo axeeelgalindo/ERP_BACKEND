@@ -52,6 +52,18 @@ export default async function proyectosRoutes(server) {
     updateProyecto,
   );
 
+  server.patch(
+    "/proyectos/:id",
+    { schema: { params: ProyectoIdParam, body: ProyectoUpdateBody }, ...guard },
+    updateProyecto,
+  );
+
+  server.put(
+    "/proyectos/:id",
+    { schema: { params: ProyectoIdParam, body: ProyectoUpdateBody }, ...guard },
+    updateProyecto,
+  );
+
   server.delete(
     "/proyectos/delete/:id",
     { schema: { params: ProyectoIdParam }, ...guard },

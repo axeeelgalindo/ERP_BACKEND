@@ -148,11 +148,26 @@ export const listCotizaciones = async (request, reply) => {
           where: { eliminado: false },
           include: { detalles: true },
         },
+        compras: {
+          where: { eliminado: false },
+          select: {
+            id: true,
+            numero: true,
+            total: true,
+            estado: true,
+            folio: true,
+            fecha_docto: true,
+            creada_en: true,
+            factura_url: true,
+            proveedor: { select: { id: true, nombre: true, rut: true } },
+          },
+          orderBy: { creada_en: "desc" },
+        },
         adjuntos: { orderBy: { creado_en: "asc" } }
       },
     });
 
-    // ✅ calcular avance de pago pct
+    // ✅ calcular avance de pago pct y costos de compras
     const result = cotizaciones.map((c) => {
       const totalVentas = (c.ventas || []).reduce(
         (acc, v) => acc + calcTotalVenta(v),
@@ -162,11 +177,16 @@ export const listCotizaciones = async (request, reply) => {
         (acc, p) => acc + Number(p.monto || 0),
         0
       );
+      const totalCompras = (c.compras || []).reduce(
+        (acc, comp) => acc + Number(comp.total || 0),
+        0
+      );
       const pct = c.total > 0 ? (totalPagado / c.total) * 100 : 0;
       return {
         ...c,
         total_ventas: totalVentas,
         total_pagado: totalPagado,
+        total_compras: totalCompras,
         avance_pago_pct: Math.min(100, pct),
       };
     });
@@ -203,6 +223,23 @@ export const getCotizacion = async (request, reply) => {
         vendedor: { select: { id: true, nombre: true, correo: true } },
         glosas: { orderBy: { orden: "asc" } },
         pagos: { where: { eliminado: false }, orderBy: { fecha: "desc" } },
+        compras: {
+          where: { eliminado: false },
+          select: {
+            id: true,
+            numero: true,
+            total: true,
+            estado: true,
+            folio: true,
+            fecha_docto: true,
+            creada_en: true,
+            factura_url: true,
+            factura_numero: true,
+            proveedor: { select: { id: true, nombre: true, rut: true } },
+            items: { select: { id: true, item: true, cantidad: true, precio_unit: true, total: true } },
+          },
+          orderBy: { creada_en: "desc" },
+        },
         adjuntos: { orderBy: { creado_en: "asc" } }
       },
     });

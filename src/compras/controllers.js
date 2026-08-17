@@ -423,6 +423,7 @@ export async function listCompras(request, reply) {
       ...(Number.isFinite(Number(q)) ? [{ numero: Number(q) }] : []),
       { proveedor: { nombre: { contains: String(q), mode: "insensitive" } } },
       { proyecto: { nombre: { contains: String(q), mode: "insensitive" } } },
+      { cotizacion: { asunto: { contains: String(q), mode: "insensitive" } } },
       { folio: { contains: String(q), mode: "insensitive" } },
       { razon_social: { contains: String(q), mode: "insensitive" } },
       { rut_proveedor: { contains: String(q), mode: "insensitive" } },
@@ -439,7 +440,7 @@ export async function listCompras(request, reply) {
       include: {
         proveedor: { select: { id: true, nombre: true, rut: true } },
         proyecto: { select: { id: true, nombre: true } },
-        cotizacion: { select: { id: true, numero: true, estado: true } },
+        cotizacion: { select: { id: true, numero: true, estado: true, asunto: true, es_suscripcion: true, cliente: { select: { id: true, nombre: true } } } },
         empresa: true,
 
         // ✅ NUEVO: para mostrar en tabla / modal
@@ -554,17 +555,21 @@ export async function createCompra(request, reply) {
     const estadoNorm = normalizeEstadoCompra(body.estado) || "ORDEN_COMPRA";
 
     // ✅ NUEVO
-    let destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | ADMINISTRACION | TALLER
+    let destino = String(body.destino || "PROYECTO").toUpperCase(); // PROYECTO | SERVICIO | ADMINISTRACION | TALLER
     let centro_costo = body.centro_costo ? String(body.centro_costo).toUpperCase() : null; // PMC | PUQ
     let proyecto_id = body.proyecto_id ?? null;
+    let cotizacionId = body.cotizacionId ?? body.servicio_id ?? null;
 
-    if (body.cotizacionId) {
+    if (cotizacionId && destino !== "SERVICIO") {
       const cotizacion = await prisma.cotizacion.findUnique({
-        where: { id: body.cotizacionId },
-        select: { id: true, proyecto_id: true, empresa_id: true }
+        where: { id: cotizacionId },
+        select: { id: true, proyecto_id: true, empresa_id: true, es_suscripcion: true }
       });
       if (cotizacion && cotizacion.empresa_id === empresa_id) {
-        if (cotizacion.proyecto_id) {
+        if (cotizacion.es_suscripcion) {
+          destino = "SERVICIO";
+          centro_costo = null;
+        } else if (cotizacion.proyecto_id) {
           destino = "PROYECTO";
           proyecto_id = cotizacion.proyecto_id;
           centro_costo = null;
@@ -580,10 +585,11 @@ export async function createCompra(request, reply) {
 
     // ✅ VALIDACIONES (imputación)
     const isProyecto = destino === "PROYECTO";
+    const isServicio = destino === "SERVICIO";
     const isAdminOTaller = destino === "ADMINISTRACION" || destino === "TALLER";
 
-    if (!isProyecto && !isAdminOTaller) {
-      return reply.code(400).send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
+    if (!isProyecto && !isServicio && !isAdminOTaller) {
+      return reply.code(400).send({ error: "destino inválido (PROYECTO | SERVICIO | ADMINISTRACION | TALLER)" });
     }
 
     if (isProyecto) {
@@ -592,6 +598,15 @@ export async function createCompra(request, reply) {
       }
       if (centro_costo) {
         return reply.code(400).send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
+      }
+    }
+
+    if (isServicio) {
+      if (!cotizacionId) {
+        return reply.code(400).send({ error: "Debe seleccionar un servicio (cotizacionId) cuando destino = SERVICIO" });
+      }
+      if (centro_costo) {
+        return reply.code(400).send({ error: "centro_costo debe ser null cuando destino = SERVICIO" });
       }
     }
 
@@ -607,9 +622,10 @@ export async function createCompra(request, reply) {
     const created = await prisma.$transaction(async (tx) => {
       // ✅ Antes validabas siempre proyecto; ahora depende del destino
       if (isProyecto && proyecto_id) await assertEntidadEmpresa(tx, "proyecto", proyecto_id, empresa_id);
+      if (isServicio && proyecto_id) await assertEntidadEmpresa(tx, "proyecto", proyecto_id, empresa_id);
 
       await assertEntidadEmpresa(tx, "proveedor", body.proveedorId, empresa_id);
-      await assertEntidadEmpresa(tx, "cotizacion", body.cotizacionId, empresa_id);
+      if (cotizacionId) await assertEntidadEmpresa(tx, "cotizacion", cotizacionId, empresa_id);
 
       // Validar productos/proveedores de items
       for (const it of items) {
@@ -657,10 +673,10 @@ export async function createCompra(request, reply) {
           centro_costo: centro_costo ?? null,
           rendicion_id: rendicion_id ?? null,
 
-          proyecto_id: isProyecto ? proyecto_id : null,
+          proyecto_id: isProyecto ? proyecto_id : (isServicio ? proyecto_id || null : null),
 
           proveedorId: body.proveedorId ?? null,
-          cotizacionId: body.cotizacionId ?? null,
+          cotizacionId: cotizacionId ?? null,
 
           estado: estadoNorm,
           total: Number(total || 0),
@@ -833,13 +849,21 @@ export async function updateCompra(request, reply) {
     let nextProyectoId =
       body.proyecto_id !== undefined ? body.proyecto_id || null : exists.proyecto_id || null;
 
-    if (body.cotizacionId !== undefined && body.cotizacionId) {
+    let nextCotizacionId =
+      body.cotizacionId !== undefined
+        ? body.cotizacionId || null
+        : exists.cotizacionId || null;
+
+    if (body.cotizacionId !== undefined && body.cotizacionId && nextDestino !== "SERVICIO") {
       const cotizacion = await prisma.cotizacion.findUnique({
         where: { id: body.cotizacionId },
-        select: { id: true, proyecto_id: true, empresa_id: true }
+        select: { id: true, proyecto_id: true, empresa_id: true, es_suscripcion: true }
       });
       if (cotizacion && cotizacion.empresa_id === empresa_id) {
-        if (cotizacion.proyecto_id) {
+        if (cotizacion.es_suscripcion) {
+          nextDestino = "SERVICIO";
+          nextCentroCosto = null;
+        } else if (cotizacion.proyecto_id) {
           nextDestino = "PROYECTO";
           nextProyectoId = cotizacion.proyecto_id;
           nextCentroCosto = null;
@@ -864,12 +888,13 @@ export async function updateCompra(request, reply) {
 
     // ===== Validaciones imputación (idénticas a CREATE)
     const isProyecto = nextDestino === "PROYECTO";
+    const isServicio = nextDestino === "SERVICIO";
     const isAdminOTaller = nextDestino === "ADMINISTRACION" || nextDestino === "TALLER";
 
-    if (!isProyecto && !isAdminOTaller) {
+    if (!isProyecto && !isServicio && !isAdminOTaller) {
       return reply
         .code(400)
-        .send({ error: "destino inválido (PROYECTO | ADMINISTRACION | TALLER)" });
+        .send({ error: "destino inválido (PROYECTO | SERVICIO | ADMINISTRACION | TALLER)" });
     }
 
     if (isProyecto) {
@@ -882,6 +907,19 @@ export async function updateCompra(request, reply) {
         return reply
           .code(400)
           .send({ error: "centro_costo debe ser null cuando destino = PROYECTO" });
+      }
+    }
+
+    if (isServicio) {
+      if (!nextCotizacionId) {
+        return reply
+          .code(400)
+          .send({ error: "Debe seleccionar un servicio (cotizacionId) cuando destino = SERVICIO" });
+      }
+      if (nextCentroCosto) {
+        return reply
+          .code(400)
+          .send({ error: "centro_costo debe ser null cuando destino = SERVICIO" });
       }
     }
 
@@ -902,7 +940,7 @@ export async function updateCompra(request, reply) {
     // ===== Transaction
     const updated = await prisma.$transaction(async (tx) => {
       // Validar entidades si cambiaron (y si aplican)
-      if (isProyecto && nextProyectoId && nextProyectoId !== exists.proyecto_id) {
+      if ((isProyecto || isServicio) && nextProyectoId && nextProyectoId !== exists.proyecto_id) {
         await assertEntidadEmpresa(tx, "proyecto", nextProyectoId, empresa_id);
       }
 
@@ -979,8 +1017,14 @@ export async function updateCompra(request, reply) {
 
       // imputación (NUEVO)
       data.destino = nextDestino;
-      data.centro_costo = isProyecto ? null : nextCentroCosto;
+      data.centro_costo = (isProyecto || isServicio) ? null : nextCentroCosto;
       if (isProyecto) {
+        if (nextProyectoId) {
+          data.proyecto = { connect: { id: nextProyectoId } };
+        } else if (exists.proyecto_id) {
+          data.proyecto = { disconnect: true };
+        }
+      } else if (isServicio) {
         if (nextProyectoId) {
           data.proyecto = { connect: { id: nextProyectoId } };
         } else if (exists.proyecto_id) {
@@ -1001,6 +1045,7 @@ export async function updateCompra(request, reply) {
       // resto campos existentes
       if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
       if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
+      else if (isServicio && nextCotizacionId) data.cotizacionId = nextCotizacionId;
       if (estadoNorm) data.estado = estadoNorm;
       if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado);
 
@@ -1491,8 +1536,8 @@ export async function createOrdenCompraProveedor(request, reply) {
         data: {
           empresa_id,
           destino: destino || "PROYECTO",
-          centro_costo: destino !== "PROYECTO" ? centro_costo : null,
-          proyecto_id: destino === "PROYECTO" ? proyecto_id : null,
+          centro_costo: (destino === "PROYECTO" || destino === "SERVICIO") ? null : centro_costo,
+          proyecto_id: destino === "PROYECTO" ? proyecto_id : (destino === "SERVICIO" ? proyecto_id || null : null),
           proveedorId: proveedorId || null,
           cotizacionId: cotizacionId || null,
           estado: "ORDEN_COMPRA", // default mapping

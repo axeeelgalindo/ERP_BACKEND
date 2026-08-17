@@ -140,6 +140,14 @@ model Empleado {
   salud_id String?
   salud    SaludConfig? @relation(fields: [salud_id], references: [id], onDelete: SetNull)
 
+  // Jefatura / Equipos
+  jefe_id      String?
+  jefe         Empleado?  @relation("JefaturaSubordinados", fields: [jefe_id], references: [id], onDelete: SetNull)
+  subordinados Empleado[] @relation("JefaturaSubordinados")
+
+  // Sede (PMC: Puerto Montt, PUQ: Punta Arenas)
+  sede String? @default("PMC")
+
   Rendicion Rendicion[]
   proyectos ProyectoMiembro[]
 
@@ -148,6 +156,10 @@ model Empleado {
 
   // Responsable de subtareas
   detalles TareaDetalle[] @relation("EmpleadoTareaDetalle")
+
+  // Tareas/subtareas completadas por este empleado
+  tareasCompletadas    Tarea[]        @relation("TareaCompletadaPor")
+  detallesCompletados TareaDetalle[] @relation("TareaDetalleCompletadaPor")
 
   // Responsable de epicas
   epicas Epica[] @relation("EmpleadoEpica")
@@ -160,6 +172,7 @@ model Empleado {
 
   @@index([afp_id])
   @@index([salud_id])
+  @@index([jefe_id])
 }
 
 model EmpleadoDocumento {
@@ -535,6 +548,11 @@ model Tarea {
   responsable_id String?
   responsable    Empleado? @relation(fields: [responsable_id], references: [id], onDelete: SetNull)
 
+  // Quién completó la tarea y fecha de término
+  completada_por_id String?
+  completada_por    Empleado? @relation("TareaCompletadaPor", fields: [completada_por_id], references: [id], onDelete: SetNull)
+  completada_en     DateTime?
+
   epica_id String?
   epica    Epica?  @relation(fields: [epica_id], references: [id], onDelete: SetNull)
 
@@ -592,6 +610,7 @@ model Tarea {
   @@index([epica_id])
   @@index([proyecto_id])
   @@index([responsable_id])
+  @@index([completada_por_id])
   @@index([estado])
 }
 
@@ -605,6 +624,11 @@ model TareaDetalle {
 
   responsable_id String?
   responsable    Empleado? @relation("EmpleadoTareaDetalle", fields: [responsable_id], references: [id], onDelete: SetNull)
+
+  // Quién completó la subtarea y fecha
+  completada_por_id String?
+  completada_por    Empleado? @relation("TareaDetalleCompletadaPor", fields: [completada_por_id], references: [id], onDelete: SetNull)
+  completada_en     DateTime?
 
   estado String @default("pendiente")
   avance Int    @default(0)
@@ -1114,6 +1138,7 @@ model TipoItem {
 
 enum CompraDestino {
   PROYECTO
+  SERVICIO
   ADMINISTRACION
   TALLER
 }
@@ -1137,7 +1162,7 @@ model Compra {
   empresa    Empresa @relation(fields: [empresa_id], references: [id], onDelete: Cascade)
 
   // ✅ NUEVO: imputación (no solo proyecto)
-  destino      CompraDestino @default(PROYECTO) // PROYECTO | ADMINISTRACION | TALLER
+  destino      CompraDestino @default(PROYECTO) // PROYECTO | SERVICIO | ADMINISTRACION | TALLER
   centro_costo CentroCosto? // PMC | PUQ (solo ADMINISTRACION/TALLER)
 
   sub_destino        String? // PROYECTO_INTERNO | EPP | INSUMOS | GENERAL
