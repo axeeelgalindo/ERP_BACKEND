@@ -780,15 +780,21 @@ export async function asignarRendicionACompra(request, reply) {
           data: {
             destino: rend.destino,
             centro_costo: rend.centro_costo,
-            proyecto_id: rend.proyecto_id
-          }
+            ...(rend.proyecto_id
+              ? { proyecto: { connect: { id: rend.proyecto_id } } }
+              : compra.proyecto_id
+                ? { proyecto: { disconnect: true } }
+                : {}),
+          },
         });
       }
 
       // 3) update compra
       const row = await tx.compra.update({
         where: { id: compra.id },
-        data: { rendicion_id },
+        data: {
+          rendicion: rendicion_id ? { connect: { id: rendicion_id } } : { disconnect: true },
+        },
         include: {
           rendicion: { select: { id: true, estado: true, monto_total: true, descripcion: true } },
         },
@@ -1038,14 +1044,40 @@ export async function updateCompra(request, reply) {
       if (body.proyecto_interno !== undefined) data.proyecto_interno = body.proyecto_interno || null;
       if (body.comentario_destino !== undefined) data.comentario_destino = body.comentario_destino || null;
 
-      // rendición (solo si vino en body, o si cambió imputación y quieres forzar que se mantenga compatible)
-      // Aquí lo dejamos: si NO vino rendicion_id, no lo tocamos.
-      if (wantsChangeRendicion) data.rendicion_id = nextRendicionId;
+      // rendición
+      if (wantsChangeRendicion) {
+        if (nextRendicionId) {
+          data.rendicion = { connect: { id: nextRendicionId } };
+        } else if (exists.rendicion_id) {
+          data.rendicion = { disconnect: true };
+        }
+      }
 
-      // resto campos existentes
-      if (body.proveedorId !== undefined) data.proveedorId = body.proveedorId || null;
-      if (body.cotizacionId !== undefined) data.cotizacionId = body.cotizacionId || null;
-      else if (isServicio && nextCotizacionId) data.cotizacionId = nextCotizacionId;
+      // proveedor
+      if (body.proveedorId !== undefined) {
+        if (body.proveedorId) {
+          data.proveedor = { connect: { id: body.proveedorId } };
+        } else if (exists.proveedorId) {
+          data.proveedor = { disconnect: true };
+        }
+      }
+
+      // cotización
+      const targetCotId =
+        body.cotizacionId !== undefined
+          ? body.cotizacionId || null
+          : isServicio && nextCotizacionId
+            ? nextCotizacionId
+            : undefined;
+
+      if (targetCotId !== undefined) {
+        if (targetCotId) {
+          data.cotizacion = { connect: { id: targetCotId } };
+        } else if (exists.cotizacionId) {
+          data.cotizacion = { disconnect: true };
+        }
+      }
+
       if (estadoNorm) data.estado = estadoNorm;
       if (body.eliminado !== undefined) data.eliminado = Boolean(body.eliminado);
 
