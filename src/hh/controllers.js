@@ -191,11 +191,12 @@ function isAdminLike(user) {
   const role = getRoleCodeFromUser(user);
   // normalizeText => lowercase
   return (
-    role === "ADMIN" ||
+    role === "admin" ||
     role === "superadmin" ||
     role === "super-admin" ||
     role === "super_admin" ||
-    role === "administrador"
+    role === "administrador" ||
+    role === "master"
   );
 }
 
