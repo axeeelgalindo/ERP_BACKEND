@@ -1416,11 +1416,11 @@ export async function getReporteFinancieroProyecto(req, reply) {
 
     // 3. METRICAS DE COSTEO CONSOLIDADO
     const costoTotalPlan = (costeoPlanCompras + costeoPlanHH) > 0 ? (costeoPlanCompras + costeoPlanHH) : Number(proyecto.presupuesto || 0);
-    const utilidadReal = montoCobradoNeto - montoTotalCompras;
+    const utilidadReal = montoTotalVentaNeto - montoTotalCompras;
     const utilidadPlan = montoTotalVentaNeto - costoTotalPlan;
 
     const margenPlanPct = montoTotalVentaNeto > 0 ? Number(((utilidadPlan / montoTotalVentaNeto) * 100).toFixed(1)) : 0;
-    const margenRealPct = montoCobradoNeto > 0 ? Number(((utilidadReal / montoCobradoNeto) * 100).toFixed(1)) : 0;
+    const margenRealPct = montoTotalVentaNeto > 0 ? Number(((utilidadReal / montoTotalVentaNeto) * 100).toFixed(1)) : 0;
 
     const pctConsumoCompras = costeoPlanCompras > 0 ? Number(((montoTotalCompras / costeoPlanCompras) * 100).toFixed(1)) : 0;
 
@@ -1438,15 +1438,15 @@ export async function getReporteFinancieroProyecto(req, reply) {
       const montoEfectivo = isNC ? -f.total : f.total;
       acumuladoGasto += montoEfectivo;
       return {
-        id: f.id,
         index: idx + 1,
+        id: f.id,
+        folio: f.folio,
         fecha: f.fecha,
         fechaFormatted: new Date(f.fecha).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }),
-        folio: f.folio,
         proveedor: f.proveedor,
         monto: montoEfectivo,
         acumulado: Math.max(0, acumuladoGasto),
-        presupuestoTecho: costeoPlanCompras > 0 ? costeoPlanCompras : null,
+        presupuesto: costeoPlanCompras > 0 ? costeoPlanCompras : null,
       };
     });
 
@@ -1501,7 +1501,26 @@ export async function getReporteFinancieroProyecto(req, reply) {
         };
       });
 
-    const cliente = proyecto.cliente || cotizacionPrincipal?.cliente || cotizaciones.find(c => c.cliente)?.cliente || null;
+    // Búsqueda exhaustiva y en cascada de Cliente
+    let cliente = proyecto.cliente || cotizacionPrincipal?.cliente || cotizaciones.find(c => c.cliente)?.cliente || null;
+
+    if (!cliente && proyecto.cliente_id) {
+      cliente = await prisma.cliente.findUnique({
+        where: { id: proyecto.cliente_id },
+        select: { id: true, nombre: true, rut: true }
+      }).catch(() => null);
+    }
+
+    if (!cliente) {
+      const anyCot = await prisma.cotizacion.findFirst({
+        where: { proyecto_id: proyecto.id },
+        include: { cliente: true },
+        orderBy: { creada_en: "desc" }
+      }).catch(() => null);
+      if (anyCot?.cliente) {
+        cliente = anyCot.cliente;
+      }
+    }
 
     return reply.send({
       ok: true,
