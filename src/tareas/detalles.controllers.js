@@ -529,9 +529,13 @@ export async function updateTareaDetalle(request, reply) {
       ? data.horas_plan
       : current.horas_plan;
 
-    const horasReal = Object.prototype.hasOwnProperty.call(data, "horas_real")
+    let horasReal = Object.prototype.hasOwnProperty.call(data, "horas_real")
       ? data.horas_real
       : current.horas_real;
+
+    if ((horasReal == null || Number(horasReal) <= 0) && (data.estado === "completada" || accion === "finish" || Number(data.avance || 0) >= 100)) {
+      horasReal = horasPlan ?? (diasPlan ? diasPlan * 8 : 8);
+    }
 
     const costoPlan =
       valorHora != null && horasPlan != null ? valorHora * horasPlan : null;

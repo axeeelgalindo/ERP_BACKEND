@@ -8,6 +8,7 @@ import {
   updateCompra,
   listComprasDisponiblesVenta,
   importComprasCSV,
+  importComprasClassified,
 
   // ✅ NUEVO
   uploadFacturaCompra,
@@ -39,6 +40,7 @@ export default async function compraRoutes(server) {
   server.post("/compras/ordenes-compra", createOrdenCompraProveedor);
   // upload csv
   server.post("/compras/import-csv", importComprasCSV);
+  server.post("/compras/import-classified", importComprasClassified);
 
   // ✅ subir factura pdf
   server.post("/compras/:id/factura", uploadFacturaCompra);

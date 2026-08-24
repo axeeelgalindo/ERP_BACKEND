@@ -12,7 +12,8 @@ import {
   reporteDevengadoProyecto,
   obtenerInfoProyecto,
   addProyectoRetraso,
-  addMiembroProyecto
+  addMiembroProyecto,
+  getReporteFinancieroProyecto,
 } from "./controllers.js";
 import { reporteDevengadoProfesional } from "./devengado_new.js";
 
@@ -31,6 +32,7 @@ export default async function proyectosRoutes(server) {
     : {};
 
   server.get("/proyectos/:id/devengado", reporteDevengadoProfesional);
+  server.get("/proyectos/:id/reporte-financiero", getReporteFinancieroProyecto);
 
   server.get("/proyectos", listProyectos);
 

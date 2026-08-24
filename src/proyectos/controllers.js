@@ -1177,3 +1177,394 @@ export async function addMiembroProyecto(req, reply) {
 
   return reply.send({ ok: true, miembro });
 }
+
+/* ==========================================================
+   REPORTE FINANCIERO DE PROYECTO
+   ========================================================== */
+export async function getReporteFinancieroProyecto(req, reply) {
+  try {
+    const scope = resolveScope(req);
+    const { id } = req.params;
+
+    const where = {
+      id,
+      eliminado: false,
+      ...(scope.isMaster ? {} : { empresa_id: scope.empresaId }),
+    };
+
+    const proyecto = await prisma.proyecto.findFirst({
+      where,
+      include: {
+        empresa: {
+          select: {
+            id: true,
+            nombre: true,
+            rut: true,
+            logo_url: true,
+            direccion: true,
+            telefono: true,
+            correo: true,
+          }
+        },
+        cliente: true,
+        tareas: {
+          where: { eliminado: false },
+          include: {
+            epica: { select: { id: true, nombre: true } },
+            responsable: {
+              include: {
+                usuario: { select: { nombre: true } },
+                hhRegistros: {
+                  orderBy: [{ anio: "desc" }, { mes: "desc" }],
+                  take: 1,
+                }
+              }
+            },
+            detalles: {
+              where: { eliminado: false },
+              include: {
+                responsable: {
+                  include: {
+                    usuario: { select: { nombre: true } },
+                    hhRegistros: {
+                      orderBy: [{ anio: "desc" }, { mes: "desc" }],
+                      take: 1,
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        cotizaciones: {
+          where: { eliminado: false, estado: { not: "RECHAZADA" } },
+          include: {
+            pagos: {
+              where: { eliminado: false },
+              orderBy: { fecha: "asc" }
+            },
+            ventas: {
+              where: { eliminado: false },
+              include: {
+                detalles: {
+                  select: {
+                    id: true,
+                    descripcion: true,
+                    cantidad: true,
+                    costoTotal: true,
+                    ventaTotal: true,
+                    modo: true,
+                  }
+                },
+                asignaciones_costeo: {
+                  include: {
+                    compra: {
+                      include: {
+                        proveedor: true,
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          orderBy: { numero: "desc" }
+        },
+        compras: {
+          where: { eliminado: false },
+          include: {
+            proveedor: true,
+          },
+          orderBy: { fecha_docto: "asc" }
+        },
+      }
+    });
+
+    if (!proyecto) {
+      return httpError(reply, 404, "Proyecto no encontrado");
+    }
+
+    // 1. COTIZACIONES, COBRANZA Y COSTEO PLANIFICADO
+    const cotizaciones = proyecto.cotizaciones || [];
+    const cotizacionPrincipal = cotizaciones[0] || null;
+    const nroCot = cotizacionPrincipal ? cotizacionPrincipal.numero : null;
+
+    let montoTotalVentaNeto = 0;
+    let montoTotalVentaBruto = 0;
+    let ivaTotalVenta = 0;
+
+    let montoCobradoBruto = 0;
+    let montoCobradoNeto = 0;
+
+    let costeoPlanCompras = 0;
+    let costeoPlanHH = 0;
+    let horasPlanHH = 0;
+
+    cotizaciones.forEach(c => {
+      const net = Number(c.subtotal || 0);
+      const gross = Number(c.total || 0);
+      const tax = Number(c.iva || (gross - net));
+      montoTotalVentaNeto += net;
+      montoTotalVentaBruto += gross;
+      ivaTotalVenta += tax;
+
+      // Calcular cobrado real de los pagos registrados en la cotización
+      const pagos = c.pagos || [];
+      if (pagos.length > 0) {
+        const pagadoBrutoCot = pagos.reduce((acc, p) => acc + Number(p.monto || 0), 0);
+        montoCobradoBruto += pagadoBrutoCot;
+        if (gross > 0) {
+          montoCobradoNeto += Math.round((pagadoBrutoCot / gross) * net);
+        } else {
+          montoCobradoNeto += Math.round(pagadoBrutoCot / 1.19);
+        }
+      } else if (c.estado === "PAGADA") {
+        montoCobradoBruto += gross;
+        montoCobradoNeto += net;
+      }
+
+      (c.ventas || []).forEach(v => {
+        (v.detalles || []).forEach(d => {
+          const modo = String(d.modo || "").toUpperCase();
+          if (modo === "HH") {
+            costeoPlanHH += Number(d.costoTotal || 0);
+            horasPlanHH += Number(d.cantidad || 0);
+          } else if (modo === "COMPRA") {
+            costeoPlanCompras += Number(d.costoTotal || 0);
+          }
+        });
+      });
+    });
+
+    const ivaCobrado = montoCobradoBruto - montoCobradoNeto;
+    const saldoPorCobrarNeto = Math.max(0, montoTotalVentaNeto - montoCobradoNeto);
+    const saldoPorCobrarBruto = Math.max(0, montoTotalVentaBruto - montoCobradoBruto);
+    const porcentajeCobrado = montoTotalVentaBruto > 0
+      ? Number(((montoCobradoBruto / montoTotalVentaBruto) * 100).toFixed(1))
+      : 0;
+    const porcentajePendiente = montoTotalVentaBruto > 0
+      ? Number(((saldoPorCobrarBruto / montoTotalVentaBruto) * 100).toFixed(1))
+      : 0;
+
+    // 2. CONSOLIDAR COMPRAS (Directas + Vía Costeo)
+    const comprasMap = new Map();
+
+    // Compras directas al proyecto
+    (proyecto.compras || []).forEach(compra => {
+      comprasMap.set(compra.id, {
+        id: compra.id,
+        numero: compra.numero,
+        folio: compra.folio || compra.factura_numero || String(compra.numero),
+        tipo_doc: compra.tipo_doc || 33,
+        rut: compra.proveedor?.rut || compra.rut_proveedor || "-",
+        proveedor: compra.proveedor?.nombre || compra.razon_social || "Sin Proveedor",
+        fecha: compra.fecha_docto || compra.factura_fecha || compra.fecha_recepcion || compra.creada_en,
+        total: Number(compra.total || 0),
+        subtotal: Number(compra.subtotal || (compra.total ? Math.round(compra.total / 1.19) : 0)),
+        iva: Number(compra.impuestos || (compra.total ? Math.round(compra.total - (compra.total / 1.19)) : 0)),
+        estado: compra.estado,
+        factura_url: compra.factura_url,
+        origen: "Directo Proyecto",
+        destino: compra.destino,
+        centro_costo: compra.centro_costo,
+      });
+    });
+
+    // Compras vinculadas mediante costeo de ventas
+    cotizaciones.forEach(c => {
+      (c.ventas || []).forEach(v => {
+        (v.asignaciones_costeo || []).forEach(costeo => {
+          if (costeo.compra && !costeo.compra.eliminado) {
+            const compra = costeo.compra;
+            if (!comprasMap.has(compra.id)) {
+              comprasMap.set(compra.id, {
+                id: compra.id,
+                numero: compra.numero,
+                folio: compra.folio || compra.factura_numero || String(compra.numero),
+                tipo_doc: compra.tipo_doc || 33,
+                rut: compra.proveedor?.rut || compra.rut_proveedor || "-",
+                proveedor: compra.proveedor?.nombre || compra.razon_social || "Sin Proveedor",
+                fecha: compra.fecha_docto || compra.factura_fecha || compra.fecha_recepcion || compra.creada_en,
+                total: Number(costeo.monto > 0 ? costeo.monto : (compra.total || 0)),
+                subtotal: Number(compra.subtotal || (compra.total ? Math.round(compra.total / 1.19) : 0)),
+                iva: Number(compra.impuestos || (compra.total ? Math.round(compra.total - (compra.total / 1.19)) : 0)),
+                estado: compra.estado,
+                factura_url: compra.factura_url,
+                origen: `Costeo Venta #${v.numero || ''}`.trim(),
+                destino: compra.destino,
+                centro_costo: compra.centro_costo,
+              });
+            }
+          }
+        });
+      });
+    });
+
+    const facturas = Array.from(comprasMap.values());
+
+    // Total de Compras Reales
+    let montoTotalCompras = 0;
+    facturas.forEach(f => {
+      const isNC = Number(f.tipo_doc) === 61;
+      if (isNC) {
+        montoTotalCompras -= f.total;
+      } else {
+        montoTotalCompras += f.total;
+      }
+    });
+
+    // 3. METRICAS DE COSTEO CONSOLIDADO
+    const costoTotalPlan = (costeoPlanCompras + costeoPlanHH) > 0 ? (costeoPlanCompras + costeoPlanHH) : Number(proyecto.presupuesto || 0);
+    const utilidadReal = montoCobradoNeto - montoTotalCompras;
+    const utilidadPlan = montoTotalVentaNeto - costoTotalPlan;
+
+    const margenPlanPct = montoTotalVentaNeto > 0 ? Number(((utilidadPlan / montoTotalVentaNeto) * 100).toFixed(1)) : 0;
+    const margenRealPct = montoCobradoNeto > 0 ? Number(((utilidadReal / montoCobradoNeto) * 100).toFixed(1)) : 0;
+
+    const pctConsumoCompras = costeoPlanCompras > 0 ? Number(((montoTotalCompras / costeoPlanCompras) * 100).toFixed(1)) : 0;
+
+    // 4. TIMELINE GASTOS (Primera factura -> Última factura)
+    const facturasConFecha = facturas
+      .filter(f => f.fecha && !isNaN(new Date(f.fecha).getTime()))
+      .sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+
+    let fechaPrimeraFactura = facturasConFecha.length > 0 ? facturasConFecha[0].fecha : null;
+    let fechaUltimaFactura = facturasConFecha.length > 0 ? facturasConFecha[facturasConFecha.length - 1].fecha : null;
+
+    let acumuladoGasto = 0;
+    const timeline = facturasConFecha.map((f, idx) => {
+      const isNC = Number(f.tipo_doc) === 61;
+      const montoEfectivo = isNC ? -f.total : f.total;
+      acumuladoGasto += montoEfectivo;
+      return {
+        id: f.id,
+        index: idx + 1,
+        fecha: f.fecha,
+        fechaFormatted: new Date(f.fecha).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }),
+        folio: f.folio,
+        proveedor: f.proveedor,
+        monto: montoEfectivo,
+        acumulado: Math.max(0, acumuladoGasto),
+        presupuestoTecho: costeoPlanCompras > 0 ? costeoPlanCompras : null,
+      };
+    });
+
+    // 5. COMPRAS POR PROVEEDOR
+    const provMap = new Map();
+    facturas.forEach(f => {
+      const name = f.proveedor || "Sin Proveedor";
+      const isNC = Number(f.tipo_doc) === 61;
+      const monto = isNC ? -f.total : f.total;
+      const current = provMap.get(name) || { proveedor: name, total: 0, cantidad: 0 };
+      current.total += monto;
+      current.cantidad += 1;
+      provMap.set(name, current);
+    });
+
+    const comprasPorProveedor = Array.from(provMap.values())
+      .filter(p => p.total > 0)
+      .sort((a, b) => b.total - a.total)
+      .map(p => ({
+        ...p,
+        porcentaje: montoTotalCompras > 0 ? Number(((p.total / montoTotalCompras) * 100).toFixed(1)) : 0
+      }));
+
+    // 6. COMPRAS POR MES (Comparativo mensual)
+    const mesMap = new Map();
+    const mesesNombres = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+    facturasConFecha.forEach(f => {
+      const d = new Date(f.fecha);
+      const y = d.getUTCFullYear();
+      const m = d.getUTCMonth();
+      const key = `${y}-${String(m + 1).padStart(2, "0")}`;
+      const label = `${mesesNombres[m]} ${y}`;
+      const isNC = Number(f.tipo_doc) === 61;
+      const monto = isNC ? -f.total : f.total;
+
+      const current = mesMap.get(key) || { mesKey: key, mesLabel: label, total: 0, cantidad: 0 };
+      current.total += monto;
+      current.cantidad += 1;
+      mesMap.set(key, current);
+    });
+
+    let runningMonthAccum = 0;
+    const comprasPorMes = Array.from(mesMap.values())
+      .sort((a, b) => a.mesKey.localeCompare(b.mesKey))
+      .map(m => {
+        runningMonthAccum += m.total;
+        return {
+          ...m,
+          acumulado: Math.max(0, runningMonthAccum),
+          presupuesto: costeoPlanCompras > 0 ? costeoPlanCompras : null,
+        };
+      });
+
+    return reply.send({
+      ok: true,
+      empresa: proyecto.empresa || {},
+      proyecto: {
+        id: proyecto.id,
+        nombre: proyecto.nombre,
+        descripcion: proyecto.descripcion,
+        estado: proyecto.estado,
+        cliente: proyecto.cliente ? { id: proyecto.cliente.id, nombre: proyecto.cliente.nombre, rut: proyecto.cliente.rut } : null,
+        nroCotizacion: nroCot,
+        cotizaciones: cotizaciones.map(c => ({ id: c.id, numero: c.numero, subtotal: c.subtotal, total: c.total, fecha: c.fecha_documento })),
+        presupuesto: proyecto.presupuesto || 0,
+      },
+      kpis: {
+        montoTotalVentaNeto,
+        montoTotalVentaBruto,
+        ivaTotalVenta,
+        montoCobradoNeto,
+        montoCobradoBruto,
+        ivaCobrado,
+        saldoPorCobrarNeto,
+        saldoPorCobrarBruto,
+        porcentajeCobrado,
+        porcentajePendiente,
+        montoTotalCompras,
+        costoTotalPlan,
+        costeoPlanCompras,
+        costeoPlanHH,
+        horasPlanHH,
+        utilidadPlan,
+        utilidadReal,
+        margenPlanPct,
+        margenRealPct,
+      },
+      costeo: {
+        compras: {
+          plan: costeoPlanCompras,
+          real: montoTotalCompras,
+          diferencia: costeoPlanCompras - montoTotalCompras,
+          porcentajeConsumido: pctConsumoCompras,
+        },
+        hh: {
+          plan: costeoPlanHH,
+          horasPlan: horasPlanHH,
+        },
+        total: {
+          costoPlan: costoTotalPlan,
+          utilidadPlan,
+          utilidadReal,
+          margenPlanPct,
+          margenRealPct,
+        }
+      },
+      timeline: {
+        fechaPrimeraFactura,
+        fechaUltimaFactura,
+        presupuestoCompras: costeoPlanCompras,
+        puntos: timeline,
+      },
+      comprasPorProveedor,
+      comprasPorMes,
+      facturas: facturas.sort((a, b) => new Date(b.fecha || 0) - new Date(a.fecha || 0)),
+    });
+  } catch (error) {
+    console.error("Error en getReporteFinancieroProyecto:", error);
+    return httpError(reply, 500, "Error al generar reporte financiero del proyecto");
+  }
+}

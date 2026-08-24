@@ -357,6 +357,160 @@ export async function importComprasCSV(request, reply) {
   }
 }
 
+/* ==========================================================
+   IMPORT RCV CLASIFICADO (Con Centro de Costo / Proyecto)
+   ========================================================== */
+export async function importComprasClassified(request, reply) {
+  const scope = resolveScope(request);
+  const empresa_id = scope.empresaId;
+  const { items } = request.body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return httpError(reply, 400, "Debes enviar un listado de documentos para importar");
+  }
+
+  let created = 0;
+  let skipped = 0;
+  const errors = [];
+  const chunkSize = 50;
+
+  for (let start = 0; start < items.length; start += chunkSize) {
+    const chunk = items.slice(start, start + chunkSize);
+
+    await prisma.$transaction(async (tx) => {
+      for (let j = 0; j < chunk.length; j++) {
+        const i = start + j;
+        const row = chunk[j];
+
+        try {
+          const tipoDoc = toIntOrNull(row.tipo_doc || row["Tipo Doc"]);
+          const rutProv = normRut(row.rut_proveedor || row["RUT Proveedor"]);
+          const razon = normStr(row.razon_social || row["Razon Social"]);
+          const folio = normStr(row.folio || row["Folio"]);
+
+          let fechaDocto = row.fecha_docto ? new Date(row.fecha_docto) : null;
+          if (!fechaDocto || isNaN(fechaDocto.getTime())) {
+            fechaDocto = parseDateDMY(row["Fecha Docto"]) || null;
+          }
+
+          let fechaRecep = row.fecha_recepcion ? new Date(row.fecha_recepcion) : null;
+          if (!fechaRecep || isNaN(fechaRecep.getTime())) {
+            fechaRecep = parseDateTimeDMY(row["Fecha Recepcion"]) || null;
+          }
+
+          const montoTotal = Number(row.total || row.monto_total || parseCLP(row["Monto Total"]) || 0);
+
+          if (!rutProv || !folio || montoTotal <= 0) {
+            throw new Error(`Fila inválida: RUT=${rutProv || "-"} Folio=${folio || "-"} Monto=${montoTotal}`);
+          }
+
+          // 1) Proveedor
+          let prov = await tx.proveedor.findFirst({
+            where: { empresa_id, eliminado: false, rut: rutProv },
+            select: { id: true },
+          });
+
+          if (!prov) {
+            prov = await tx.proveedor.create({
+              data: {
+                empresa_id,
+                rut: rutProv,
+                nombre: razon || rutProv,
+              },
+              select: { id: true },
+            });
+          }
+
+          // 2) Deduplicación
+          const exists = await tx.compra.findFirst({
+            where: {
+              empresa_id,
+              proveedorId: prov.id,
+              folio,
+              tipo_doc: tipoDoc,
+              eliminado: false,
+            },
+            select: { id: true },
+          });
+
+          if (exists) {
+            skipped++;
+            continue;
+          }
+
+          // 3) Normalización de destino y centro de costo
+          let destino = "PROYECTO";
+          if (["ADMINISTRACION", "TALLER", "SERVICIO", "PROYECTO"].includes(String(row.destino).toUpperCase())) {
+            destino = String(row.destino).toUpperCase();
+          }
+
+          let centro_costo = null;
+          if (["PMC", "PUQ"].includes(String(row.centro_costo).toUpperCase())) {
+            centro_costo = String(row.centro_costo).toUpperCase();
+          }
+
+          let proyecto_id = null;
+          if (destino === "PROYECTO" && row.proyecto_id) {
+            proyecto_id = String(row.proyecto_id);
+          }
+
+          const subtotalCalc = Math.round(montoTotal / 1.19);
+          const ivaCalc = Math.round(montoTotal - subtotalCalc);
+
+          // 4) Crear compra
+          await tx.compra.create({
+            data: {
+              empresa_id,
+              proveedorId: prov.id,
+              estado: "FACTURADA",
+              total: montoTotal,
+              subtotal: subtotalCalc,
+              impuestos: ivaCalc,
+              tipo_doc: tipoDoc,
+              folio,
+              rut_proveedor: rutProv,
+              razon_social: razon,
+              fecha_docto: fechaDocto,
+              fecha_recepcion: fechaRecep,
+              destino,
+              centro_costo,
+              sub_destino: row.sub_destino || null,
+              proyecto_id,
+              items: {
+                create: [
+                  {
+                    item: `RCV ${tipoDoc ?? ""} Folio ${folio}`.trim(),
+                    cantidad: 1,
+                    precio_unit: montoTotal,
+                    total: montoTotal,
+                    proveedor_id: prov.id,
+                  },
+                ],
+              },
+            },
+          });
+
+          created++;
+        } catch (e) {
+          errors.push({
+            row: i + 1,
+            msg: e?.message || String(e),
+          });
+        }
+      }
+    });
+  }
+
+  return reply.send({
+    ok: true,
+    totalRows: items.length,
+    created,
+    skipped,
+    errorsCount: errors.length,
+    errors: errors.slice(0, 50),
+  });
+}
+
 /* =========================
    LIST
 ========================= */
