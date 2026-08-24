@@ -1239,6 +1239,7 @@ export async function getReporteFinancieroProyecto(req, reply) {
         cotizaciones: {
           where: { eliminado: false, estado: { not: "RECHAZADA" } },
           include: {
+            cliente: true,
             pagos: {
               where: { eliminado: false },
               orderBy: { fecha: "asc" }
@@ -1500,6 +1501,8 @@ export async function getReporteFinancieroProyecto(req, reply) {
         };
       });
 
+    const cliente = proyecto.cliente || cotizacionPrincipal?.cliente || cotizaciones.find(c => c.cliente)?.cliente || null;
+
     return reply.send({
       ok: true,
       empresa: proyecto.empresa || {},
@@ -1508,7 +1511,7 @@ export async function getReporteFinancieroProyecto(req, reply) {
         nombre: proyecto.nombre,
         descripcion: proyecto.descripcion,
         estado: proyecto.estado,
-        cliente: proyecto.cliente ? { id: proyecto.cliente.id, nombre: proyecto.cliente.nombre, rut: proyecto.cliente.rut } : null,
+        cliente: cliente ? { id: cliente.id, nombre: cliente.nombre, rut: cliente.rut } : null,
         nroCotizacion: nroCot,
         cotizaciones: cotizaciones.map(c => ({ id: c.id, numero: c.numero, subtotal: c.subtotal, total: c.total, fecha: c.fecha_documento })),
         presupuesto: proyecto.presupuesto || 0,
