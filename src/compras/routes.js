@@ -9,6 +9,7 @@ import {
   listComprasDisponiblesVenta,
   importComprasCSV,
   importComprasClassified,
+  checkRcvDocuments,
 
   // ✅ NUEVO
   uploadFacturaCompra,
@@ -41,6 +42,7 @@ export default async function compraRoutes(server) {
   // upload csv
   server.post("/compras/import-csv", importComprasCSV);
   server.post("/compras/import-classified", importComprasClassified);
+  server.post("/compras/check-rcv", checkRcvDocuments);
 
   // ✅ subir factura pdf
   server.post("/compras/:id/factura", uploadFacturaCompra);

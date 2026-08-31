@@ -358,6 +358,119 @@ export async function importComprasCSV(request, reply) {
 }
 
 /* ==========================================================
+   CHECK RCV DOCUMENTS (Descarte de FAC ya cargadas y asignadas a COT)
+   ========================================================== */
+export async function checkRcvDocuments(request, reply) {
+  const scope = resolveScope(request);
+  const empresa_id = scope.empresaId;
+  const { items } = request.body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return httpError(reply, 400, "Debes enviar un listado de documentos para verificar");
+  }
+
+  // Pre-cargar folios para consultar compras existentes
+  const folios = items
+    .map((it) => String(it.folio || it["Folio"] || "").trim())
+    .filter(Boolean);
+
+  const existingCompras = await prisma.compra.findMany({
+    where: {
+      empresa_id,
+      eliminado: false,
+      folio: { in: folios },
+    },
+    select: {
+      id: true,
+      folio: true,
+      tipo_doc: true,
+      rut_proveedor: true,
+      proveedorId: true,
+      proyecto_id: true,
+      cotizacionId: true,
+      destino: true,
+      centro_costo: true,
+      proveedor: {
+        select: {
+          id: true,
+          rut: true,
+        },
+      },
+    },
+  });
+
+  const validItems = [];
+  const discardedItems = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const row = items[i];
+    const tipoDoc = toIntOrNull(row.tipo_doc || row["Tipo Doc"]);
+    const rutProv = normRut(row.rut_proveedor || row["RUT Proveedor"]);
+    const cleanRut = rutProv.toLowerCase().replace(/[^0-9k]/g, "");
+    const folio = normStr(row.folio || row["Folio"]);
+
+    // Buscar coincidencia en las compras existentes
+    const match = existingCompras.find((c) => {
+      const matchFolio = String(c.folio || "").trim() === folio;
+      const matchTipo =
+        (c.tipo_doc == null && tipoDoc == null) ||
+        Number(c.tipo_doc) === Number(tipoDoc);
+
+      const dbRutComp = (c.rut_proveedor || "").toLowerCase().replace(/[^0-9k]/g, "");
+      const dbRutProv = (c.proveedor?.rut || "").toLowerCase().replace(/[^0-9k]/g, "");
+
+      const matchRut =
+        (!cleanRut && !dbRutComp && !dbRutProv) ||
+        (cleanRut && (dbRutComp === cleanRut || dbRutProv === cleanRut));
+
+      return matchFolio && matchTipo && matchRut;
+    });
+
+    if (match) {
+      // Criterio de descarte: Ya asignada a COT (proyecto_id o cotizacionId)
+      const estaAsignadaCot = Boolean(
+        match.proyecto_id ||
+        match.cotizacionId ||
+        (match.destino === "PROYECTO" && match.proyecto_id)
+      );
+
+      if (estaAsignadaCot) {
+        discardedItems.push({
+          ...row,
+          compra_id: match.id,
+          razon_descarte: "Ya registrada y asignada a COT",
+        });
+        continue;
+      }
+
+      // Si existe en BD pero NO está asignada a COT -> Mantener para permitir asignación masiva
+      validItems.push({
+        ...row,
+        ya_cargada: true,
+        compra_id: match.id,
+        destino_actual: match.destino,
+        centro_costo_actual: match.centro_costo,
+      });
+    } else {
+      // Documento nuevo
+      validItems.push({
+        ...row,
+        ya_cargada: false,
+      });
+    }
+  }
+
+  return reply.send({
+    ok: true,
+    totalCount: items.length,
+    discardedCount: discardedItems.length,
+    validCount: validItems.length,
+    validItems,
+    discardedItems,
+  });
+}
+
+/* ==========================================================
    IMPORT RCV CLASIFICADO (Con Centro de Costo / Proyecto)
    ========================================================== */
 export async function importComprasClassified(request, reply) {
@@ -370,6 +483,7 @@ export async function importComprasClassified(request, reply) {
   }
 
   let created = 0;
+  let updated = 0;
   let skipped = 0;
   const errors = [];
   const chunkSize = 50;
@@ -421,24 +535,7 @@ export async function importComprasClassified(request, reply) {
             });
           }
 
-          // 2) Deduplicación
-          const exists = await tx.compra.findFirst({
-            where: {
-              empresa_id,
-              proveedorId: prov.id,
-              folio,
-              tipo_doc: tipoDoc,
-              eliminado: false,
-            },
-            select: { id: true },
-          });
-
-          if (exists) {
-            skipped++;
-            continue;
-          }
-
-          // 3) Normalización de destino y centro de costo
+          // Normalización de destino y centro de costo
           let destino = "PROYECTO";
           if (["ADMINISTRACION", "TALLER", "SERVICIO", "PROYECTO"].includes(String(row.destino).toUpperCase())) {
             destino = String(row.destino).toUpperCase();
@@ -452,6 +549,33 @@ export async function importComprasClassified(request, reply) {
           let proyecto_id = null;
           if (destino === "PROYECTO" && row.proyecto_id) {
             proyecto_id = String(row.proyecto_id);
+          }
+
+          // 2) Deduplicación / Actualización si ya existe
+          const exists = await tx.compra.findFirst({
+            where: {
+              empresa_id,
+              proveedorId: prov.id,
+              folio,
+              tipo_doc: tipoDoc,
+              eliminado: false,
+            },
+            select: { id: true },
+          });
+
+          if (exists) {
+            // Actualizar asignación de la compra existente
+            await tx.compra.update({
+              where: { id: exists.id },
+              data: {
+                destino,
+                centro_costo,
+                sub_destino: row.sub_destino || null,
+                proyecto_id,
+              },
+            });
+            updated++;
+            continue;
           }
 
           const subtotalCalc = Math.round(montoTotal / 1.19);
@@ -505,6 +629,7 @@ export async function importComprasClassified(request, reply) {
     ok: true,
     totalRows: items.length,
     created,
+    updated,
     skipped,
     errorsCount: errors.length,
     errors: errors.slice(0, 50),

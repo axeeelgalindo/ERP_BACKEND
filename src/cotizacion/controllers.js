@@ -1225,7 +1225,7 @@ export const updateCotizacionEstado = async (request, reply) => {
       ACEPTADA: ["ORDEN_VENTA", "RECHAZADA"],
       ORDEN_VENTA: ["POR_FACTURAR"],
       POR_FACTURAR: ["FACTURADA"],
-      FACTURADA: ["PAGADA"],
+      FACTURADA: [], // ✅ Solo se da por pagada registrando pagos/comprobantes al 100%
       PAGADA: ["ENTREGADO"],
       ENTREGADO: [],
       RECHAZADA: [],
