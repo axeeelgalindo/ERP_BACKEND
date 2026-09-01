@@ -1342,6 +1342,10 @@ model RendicionItem {
   descripcion     String
   monto           Float
   categoria       String?
+  proveedor       String?
+  rut_proveedor   String?
+  tipo_doc        String?
+  folio           String?
   comprobante_url String?
 
   creado_en DateTime @default(now())
