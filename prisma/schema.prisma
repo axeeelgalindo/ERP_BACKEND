@@ -1188,6 +1188,7 @@ model Compra {
 
   items               CompraItem[]
   asignaciones_costeo CompraCosteo[]
+  rendicion_items     RendicionItem[]
 
   proveedor   Proveedor? @relation(fields: [proveedorId], references: [id])
   proveedorId String?
@@ -1348,10 +1349,14 @@ model RendicionItem {
   folio           String?
   comprobante_url String?
 
+  compra_id String?
+  compra    Compra? @relation(fields: [compra_id], references: [id], onDelete: SetNull)
+
   creado_en DateTime @default(now())
 
   @@unique([rendicion_id, linea])
   @@index([rendicion_id])
+  @@index([compra_id])
 }
 
 /**

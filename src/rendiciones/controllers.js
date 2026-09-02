@@ -52,6 +52,7 @@ function normalizeItems(items = []) {
       rut_proveedor: it.rut_proveedor != null ? String(it.rut_proveedor).trim() : null,
       tipo_doc: it.tipo_doc != null ? String(it.tipo_doc).trim() : null,
       folio: it.folio != null ? String(it.folio).trim() : null,
+      compra_id: it.compra_id != null && String(it.compra_id).trim() ? String(it.compra_id).trim() : null,
       comprobante_url:
         it.comprobante_url != null ? String(it.comprobante_url) : null,
     });
@@ -195,6 +196,7 @@ export async function createRendicion(request, reply) {
             rut_proveedor: it.rut_proveedor,
             tipo_doc: it.tipo_doc,
             folio: it.folio,
+            compra_id: it.compra_id,
             comprobante_url: it.comprobante_url,
           })),
         },
@@ -203,10 +205,35 @@ export async function createRendicion(request, reply) {
         proyecto: { select: { id: true, nombre: true } },
         empleado: { select: { id: true, rut: true, cargo: true } },
         revisada_por: { select: { id: true, nombre: true, correo: true } },
-        items: true,
+        items: {
+          include: {
+            compra: {
+              select: {
+                id: true,
+                numero: true,
+                folio: true,
+                tipo_doc: true,
+                rut_proveedor: true,
+                razon_social: true,
+                total: true,
+                fecha_docto: true,
+              },
+            },
+          },
+        },
         compras: { select: { id: true, numero: true, total: true } },
       },
     });
+
+    // Auto-vincular compras si algún ítem tiene compra_id
+    const itemCompraIds = items.map((it) => it.compra_id).filter(Boolean);
+    if (itemCompraIds.length > 0) {
+      await tx.compra.updateMany({
+        where: { id: { in: itemCompraIds } },
+        data: { rendicion_id: r.id },
+      });
+    }
+
     return r;
   });
 
@@ -276,7 +303,22 @@ export async function listRendiciones(request, reply) {
           } 
         },
         revisada_por: { select: { id: true, nombre: true, correo: true } },
-        items: true,
+        items: {
+          include: {
+            compra: {
+              select: {
+                id: true,
+                numero: true,
+                folio: true,
+                tipo_doc: true,
+                rut_proveedor: true,
+                razon_social: true,
+                total: true,
+                fecha_docto: true,
+              },
+            },
+          },
+        },
         anticipos: true,
         compras: {
           select: {
@@ -341,7 +383,22 @@ export async function getRendicionById(request, reply) {
         } 
       },
       revisada_por: { select: { id: true, nombre: true, correo: true } },
-      items: true,
+      items: {
+        include: {
+          compra: {
+            select: {
+              id: true,
+              numero: true,
+              folio: true,
+              tipo_doc: true,
+              rut_proveedor: true,
+              razon_social: true,
+              total: true,
+              fecha_docto: true,
+            },
+          },
+        },
+      },
       anticipos: true,
       compras: {
         select: {
@@ -530,12 +587,28 @@ export async function updateRendicion(request, reply) {
                 rut_proveedor: it.rut_proveedor,
                 tipo_doc: it.tipo_doc,
                 folio: it.folio,
+                compra_id: it.compra_id,
                 comprobante_url: it.comprobante_url,
               })),
             },
           },
           include: {
-            items: true,
+            items: {
+              include: {
+                compra: {
+                  select: {
+                    id: true,
+                    numero: true,
+                    folio: true,
+                    tipo_doc: true,
+                    rut_proveedor: true,
+                    razon_social: true,
+                    total: true,
+                    fecha_docto: true,
+                  },
+                },
+              },
+            },
             proyecto: { select: { id: true, nombre: true } },
             empleado: { select: { id: true, rut: true, cargo: true } },
             revisada_por: { select: { id: true, nombre: true, correo: true } },
@@ -552,6 +625,15 @@ export async function updateRendicion(request, reply) {
           },
         });
 
+        // Auto-vincular compras si algún ítem tiene compra_id
+        const itemCompraIds = items.map((it) => it.compra_id).filter(Boolean);
+        if (itemCompraIds.length > 0) {
+          await tx.compra.updateMany({
+            where: { id: { in: itemCompraIds } },
+            data: { rendicion_id: id },
+          });
+        }
+
         return r;
       }
 
@@ -560,7 +642,22 @@ export async function updateRendicion(request, reply) {
         where: { id },
         data,
         include: {
-          items: true,
+          items: {
+            include: {
+              compra: {
+                select: {
+                  id: true,
+                  numero: true,
+                  folio: true,
+                  tipo_doc: true,
+                  rut_proveedor: true,
+                  razon_social: true,
+                  total: true,
+                  fecha_docto: true,
+                },
+              },
+            },
+          },
           proyecto: { select: { id: true, nombre: true } },
           empleado: { select: { id: true, rut: true, cargo: true } },
           revisada_por: { select: { id: true, nombre: true, correo: true } },
