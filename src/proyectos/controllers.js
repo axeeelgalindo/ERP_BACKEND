@@ -17,6 +17,69 @@ const toFloatOrNull = (v) => {
   return Number.isNaN(n) ? null : n;
 };
 
+export function extractProjectNumber(nombre, cotizaciones = []) {
+  if (typeof nombre === "string") {
+    // 1. Extraer si tiene formato tipo COT-123 o COT 123 o COT-2024-123
+    const cotMatch = nombre.match(/COT[^\d]*(\d+)(?:[^\d]+(\d+))?/i);
+    if (cotMatch) {
+      if (cotMatch[2]) {
+        return parseInt(cotMatch[1], 10) * 100000 + parseInt(cotMatch[2], 10);
+      }
+      return parseInt(cotMatch[1], 10);
+    }
+    // 2. Extraer primer número presente en el nombre
+    const m = nombre.match(/\d+/);
+    if (m) return parseInt(m[0], 10);
+  }
+  if (Array.isArray(cotizaciones)) {
+    for (const c of cotizaciones) {
+      if (c?.numero != null && Number.isFinite(Number(c.numero))) {
+        return Number(c.numero);
+      }
+    }
+  }
+  return null;
+}
+
+export function compareProyectosNatural(a, b, sortField = "numero", sortDir = "desc") {
+  // Si el usuario pidió explícitamente ordenar por otro campo específico
+  if (sortField && !["numero", "creada_en", "nombre"].includes(sortField)) {
+    const valA = a[sortField];
+    const valB = b[sortField];
+    if (valA !== valB) {
+      if (valA == null) return 1;
+      if (valB == null) return -1;
+      return sortDir === "asc" ? (valA > valB ? 1 : -1) : (valA < valB ? 1 : -1);
+    }
+  }
+
+  // Ordenar por número de COT / Proyecto
+  const numA = extractProjectNumber(a.nombre, a.cotizaciones);
+  const numB = extractProjectNumber(b.nombre, b.cotizaciones);
+
+  if (numA !== null && numB !== null) {
+    if (numA !== numB) {
+      return sortDir === "asc" ? numA - numB : numB - numA;
+    }
+  } else if (numA !== null) {
+    return sortDir === "asc" ? -1 : -1;
+  } else if (numB !== null) {
+    return sortDir === "asc" ? 1 : 1;
+  }
+
+  // Si no tienen número o es idéntico, orden alfanumérico natural
+  const collator = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
+  const strCmp = collator.compare(a.nombre || "", b.nombre || "");
+  if (strCmp !== 0) {
+    return sortDir === "asc" ? strCmp : -strCmp;
+  }
+
+  // Fallback por fecha de creación
+  const dateA = new Date(a.creada_en || 0).getTime();
+  const dateB = new Date(b.creada_en || 0).getTime();
+  return sortDir === "asc" ? dateA - dateB : dateB - dateA;
+}
+
 /* ========== LISTAR ========== */
 export async function listProyectos(request, reply) {
   const scope = resolveScope(request);
@@ -28,7 +91,7 @@ export async function listProyectos(request, reply) {
     pageSize = SIZE,
     includeDeleted = "false",
     empresaId,
-    sort = "creada_en",
+    sort = "numero",
     order = "desc",
   } = request.query || {};
 
@@ -65,6 +128,7 @@ export async function listProyectos(request, reply) {
   };
 
   const allowedSort = [
+    "numero",
     "creada_en",
     "actualizado_en",
     "nombre",
@@ -75,65 +139,67 @@ export async function listProyectos(request, reply) {
     "fecha_inicio_real",
     "fecha_fin_real",
   ];
-  const sortField = allowedSort.includes(String(sort)) ? sort : "creada_en";
+  const sortField = allowedSort.includes(String(sort)) ? sort : "numero";
   const sortDir = String(order).toLowerCase() === "asc" ? "asc" : "desc";
 
   const skip = Math.max(0, (Number(page) - 1) * Number(pageSize));
   const take = Math.min(100, Number(pageSize) || SIZE);
 
-  const [total, items] = await Promise.all([
-    prisma.proyecto.count({ where }),
-    prisma.proyecto.findMany({
-      where,
-      orderBy: { [sortField]: sortDir },
-      include: {
-        cliente: true,
-        // Para cliente (vía cotizaciones -> ventas -> cliente)
-        cotizaciones: {
-          where: { eliminado: false },
-          include: {
-            cliente: true,
-            ventas: {
-              where: { eliminado: false },
-              include: { Cliente: true }, // en tu schema Venta tiene Cliente (relación opcional)
-            },
+  // Consultar proyectos con sus relaciones
+  const allProyectos = await prisma.proyecto.findMany({
+    where,
+    include: {
+      cliente: true,
+      // Para cliente (vía cotizaciones -> ventas -> cliente)
+      cotizaciones: {
+        where: { eliminado: false },
+        include: {
+          cliente: true,
+          ventas: {
+            where: { eliminado: false },
+            include: { Cliente: true },
           },
         },
+      },
 
-        // ✅ PROGRESO (por épicas)
-        epicas: {
-          where: { eliminado: false },
-          include: {
-            tareas: {
-              where: { eliminado: false },
-              include: {
-                detalles: { where: { eliminado: false } }, // ✅ real en tu schema
-              },
-            },
-          },
-        },
-
-        // ✅ PROGRESO (por tareas directas del proyecto)
-        tareas: {
-          where: { eliminado: false },
-          include: {
-            detalles: { where: { eliminado: false } }, // ✅ real en tu schema
-          },
-        },
-
-        // ✅ MIEMBROS: necesarios para pre-cargar en el modal de edición
-        miembros: {
-          include: {
-            empleado: {
-              include: { usuario: { select: { nombre: true, correo: true } } },
+      // ✅ PROGRESO (por épicas)
+      epicas: {
+        where: { eliminado: false },
+        include: {
+          tareas: {
+            where: { eliminado: false },
+            include: {
+              detalles: { where: { eliminado: false } },
             },
           },
         },
       },
-      skip,
-      take,
-    }),
-  ]);
+
+      // ✅ PROGRESO (por tareas directas del proyecto)
+      tareas: {
+        where: { eliminado: false },
+        include: {
+          detalles: { where: { eliminado: false } },
+        },
+      },
+
+      // ✅ MIEMBROS: necesarios para pre-cargar en el modal de edición
+      miembros: {
+        include: {
+          empleado: {
+            include: { usuario: { select: { nombre: true, correo: true } } },
+          },
+        },
+      },
+    },
+  });
+
+  const total = allProyectos.length;
+
+  // Ordenamiento numérico natural
+  allProyectos.sort((a, b) => compareProyectosNatural(a, b, sortField, sortDir));
+
+  const items = allProyectos.slice(skip, skip + take);
 
   return reply.send({ total, page: Number(page), pageSize: take, items });
 }

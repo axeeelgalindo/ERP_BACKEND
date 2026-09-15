@@ -655,6 +655,8 @@ export async function listCompras(request, reply) {
     empresaId, // solo master
     page = DEFAULT_PAGE,
     pageSize = DEFAULT_SIZE,
+    sortBy,
+    sortOrder = "desc",
   } = request.query || {};
 
   const empresa_id = scope.isMaster ? empresaId || scope.empresaId : scope.empresaId;
@@ -709,11 +711,27 @@ export async function listCompras(request, reply) {
     ];
   }
 
+  let orderBy = [
+    { fecha_docto: { sort: "desc", nulls: "last" } },
+    { creada_en: "desc" },
+    { numero: "desc" },
+  ];
+
+  if (sortBy) {
+    const dir = String(sortOrder).toLowerCase() === "asc" ? "asc" : "desc";
+    if (["fecha_docto", "creada_en", "total", "numero", "folio"].includes(sortBy)) {
+      orderBy = [
+        { [sortBy]: { sort: dir, nulls: dir === "asc" ? "first" : "last" } },
+        { creada_en: "desc" },
+      ];
+    }
+  }
+
   const [total, dataRaw] = await Promise.all([
     prisma.compra.count({ where }),
     prisma.compra.findMany({
       where,
-      orderBy: [{ creada_en: "desc" }],
+      orderBy,
       skip: (pageN - 1) * sizeN,
       take: sizeN,
       include: {
@@ -776,7 +794,10 @@ export async function listComprasDisponiblesVenta(request, reply) {
       proveedor: { select: { id: true, nombre: true } },
       proyecto: { select: { id: true, nombre: true } },
     },
-    orderBy: { creada_en: "desc" },
+    orderBy: [
+      { fecha_docto: { sort: "desc", nulls: "last" } },
+      { creada_en: "desc" },
+    ],
   });
 
   return reply.send(compras);
