@@ -16,8 +16,23 @@ import {
   deleteDocumento
 } from "./documentos.controllers.js";
 
+import {
+  getEmpleadoVacaciones,
+  createEmpleadoVacacion,
+  updateEmpleadoVacacion,
+  deleteEmpleadoVacacion,
+  listGeneralVacaciones
+} from "./vacaciones.controllers.js";
+
 export default async function empleadosRoutes(server) {
   server.addHook("preHandler", server.authenticate);
+
+  // ✅ vacaciones (general primero para evitar colisión de ruta)
+  server.get("/empleados/vacaciones/general", listGeneralVacaciones);
+  server.get("/empleados/:id/vacaciones", getEmpleadoVacaciones);
+  server.post("/empleados/:id/vacaciones", createEmpleadoVacacion);
+  server.put("/empleados/vacaciones/:vacacionId", updateEmpleadoVacacion);
+  server.delete("/empleados/vacaciones/:vacacionId", deleteEmpleadoVacacion);
 
   server.get("/empleados", listEmpleados);
   server.get("/empleados/:id", getEmpleado);

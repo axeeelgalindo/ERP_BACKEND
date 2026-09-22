@@ -405,7 +405,26 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     // LEER EXCEL
     // =============================
     const workbook = XLSX.read(fileBuffer, { type: "buffer" });
-    const sheetName = workbook.SheetNames[0];
+    let sheetName = workbook.SheetNames[0];
+
+    // Si la empresa tiene nombre, intentar matchear con alguna hoja del Excel (ej: 'Blue Ingeniería SpA' vs 'Smart Eyes')
+    if (empresa_id) {
+      const emp = await prisma.empresa.findUnique({
+        where: { id: String(empresa_id) },
+        select: { nombre: true },
+      });
+      if (emp?.nombre) {
+        const normEmp = normalizeText(emp.nombre);
+        const matchedSheet = workbook.SheetNames.find((s) => {
+          const normSheet = normalizeText(s);
+          return normSheet.includes(normEmp) || normEmp.includes(normSheet);
+        });
+        if (matchedSheet) {
+          sheetName = matchedSheet;
+        }
+      }
+    }
+
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
 
@@ -413,21 +432,37 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       return reply.code(400).send({ error: "Excel vacío o ilegible" });
     }
 
+    // Detección dinámica de cabecera (soporta fila 0, fila 5 o cualquier fila donde estén RUT y Nombre/Apellidos)
     const headerRowIndex = rows.findIndex(
-      (r) => r?.[0] === "Nombre" && r?.[1] === "RUT",
+      (r) =>
+        Array.isArray(r) &&
+        r.some((c) => String(c || "").trim().toUpperCase() === "RUT") &&
+        r.some((c) => {
+          const cleanCol = normalizeText(c);
+          return (
+            cleanCol === "nombre" ||
+            cleanCol === "ap paterno" ||
+            cleanCol === "nombres"
+          );
+        })
     );
+
     if (headerRowIndex === -1) {
       return reply.code(400).send({
-        error: "No se encontró cabecera con columnas 'Nombre' y 'RUT'",
+        error: "No se encontró cabecera con columnas RUT y Nombre / Apellidos",
       });
     }
     const header = rows[headerRowIndex];
 
     // =============================
-    // MAPEO DE COLUMNAS
+    // MAPEO DE COLUMNAS (Soporta plantilla nueva y legacy)
     // =============================
     const idx = {
       nombre: null,
+      ap_paterno: null,
+      ap_materno: null,
+      nombres: null,
+      cargo: null,
       rut: null,
       dias_trabajados: null,
       sueldo_base: null,
@@ -452,93 +487,89 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
       desctos2: null,
       liquido: null,
       empleador: null,
+      empleadorCols: [],
     };
 
     let countImponible = 0;
     let countDesctos = 0;
 
     header.forEach((col, i) => {
-      switch (col) {
-        case "Nombre":
-          idx.nombre = i;
-          break;
-        case "RUT":
-          idx.rut = i;
-          break;
-        case "Trab.":
-          idx.dias_trabajados = i;
-          break;
-        case "Sueldo Base":
-          idx.sueldo_base = i;
-          break;
-        case "Extras":
-          idx.extras = i;
-          break;
-        case "Gratific.":
-          idx.gratificacion = i;
-          break;
+      if (!col) return;
+      const c = normalizeText(col);
 
-        case "Imponible":
-          countImponible++;
-          if (countImponible === 1) idx.imponible1 = i;
-          else if (countImponible === 2) idx.imponible2 = i;
-          else if (countImponible === 3) idx.imponible3 = i;
-          else if (countImponible === 4) idx.imponible4 = i;
-          break;
-
-        case "Moviliz.":
-          idx.movilizacion = i;
-          break;
-        case "Colac.":
-          idx.colacion = i;
-          break;
-        case "Haberes":
-          idx.haberes = i;
-          break;
-
-        case "AFP":
-          idx.afp = i;
-          break;
-        case "Único":
-          idx.unico = i;
-          break;
-        case "Previsional":
-          idx.previsional = i;
-          break;
-        case "Salud":
-          idx.salud = i;
-          break;
-        case "Antiguo":
-          idx.antiguo = i;
-          break;
-        case "Anticipos":
-          idx.anticipos = i;
-          break;
-        case "Prestamos":
-          idx.prestamos = i;
-          break;
-        case "APV":
-          idx.apv = i;
-          break;
-
-        case "Desctos.":
-          countDesctos++;
-          if (countDesctos === 1) idx.desctos1 = i;
-          else idx.desctos2 = i;
-          break;
-
-        case "Líquido":
-          idx.liquido = i;
-          break;
-        case "Empleador":
-          idx.empleador = i;
-          break;
+      if (c === "rut") {
+        idx.rut = i;
+      } else if (c === "nombre") {
+        idx.nombre = i;
+      } else if (c === "ap paterno" || c === "apellido paterno") {
+        idx.ap_paterno = i;
+      } else if (c === "ap materno" || c === "apellido materno") {
+        idx.ap_materno = i;
+      } else if (c === "nombres") {
+        idx.nombres = i;
+      } else if (c === "cargo") {
+        idx.cargo = i;
+      } else if (["trab.", "trab", "dias trabajados", "dias trab.", "dias trab"].includes(c)) {
+        idx.dias_trabajados = i;
+      } else if (c === "sueldo base") {
+        idx.sueldo_base = i;
+      } else if (["extras", "horas extras"].includes(c)) {
+        idx.extras = i;
+      } else if (["gratific.", "gratificacion"].includes(c)) {
+        idx.gratificacion = i;
+      } else if (c === "imponible" || c.startsWith("base imp")) {
+        countImponible++;
+        if (countImponible === 1) idx.imponible1 = i;
+        else if (countImponible === 2) idx.imponible2 = i;
+        else if (countImponible === 3) idx.imponible3 = i;
+        else if (countImponible === 4) idx.imponible4 = i;
+      } else if (["moviliz.", "movilizacion"].includes(c)) {
+        idx.movilizacion = i;
+      } else if (["colac.", "colacion"].includes(c)) {
+        idx.colacion = i;
+      } else if (["haberes", "total haberes"].includes(c)) {
+        idx.haberes = i;
+      } else if (["afp", "previs"].includes(c)) {
+        idx.afp = i;
+      } else if (["unico", "impuesto"].includes(c)) {
+        idx.unico = i;
+      } else if (c === "previsional") {
+        idx.previsional = i;
+      } else if (c === "salud") {
+        idx.salud = i;
+      } else if (c === "antiguo") {
+        idx.antiguo = i;
+      } else if (["anticipos", "anticipo finiquito"].includes(c)) {
+        idx.anticipos = i;
+      } else if (c === "prestamos") {
+        idx.prestamos = i;
+      } else if (c === "apv") {
+        idx.apv = i;
+      } else if (["desctos.", "desctos", "total descuentos"].includes(c)) {
+        countDesctos++;
+        if (countDesctos === 1) idx.desctos1 = i;
+        else idx.desctos2 = i;
+      } else if (["liquido", "sueldo liquido"].includes(c)) {
+        idx.liquido = i;
+      } else if (c === "empleador") {
+        idx.empleador = i;
+      } else if (
+        [
+          "sis",
+          "seguro cesantia (empleador)",
+          "mutual",
+          "afp prevision empleador",
+          "aporte rentabilidad protegida",
+          "cotizacion expectativa de vida",
+        ].includes(c)
+      ) {
+        idx.empleadorCols.push(i);
       }
     });
 
-    if (idx.nombre == null || idx.rut == null) {
+    if (idx.rut == null || (idx.nombre == null && idx.ap_paterno == null && idx.nombres == null)) {
       return reply.code(400).send({
-        error: "El Excel no tiene columnas Nombre y RUT",
+        error: "El Excel no tiene columnas Nombre/Apellidos y RUT",
         debug: idx,
       });
     }
@@ -550,10 +581,13 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     for (let i = headerRowIndex + 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row) continue;
-      if (row[0] === "Totales") break;
+      if (row[0] === "Totales" || String(row[0]).toLowerCase().startsWith("total")) break;
 
-      const rutNorm = normalizeRut(row[idx.rut]);
-      if (rutNorm) excelRutNormSet.add(rutNorm);
+      const rutRaw = idx.rut != null ? row[idx.rut] : null;
+      const rutNorm = normalizeRut(rutRaw);
+      if (rutNorm && /^[0-9]+[0-9kK]?$/.test(rutNorm)) {
+        excelRutNormSet.add(rutNorm);
+      }
     }
 
     // =============================
@@ -585,7 +619,7 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     }
 
     // =============================
-    // 3) Parsear filas: HH + upserts por RUT (incluye nombre)
+    // 3) Parsear filas: HH + upserts por RUT (incluye nombre y cargo)
     // =============================
     const registros = [];
     const upsertsByRutNorm = new Map();
@@ -593,16 +627,33 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
     for (let i = headerRowIndex + 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row) continue;
-      if (row[0] === "Totales") break;
+      if (row[0] === "Totales" || String(row[0]).toLowerCase().startsWith("total")) break;
 
-      const nombre = row[idx.nombre];
+      let nombre = idx.nombre != null ? row[idx.nombre] : null;
+      if (!nombre && (idx.ap_paterno != null || idx.nombres != null)) {
+        const apP = idx.ap_paterno != null ? String(row[idx.ap_paterno] || "").trim() : "";
+        const apM = idx.ap_materno != null ? String(row[idx.ap_materno] || "").trim() : "";
+        const nom = idx.nombres != null ? String(row[idx.nombres] || "").trim() : "";
+        const apellidos = `${apP} ${apM}`.trim();
+        if (apellidos && nom) {
+          nombre = `${apellidos}, ${nom}`;
+        } else {
+          nombre = apellidos || nom || null;
+        }
+      }
+
       if (!nombre) continue;
 
-      const rutRaw = row[idx.rut] ?? null;
-      const rutNorm = normalizeRut(rutRaw);
+      const rutRaw = idx.rut != null ? (row[idx.rut] ?? null) : null;
+      if (!rutRaw) continue;
 
-      if (rutNorm && !upsertsByRutNorm.has(rutNorm)) {
-        upsertsByRutNorm.set(rutNorm, { rutRaw, nombreRaw: nombre });
+      const rutNorm = normalizeRut(rutRaw);
+      if (!rutNorm || !/^[0-9]+[0-9kK]?$/.test(rutNorm)) continue;
+
+      const cargoRaw = idx.cargo != null ? String(row[idx.cargo] || "").trim() : null;
+
+      if (!upsertsByRutNorm.has(rutNorm)) {
+        upsertsByRutNorm.set(rutNorm, { rutRaw, nombreRaw: nombre, cargoRaw });
       }
 
       const dias_trabajados =
@@ -650,8 +701,16 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
 
       const liquido =
         idx.liquido != null ? parseNumber(row[idx.liquido]) : null;
-      const empleador =
+
+      let empleador =
         idx.empleador != null ? parseNumber(row[idx.empleador]) : null;
+      if (empleador == null && idx.empleadorCols.length > 0) {
+        const sumEmp = idx.empleadorCols.reduce(
+          (acc, colIdx) => acc + (parseNumber(row[colIdx]) || 0),
+          0,
+        );
+        if (sumEmp > 0) empleador = sumEmp;
+      }
 
       let pagado = null;
       let feriado = null;
@@ -794,7 +853,12 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
         // A) si no existe empleado => crea placeholder (sin usuario aún)
         if (!existing) {
           const nuevo = await tx.empleado.create({
-            data: { rut: String(rutRaw), activo: true, usuario_id: null },
+            data: {
+              rut: String(rutRaw),
+              cargo: payload.cargoRaw || null,
+              activo: true,
+              usuario_id: null,
+            },
             select: { id: true, rut: true, usuario_id: true },
           });
           rutMap.set(rutNorm, {
@@ -804,9 +868,11 @@ export const uploadLibroRemuneraciones = async (request, reply) => {
           });
           stats.empleadosCreados++;
         } else {
+          const updateData = { rut: String(rutRaw), activo: true };
+          if (payload.cargoRaw) updateData.cargo = payload.cargoRaw;
           await tx.empleado.update({
             where: { id: existing.id },
-            data: { rut: String(rutRaw), activo: true },
+            data: updateData,
           });
           stats.empleadosActualizados++;
         }

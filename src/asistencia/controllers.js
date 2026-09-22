@@ -1,6 +1,7 @@
 // src/asistencia/controllers.js
 import { PrismaClient } from "@prisma/client";
 import { resolveScope } from "../lib/scope.js";
+import { isFeriadoChile } from "../utils/diasHabiles.js";
 
 const prisma = new PrismaClient();
 
@@ -76,19 +77,53 @@ export const getAsistenciaDia = async (req, reply) => {
       },
     });
 
+    // Fetch active vacation records covering this date
+    const vacationRecords = await prisma.empleadoVacacion.findMany({
+      where: {
+        estado: { not: "CANCELADO" },
+        desde: { lte: targetDate },
+        hasta: { gte: targetDate },
+        empleado: {
+          usuario: {
+            empresa_id: empresaId,
+          },
+        },
+      },
+    });
+
     const recordMap = new Map(attendanceRecords.map((r) => [r.empleado_id, r]));
+    const vacationMap = new Map(vacationRecords.map((v) => [v.empleado_id, v]));
+
+    const targetDayOfWeek = targetDate.getUTCDay();
+    const isTargetWeekend = targetDayOfWeek === 0 || targetDayOfWeek === 6;
+    const isTargetHoliday = isFeriadoChile(targetDate);
+    const isTargetHabil = !isTargetWeekend && !isTargetHoliday;
 
     const result = employees.map((emp) => {
       const record = recordMap.get(emp.id);
+      const vacacion = vacationMap.get(emp.id);
+
+      let estadoFinal = "AUSENTE";
+      let observacionFinal = "";
+
+      if (record) {
+        estadoFinal = record.estado;
+        observacionFinal = record.observacion || "";
+      } else if (vacacion && isTargetHabil) {
+        estadoFinal = "VACACIONES";
+        observacionFinal = vacacion.detalle || "Vacaciones programadas";
+      }
+
       return {
         id: record?.id || null,
         empleadoId: emp.id,
         nombre: emp.usuario?.nombre || "(Sin usuario)",
         correo: emp.usuario?.correo || "—",
         cargo: emp.cargo || "—",
-        estado: record?.estado || "AUSENTE", // AUSENTE is the default
-        observacion: record?.observacion || "",
+        estado: estadoFinal,
+        observacion: observacionFinal,
         fecha: fechaStr,
+        enVacaciones: Boolean(vacacion && isTargetHabil),
       };
     });
 
@@ -149,6 +184,8 @@ export const upsertAsistencia = async (req, reply) => {
       return reply.notFound("Empleado no encontrado o no pertenece a su empresa");
     }
 
+    const isVacaciones = estado.toUpperCase() === "VACACIONES";
+
     const record = await prisma.asistencia.upsert({
       where: {
         empleado_id_fecha: {
@@ -167,6 +204,51 @@ export const upsertAsistencia = async (req, reply) => {
         observacion: observacion || null,
       },
     });
+
+    // 🔄 Sincronización bidireccional con el saldo de vacaciones
+    if (isVacaciones) {
+      // Verificar si la fecha ya está cubierta por un registro formal de vacaciones
+      const targetDateStr = targetDate.toISOString().split("T")[0];
+      const existingVac = await prisma.empleadoVacacion.findFirst({
+        where: {
+          empleado_id: empleadoId,
+          estado: { not: "CANCELADO" },
+          desde: { lte: targetDate },
+          hasta: { gte: targetDate },
+        },
+      });
+
+      if (!existingVac) {
+        await prisma.empleadoVacacion.create({
+          data: {
+            empleado_id: empleadoId,
+            desde: targetDate,
+            hasta: targetDate,
+            dias: 1,
+            estado: "CONFIRMADO",
+            detalle: observacion ? `Asistencia: ${observacion}` : "Registrado desde Asistencia",
+          },
+        });
+      }
+    } else {
+      // Si se cambió de VACACIONES a otro estado (OFICINA, AUSENTE, etc.), revertir el descuento si provino de asistencia
+      const autoVac = await prisma.empleadoVacacion.findFirst({
+        where: {
+          empleado_id: empleadoId,
+          desde: targetDate,
+          hasta: targetDate,
+          detalle: {
+            contains: "Asistencia",
+          },
+        },
+      });
+
+      if (autoVac) {
+        await prisma.empleadoVacacion.delete({
+          where: { id: autoVac.id },
+        });
+      }
+    }
 
     return record;
   } catch (err) {
@@ -257,6 +339,20 @@ export const getAsistenciaMensual = async (req, reply) => {
       },
     });
 
+    // Fetch active vacation records overlapping with this month
+    const vacationRecords = await prisma.empleadoVacacion.findMany({
+      where: {
+        estado: { not: "CANCELADO" },
+        desde: { lt: endDate },
+        hasta: { gte: startDate },
+        empleado: {
+          usuario: {
+            empresa_id: empresaId,
+          },
+        },
+      },
+    });
+
     // Group attendance records by employee_id and date (YYYY-MM-DD)
     const recordMap = new Map();
     attendanceRecords.forEach((rec) => {
@@ -266,13 +362,56 @@ export const getAsistenciaMensual = async (req, reply) => {
       recordMap.get(rec.empleado_id).push(rec);
     });
 
+    // Group vacation records by employee_id
+    const vacationMap = new Map();
+    vacationRecords.forEach((vac) => {
+      if (!vacationMap.has(vac.empleado_id)) {
+        vacationMap.set(vac.empleado_id, []);
+      }
+      vacationMap.get(vac.empleado_id).push(vac);
+    });
+
     // Build the grid list
     const result = employees.map((emp) => {
       const records = recordMap.get(emp.id) || [];
+      const vacaciones = vacationMap.get(emp.id) || [];
       const asistenciasObj = {};
 
+      // 1. Poblado automático por vacaciones (solo días hábiles: lunes a viernes no festivos)
+      vacaciones.forEach((vac) => {
+        const vDesde = new Date(vac.desde);
+        const vHasta = new Date(vac.hasta);
+
+        const cur = new Date(Math.max(vDesde.getTime(), startDate.getTime()));
+        const fin = new Date(Math.min(vHasta.getTime(), endDate.getTime() - 1));
+
+        const curDate = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth(), cur.getUTCDate()));
+        const finDate = new Date(Date.UTC(fin.getUTCFullYear(), fin.getUTCMonth(), fin.getUTCDate()));
+
+        while (curDate <= finDate) {
+          const dayOfWeek = curDate.getUTCDay();
+          const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+          const isHoliday = isFeriadoChile(curDate);
+
+          if (!isWeekend && !isHoliday) {
+            const y = curDate.getUTCFullYear();
+            const mm = String(curDate.getUTCMonth() + 1).padStart(2, "0");
+            const dd = String(curDate.getUTCDate()).padStart(2, "0");
+            const dStr = `${y}-${mm}-${dd}`;
+
+            asistenciasObj[dStr] = {
+              id: null,
+              estado: "VACACIONES",
+              observacion: vac.detalle || "Vacaciones programadas",
+            };
+          }
+
+          curDate.setUTCDate(curDate.getUTCDate() + 1);
+        }
+      });
+
+      // 2. Sobreescritura / registros explícitos de asistencia diaria
       records.forEach((rec) => {
-        // Format date strictly as YYYY-MM-DD
         const dateStr = rec.fecha.toISOString().split("T")[0];
         asistenciasObj[dateStr] = {
           id: rec.id,

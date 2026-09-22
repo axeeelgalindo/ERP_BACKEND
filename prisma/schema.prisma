@@ -169,10 +169,28 @@ model Empleado {
   detalleVentas detalleVenta[]
   documentos    EmpleadoDocumento[]
   asistencias   Asistencia[]
+  vacaciones    EmpleadoVacacion[]
 
   @@index([afp_id])
   @@index([salud_id])
   @@index([jefe_id])
+}
+
+model EmpleadoVacacion {
+  id          String   @id @default(cuid())
+  empleado_id String
+  empleado    Empleado @relation(fields: [empleado_id], references: [id], onDelete: Cascade)
+
+  desde       DateTime
+  hasta       DateTime
+  dias        Float
+  estado      String   @default("CONFIRMADO") // CONFIRMADO | PENDIENTE | AJUSTE
+  detalle     String?  @db.Text
+
+  creado_en      DateTime @default(now())
+  actualizado_en DateTime @updatedAt
+
+  @@index([empleado_id])
 }
 
 model EmpleadoDocumento {
