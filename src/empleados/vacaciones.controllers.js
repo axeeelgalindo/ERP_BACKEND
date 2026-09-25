@@ -162,11 +162,22 @@ export async function createEmpleadoVacacion(request, reply) {
 
   const empleado = await prisma.empleado.findUnique({
     where: { id },
+    include: {
+      usuario: { select: { id: true, nombre: true, correo: true } },
+      vacaciones: {
+        where: { estado: { not: "CANCELADO" } },
+      },
+    },
   });
 
   if (!empleado) {
     return reply.status(404).send({ error: "Empleado no encontrado" });
   }
+
+  const dev = calcularDevengoVacaciones(empleado.fecha_ingreso, empleado.sede);
+  const diasTomadosAntes = empleado.vacaciones.reduce((acc, v) => acc + (Number(v.dias) || 0), 0);
+  const saldoAnterior = Math.round((dev.dias_acumulados - diasTomadosAntes) * 100) / 100;
+  const saldoPendiente = Math.round((saldoAnterior - numDias) * 100) / 100;
 
   const nueva = await prisma.empleadoVacacion.create({
     data: {
@@ -179,7 +190,19 @@ export async function createEmpleadoVacacion(request, reply) {
     },
   });
 
-  return reply.status(201).send(nueva);
+  return reply.status(201).send({
+    ...nueva,
+    saldo_anterior: saldoAnterior,
+    saldo_pendiente: saldoPendiente,
+    empleado: {
+      id: empleado.id,
+      nombre: empleado.usuario?.nombre || "Sin Nombre",
+      rut: empleado.rut,
+      cargo: empleado.cargo,
+      sede: empleado.sede || "PMC",
+      fecha_ingreso: empleado.fecha_ingreso,
+    },
+  });
 }
 
 /**
@@ -251,7 +274,7 @@ export async function deleteEmpleadoVacacion(request, reply) {
  * Reporte general de vacaciones de toda la empresa
  */
 export async function listGeneralVacaciones(request, reply) {
-  const { ano, mes, sede, empleado_id, q } = request.query || {};
+  const { ano, mes, desde, hasta, sede, empleado_id, q, estado } = request.query || {};
 
   const whereEmpleado = {
     eliminado: false,
@@ -287,7 +310,7 @@ export async function listGeneralVacaciones(request, reply) {
     },
   });
 
-  // Consolidar saldos y filtrar vacaciones si se pide por año/mes
+  // Consolidar saldos y filtrar vacaciones si se pide por año/mes/rango
   const resumenSaldos = [];
   const todasLasVacaciones = [];
 
@@ -314,12 +337,40 @@ export async function listGeneralVacaciones(request, reply) {
     });
 
     for (const vac of emp.vacaciones) {
+      if (estado && vac.estado !== estado) continue;
+
       const dDesde = new Date(vac.desde);
+      const dHasta = new Date(vac.hasta);
       const vacAno = dDesde.getFullYear();
       const vacMes = dDesde.getMonth() + 1; // 1-12
 
-      if (ano && Number(ano) !== vacAno) continue;
-      if (mes && Number(mes) !== vacMes) continue;
+      // 1. Filtro por rango personalizado desde / hasta
+      if (desde) {
+        const fDesde = new Date(desde + (desde.includes("T") ? "" : "T00:00:00.000Z"));
+        if (dHasta < fDesde) continue;
+      }
+      if (hasta) {
+        const fHasta = new Date(hasta + (hasta.includes("T") ? "" : "T23:59:59.999Z"));
+        if (dDesde > fHasta) continue;
+      }
+
+      // 2. Si no hay rango explícito, verificar por año / mes
+      if (!desde && !hasta) {
+        if (ano && mes) {
+          const anoNum = Number(ano);
+          const mesNum = Number(mes);
+          const startOfMonth = new Date(Date.UTC(anoNum, mesNum - 1, 1, 0, 0, 0));
+          const endOfMonth = new Date(Date.UTC(anoNum, mesNum, 0, 23, 59, 59, 999));
+          if (dHasta < startOfMonth || dDesde > endOfMonth) continue;
+        } else if (ano) {
+          const anoNum = Number(ano);
+          const startOfYear = new Date(Date.UTC(anoNum, 0, 1, 0, 0, 0));
+          const endOfYear = new Date(Date.UTC(anoNum, 11, 31, 23, 59, 59, 999));
+          if (dHasta < startOfYear || dDesde > endOfYear) continue;
+        } else if (mes) {
+          if (vacMes !== Number(mes)) continue;
+        }
+      }
 
       todasLasVacaciones.push({
         id: vac.id,
@@ -328,6 +379,7 @@ export async function listGeneralVacaciones(request, reply) {
         rut: emp.rut || "-",
         cargo: emp.cargo || "-",
         sede: emp.sede || "PMC",
+        fecha_ingreso: emp.fecha_ingreso,
         desde: vac.desde,
         hasta: vac.hasta,
         dias: vac.dias,
@@ -335,6 +387,9 @@ export async function listGeneralVacaciones(request, reply) {
         detalle: vac.detalle,
         ano: vacAno,
         mes: vacMes,
+        saldo_disponible: saldo,
+        dias_acumulados: dev.dias_acumulados,
+        dias_tomados: Math.round(tomados * 100) / 100,
         creado_en: vac.creado_en,
       });
     }
