@@ -148,6 +148,10 @@ model Empleado {
   // Sede (PMC: Puerto Montt, PUQ: Punta Arenas)
   sede String? @default("PMC")
 
+  // Saldo base de vacaciones inicial / sincronizado desde planilla oficial
+  saldo_vacaciones_base Float?    @default(0)
+  fecha_base_vacaciones DateTime?
+
   Rendicion Rendicion[]
   proyectos ProyectoMiembro[]
 

@@ -10,7 +10,7 @@ const prisma = new PrismaClient();
  * @param {Date} [fechaCorte=new Date()]
  */
 export function calcularDevengoVacaciones(fechaIngreso, sede, fechaCorte = new Date()) {
-  const tasaMensual = String(sede || "PMC").toUpperCase() === "PUQ" ? 1.75 : 1.25;
+  const tasaMensual = String(sede || "PMC").toUpperCase() === "PUQ" ? 1.67 : 1.25;
 
   if (!fechaIngreso) {
     return {
@@ -60,10 +60,86 @@ export function calcularDevengoVacaciones(fechaIngreso, sede, fechaCorte = new D
 }
 
 /**
+ * Calcula el saldo de vacaciones considerando el saldo base sincronizado si existe,
+ * devengos posteriores por sede (PMC 1.25 / PUQ 1.67) y vacaciones tomadas posteriores a la fecha base.
+ */
+export function calcularSaldoEmpleado(empleado, fechaCorteCalc = new Date()) {
+  const tasaMensual = String(empleado?.sede || "PMC").toUpperCase() === "PUQ" ? 1.67 : 1.25;
+
+  if (
+    empleado?.saldo_vacaciones_base !== null &&
+    empleado?.saldo_vacaciones_base !== undefined &&
+    empleado?.fecha_base_vacaciones
+  ) {
+    const fechaBase = new Date(empleado.fecha_base_vacaciones);
+    const baseDias = Number(empleado.saldo_vacaciones_base) || 0;
+
+    // Devengo adicional posterior a la fecha base (meses completos cerrados transcurridos)
+    let mesesPostBase = 0;
+    if (fechaCorteCalc > fechaBase) {
+      let diffMeses = (fechaCorteCalc.getFullYear() - fechaBase.getFullYear()) * 12 + (fechaCorteCalc.getMonth() - fechaBase.getMonth());
+      const ultimoDiaMesCorte = new Date(fechaCorteCalc.getFullYear(), fechaCorteCalc.getMonth() + 1, 0).getDate();
+      if (fechaCorteCalc.getDate() < ultimoDiaMesCorte) {
+        diffMeses -= 1;
+      }
+      mesesPostBase = Math.max(0, diffMeses);
+    }
+    const devengoPostBase = Math.round(mesesPostBase * tasaMensual * 100) / 100;
+
+    const diasAcumulados = Math.round((baseDias + devengoPostBase) * 100) / 100;
+
+    // Vacaciones tomadas POSTERIORES a la fecha base (excluyendo canceladas)
+    const vacacionesTomadas = (empleado.vacaciones || []).filter((v) => {
+      if (v.estado === "CANCELADO") return false;
+      const dDesde = new Date(v.desde);
+      return dDesde > fechaBase && dDesde <= fechaCorteCalc;
+    });
+
+    const diasTomados = Math.round(
+      vacacionesTomadas.reduce((acc, v) => acc + (Number(v.dias) || 0), 0) * 100
+    ) / 100;
+
+    const saldoDisponible = Math.round((diasAcumulados - diasTomados) * 100) / 100;
+
+    const devAntiguedad = empleado.fecha_ingreso
+      ? calcularDevengoVacaciones(empleado.fecha_ingreso, empleado.sede, fechaCorteCalc)
+      : { meses_trabajados: 0 };
+
+    return {
+      tasa_mensual: tasaMensual,
+      meses_trabajados: devAntiguedad.meses_trabajados,
+      dias_acumulados: diasAcumulados,
+      dias_tomados: diasTomados,
+      saldo_disponible: saldoDisponible,
+      saldo_vacaciones_base: baseDias,
+      fecha_base_vacaciones: empleado.fecha_base_vacaciones,
+    };
+  }
+
+  // Fallback si no tiene saldo base configurado
+  const dev = calcularDevengoVacaciones(empleado?.fecha_ingreso, empleado?.sede, fechaCorteCalc);
+  const tomados = (empleado?.vacaciones || [])
+    .filter((v) => v.estado !== "CANCELADO" && new Date(v.desde) <= fechaCorteCalc)
+    .reduce((acc, v) => acc + (Number(v.dias) || 0), 0);
+  const saldo = Math.round((dev.dias_acumulados - tomados) * 100) / 100;
+
+  return {
+    tasa_mensual: dev.tasa_mensual,
+    meses_trabajados: dev.meses_trabajados,
+    dias_acumulados: dev.dias_acumulados,
+    dias_tomados: Math.round(tomados * 100) / 100,
+    saldo_disponible: saldo,
+    saldo_vacaciones_base: null,
+    fecha_base_vacaciones: null,
+  };
+}
+
+/**
  * Obtiene el resumen de vacaciones y el historial de un empleado
  */
 export async function getEmpleadoVacaciones(request, reply) {
   const { id } = request.params;
+  const { ano, mes, hasta } = request.query || {};
 
   const empleado = await prisma.empleado.findUnique({
     where: { id },
@@ -79,12 +155,18 @@ export async function getEmpleadoVacaciones(request, reply) {
     return reply.status(404).send({ error: "Empleado no encontrado" });
   }
 
-  // 🔄 Auto-sync: Registrar en EmpleadoVacacion los días marcados como VACACIONES desde Asistencia que no estén cubiertos
+  // 🔄 Auto-sync: Registrar en EmpleadoVacacion días de Asistencia con VACACIONES
+  // Solo sincronizar asistencias POSTERIORES a fecha_base_vacaciones (para no duplicar días históricos ya consolidados en el saldo base)
+  const whereAsis = {
+    empleado_id: id,
+    estado: "VACACIONES",
+  };
+  if (empleado.fecha_base_vacaciones) {
+    whereAsis.fecha = { gt: empleado.fecha_base_vacaciones };
+  }
+
   const asistenciasVacaciones = await prisma.asistencia.findMany({
-    where: {
-      empleado_id: id,
-      estado: "VACACIONES",
-    },
+    where: whereAsis,
   });
 
   for (const asis of asistenciasVacaciones) {
@@ -114,14 +196,14 @@ export async function getEmpleadoVacaciones(request, reply) {
   // Mantener orden cronológico descendente
   empleado.vacaciones.sort((a, b) => new Date(b.desde) - new Date(a.desde));
 
-  const devengo = calcularDevengoVacaciones(empleado.fecha_ingreso, empleado.sede);
-  
-  // Sumar días de vacaciones confirmadas
-  const diasTomados = empleado.vacaciones
-    .filter((v) => v.estado !== "CANCELADO")
-    .reduce((acc, v) => acc + (Number(v.dias) || 0), 0);
+  let fechaCorteCalc = new Date();
+  if (hasta) {
+    fechaCorteCalc = new Date(hasta + (hasta.includes("T") ? "" : "T23:59:59.999Z"));
+  } else if (ano && mes) {
+    fechaCorteCalc = new Date(Date.UTC(Number(ano), Number(mes), 0, 23, 59, 59, 999));
+  }
 
-  const saldoDisponible = Math.round((devengo.dias_acumulados - diasTomados) * 100) / 100;
+  const calculo = calcularSaldoEmpleado(empleado, fechaCorteCalc);
 
   return reply.send({
     empleado_id: empleado.id,
@@ -130,11 +212,13 @@ export async function getEmpleadoVacaciones(request, reply) {
     cargo: empleado.cargo,
     sede: empleado.sede || "PMC",
     fecha_ingreso: empleado.fecha_ingreso,
-    tasa_mensual: devengo.tasa_mensual,
-    meses_trabajados: devengo.meses_trabajados,
-    dias_acumulados: devengo.dias_acumulados,
-    dias_tomados: Math.round(diasTomados * 100) / 100,
-    saldo_disponible: saldoDisponible,
+    tasa_mensual: calculo.tasa_mensual,
+    meses_trabajados: calculo.meses_trabajados,
+    dias_acumulados: calculo.dias_acumulados,
+    dias_tomados: calculo.dias_tomados,
+    saldo_disponible: calculo.saldo_disponible,
+    saldo_vacaciones_base: calculo.saldo_vacaciones_base,
+    fecha_base_vacaciones: calculo.fecha_base_vacaciones,
     vacaciones: empleado.vacaciones,
   });
 }
@@ -311,15 +395,25 @@ export async function listGeneralVacaciones(request, reply) {
   });
 
   // Consolidar saldos y filtrar vacaciones si se pide por año/mes/rango
+  let fechaCorteCalc = new Date();
+  if (hasta) {
+    fechaCorteCalc = new Date(hasta + (hasta.includes("T") ? "" : "T23:59:59.999Z"));
+  } else if (ano && mes) {
+    fechaCorteCalc = new Date(Date.UTC(Number(ano), Number(mes), 0, 23, 59, 59, 999));
+  } else if (ano) {
+    const currentYear = new Date().getFullYear();
+    if (Number(ano) === currentYear) {
+      fechaCorteCalc = new Date();
+    } else {
+      fechaCorteCalc = new Date(Date.UTC(Number(ano), 11, 31, 23, 59, 59, 999));
+    }
+  }
+
   const resumenSaldos = [];
   const todasLasVacaciones = [];
 
   for (const emp of empleados) {
-    const dev = calcularDevengoVacaciones(emp.fecha_ingreso, emp.sede);
-    const tomados = emp.vacaciones
-      .filter((v) => v.estado !== "CANCELADO")
-      .reduce((acc, v) => acc + (Number(v.dias) || 0), 0);
-    const saldo = Math.round((dev.dias_acumulados - tomados) * 100) / 100;
+    const calc = calcularSaldoEmpleado(emp, fechaCorteCalc);
 
     resumenSaldos.push({
       empleado_id: emp.id,
@@ -328,11 +422,13 @@ export async function listGeneralVacaciones(request, reply) {
       cargo: emp.cargo || "-",
       sede: emp.sede || "PMC",
       fecha_ingreso: emp.fecha_ingreso,
-      tasa_mensual: dev.tasa_mensual,
-      meses_trabajados: dev.meses_trabajados,
-      dias_acumulados: dev.dias_acumulados,
-      dias_tomados: Math.round(tomados * 100) / 100,
-      saldo_disponible: saldo,
+      tasa_mensual: calc.tasa_mensual,
+      meses_trabajados: calc.meses_trabajados,
+      dias_acumulados: calc.dias_acumulados,
+      dias_tomados: calc.dias_tomados,
+      saldo_disponible: calc.saldo_disponible,
+      saldo_vacaciones_base: calc.saldo_vacaciones_base,
+      fecha_base_vacaciones: calc.fecha_base_vacaciones,
       total_periodos: emp.vacaciones.length,
     });
 
