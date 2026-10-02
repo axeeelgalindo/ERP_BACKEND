@@ -258,10 +258,8 @@ export async function createEmpleadoVacacion(request, reply) {
     return reply.status(404).send({ error: "Empleado no encontrado" });
   }
 
-  const dev = calcularDevengoVacaciones(empleado.fecha_ingreso, empleado.sede);
-  const diasTomadosAntes = empleado.vacaciones.reduce((acc, v) => acc + (Number(v.dias) || 0), 0);
-  const saldoAnterior = Math.round((dev.dias_acumulados - diasTomadosAntes) * 100) / 100;
-  const saldoPendiente = Math.round((saldoAnterior - numDias) * 100) / 100;
+  const saldoAnterior = calcularSaldoEmpleado(empleado).saldo_disponible;
+  const saldoPendiente = Math.round((saldoAnterior - (estado === "CANCELADO" ? 0 : numDias)) * 100) / 100;
 
   const nueva = await prisma.empleadoVacacion.create({
     data: {
@@ -483,9 +481,9 @@ export async function listGeneralVacaciones(request, reply) {
         detalle: vac.detalle,
         ano: vacAno,
         mes: vacMes,
-        saldo_disponible: saldo,
-        dias_acumulados: dev.dias_acumulados,
-        dias_tomados: Math.round(tomados * 100) / 100,
+        saldo_disponible: calc.saldo_disponible,
+        dias_acumulados: calc.dias_acumulados,
+        dias_tomados: calc.dias_tomados,
         creado_en: vac.creado_en,
       });
     }
